@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Heiss</title>
+  <style>
+    :root { --bg:#0c0a09; --fg:#fafaf9; --muted:#a8a29e; --accent:#f97316; --card:#1c1917; --border:#292524; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding:1rem 1.25rem; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
+    .logo { font-weight:700; } .logo span { color:var(--accent); }
+    main { padding:1.25rem; max-width:880px; margin:0 auto; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:1rem; margin-bottom:1rem; }
+    h1 { font-size:1.35rem; margin:0 0 .5rem; }
+    h2 { font-size:1rem; margin:0 0 .75rem; }
+    button { background:var(--accent); color:#111; border:0; border-radius:999px; padding:.5rem 1rem; font-weight:600; cursor:pointer; margin:.25rem .25rem .25rem 0; }
+    button.ghost { background:transparent; color:var(--fg); border:1px solid var(--border); }
+    .step { display:flex; gap:.75rem; padding:.5rem 0; border-bottom:1px solid var(--border); font-size:.9rem; }
+    .dot { width:10px; height:10px; border-radius:50%; margin-top:.35rem; flex-shrink:0; }
+    .dot.ok { background:#4ade80; } .dot.no { background:#f87171; }
+    pre { background:#0c0a09; border:1px solid var(--border); border-radius:8px; padding:.75rem; font-size:.75rem; overflow:auto; max-height:220px; }
+    .muted { color:var(--muted); font-size:.85rem; }
+    input { width:100%; background:#0c0a09; border:1px solid var(--border); color:var(--fg); border-radius:8px; padding:.5rem; margin:.25rem 0 .5rem; }
+    label { font-size:.8rem; color:var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">Heiss<span>.</span></div>
+    <span class="muted">Real iPhones only · no simulator</span>
+  </header>
+  <main>
+    <div class="card">
+      <h1>Setup</h1>
+      <p class="muted">USB detect → sign runner → install → add accounts → start warmups.</p>
+      <button id="btnStatus">Refresh status</button>
+      <button id="btnDevices">List USB devices</button>
+      <button id="btnSync">Sync devices</button>
+      <button id="btnSetupAll">Setup device + install runner</button>
+      <button class="ghost" id="btnSigning">Show signing</button>
+      <div id="steps"></div>
+    </div>
+    <div class="card">
+      <h2>After setup</h2>
+      <label>Device ID (from sync)</label>
+      <input id="deviceId" placeholder="device uuid" />
+      <label>Handle</label>
+      <input id="handle" placeholder="@you" />
+      <label>Platform</label>
+      <input id="platform" value="tiktok" />
+      <button id="btnAddAccount">Add account</button>
+      <button id="btnWarmups">Start warmups / run farm</button>
+      <button class="ghost" id="btnFarmStatus">Farm status</button>
+    </div>
+    <div class="card">
+      <h2>Log</h2>
+      <pre id="log">Ready.</pre>
+    </div>
+  </main>
+  <script>
+    const log = (x) => {
+      document.getElementById("log").textContent =
+        typeof x === "string" ? x : JSON.stringify(x, null, 2);
+    };
+    const farm = (args) => window.heiss.farm(args).then(log).catch((e) => log(String(e)));
+
+    document.getElementById("btnStatus").onclick = async () => {
+      const s = await window.heiss.farm(["setup", "status"]);
+      log(s);
+      const el = document.getElementById("steps");
+      el.innerHTML = (s.steps || []).map((st) =>
+        `<div class="step"><div class="dot ${st.done ? "ok" : "no"}"></div>
+         <div><strong>${st.title}</strong><div class="muted">${st.detail}</div>
+         ${st.hint ? `<div class="muted">${st.hint}</div>` : ""}</div></div>`
+      ).join("");
+    };
+    document.getElementById("btnDevices").onclick = () => farm(["devices", "list"]);
+    document.getElementById("btnSync").onclick = () => farm(["devices", "sync"]);
+    document.getElementById("btnSetupAll").onclick = () => farm(["setup", "all"]);
+    document.getElementById("btnSigning").onclick = () => farm(["signing", "show"]);
+    document.getElementById("btnAddAccount").onclick = () => {
+      const d = document.getElementById("deviceId").value.trim();
+      const h = document.getElementById("handle").value.trim();
+      const p = document.getElementById("platform").value.trim();
+      farm(["add-account", d, p, h]);
+    };
+    document.getElementById("btnWarmups").onclick = () => farm(["start-warmups", "--time", "09:00"]);
+    document.getElementById("btnFarmStatus").onclick = () => farm(["status"]);
+    document.getElementById("btnStatus").click();
+  </script>
+</body>
+</html>

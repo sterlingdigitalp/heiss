@@ -1,0 +1,21 @@
+{
+  "name": "@heiss/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Heiss.app — Mac desktop shell for farm setup and control",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "build": "node scripts/build-app.cjs",
+    "pack": "node scripts/build-app.cjs",
+    "typecheck": "node -e \"process.exit(0)\""
+  },
+  "dependencies": {
+    "@heiss/core": "*",
+    "@heiss/device": "*",
+    "@heiss/farm": "*"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}

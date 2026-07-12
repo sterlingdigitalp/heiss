@@ -1,0 +1,17 @@
+node_modules/
+dist/
+**/dist/
+.next/
+.turbo/
+coverage/
+*.log
+.DS_Store
+data/
+*.db
+.env
+.env.local
+.heiss/
+apps/web/.next/
+apps/farm/data/
+scratch/
+*.tsbuildinfo
