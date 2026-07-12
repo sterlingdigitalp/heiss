@@ -1,246 +1,60 @@
-/** Authenticated Cloud Drop + farm overview UI. */
+/** Authenticated Cloud Drop + farm control dashboard. */
 export function appHtml(): string {
-  return `<!DOCTYPE html>
+  return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Heiss App · Cloud Drop</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Heiss · Your iPhone farm</title>
   <style>
-    :root {
-      --bg: #0c0a09; --fg: #fafaf9; --muted: #a8a29e; --accent: #f97316;
-      --card: #1c1917; --border: #292524;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--fg); }
-    header { display:flex; justify-content:space-between; align-items:center; padding:1rem 1.5rem; border-bottom:1px solid var(--border); }
-    .logo { font-weight:700; color:var(--fg); text-decoration:none; }
-    .logo span { color: var(--accent); }
-    main { max-width: 960px; margin: 0 auto; padding: 1.5rem; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 1rem; padding: 1.25rem; margin-bottom: 1rem; }
-    h1 { font-size: 1.5rem; margin: 0 0 0.5rem; }
-    h2 { font-size: 1.1rem; margin: 0 0 0.75rem; }
-    label { display:block; font-size: 0.85rem; color: var(--muted); margin: 0.5rem 0 0.25rem; }
-    input, select, textarea {
-      width: 100%; background: #0c0a09; border: 1px solid var(--border); color: var(--fg);
-      border-radius: 0.5rem; padding: 0.6rem 0.75rem; font: inherit;
-    }
-    button, .btn {
-      background: var(--accent); color: #111; font-weight: 600; border: none; border-radius: 999px;
-      padding: 0.55rem 1rem; cursor: pointer; font: inherit; margin-top: 0.75rem;
-    }
-    button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--border); }
-    .row { display:grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
-    @media (max-width:640px){ .row { grid-template-columns: 1fr; } }
-    .muted { color: var(--muted); font-size: 0.9rem; }
-    .chip {
-      display:inline-block; border:1px solid var(--border); border-radius:999px; padding:0.2rem 0.6rem;
-      margin: 0.2rem; font-size: 0.8rem; cursor: pointer; user-select: none;
-    }
-    .chip.on { border-color: var(--accent); background: #431407; color: #fdba74; }
-    pre {
-      background: #0c0a09; border: 1px solid var(--border); border-radius: 0.5rem;
-      padding: 0.75rem; overflow: auto; font-size: 0.8rem; max-height: 280px;
-    }
-    .err { color: #f87171; }
-    .ok { color: #4ade80; }
-    .hidden { display: none; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-    th, td { text-align: left; padding: 0.4rem; border-bottom: 1px solid var(--border); }
+    :root{--ink:#171612;--paper:#f6f5ef;--white:#fff;--muted:#706f68;--line:#deddd4;--lime:#cfff39;--lime2:#e8ff9f;--red:#d94b42;--green:#18864b;--shadow:0 18px 50px rgba(24,24,18,.09)}
+    *{box-sizing:border-box} body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:var(--ink);background:var(--paper)}
+    button,input,select,textarea{font:inherit} button{cursor:pointer}.hidden{display:none!important}.muted{color:var(--muted)}
+    .auth{min-height:100vh;display:grid;grid-template-columns:1.03fr .97fr;background:#fff}.auth-story{padding:7vh 8vw;background:radial-gradient(circle at 20% 20%,#f4ffd2,transparent 42%),#f8f7f1;border-right:1px solid var(--line)}
+    .kicker{font:600 .72rem ui-monospace,monospace;letter-spacing:.18em;text-transform:uppercase;color:#656450}.story-title{font-family:Georgia,serif;font-weight:400;font-size:clamp(3rem,5vw,5.6rem);line-height:.98;letter-spacing:-.055em;max-width:650px;margin:1.6rem 0 2.5rem}.auth-stats{display:flex;gap:2.5rem;margin:1.5rem 0 2.6rem}.auth-stat strong{font-size:2rem}.auth-stat span{display:block;color:var(--muted);font-size:.82rem}.story-list{display:grid;gap:1rem;max-width:560px}.story-item{display:grid;grid-template-columns:48px 1fr;gap:1rem;align-items:center}.story-icon{width:48px;height:48px;border-radius:11px;background:var(--lime);display:grid;place-items:center;font-weight:800}.story-item b{display:block}.story-item span{color:var(--muted);font-size:.9rem}
+    .auth-form-wrap{display:grid;place-items:center;padding:3rem}.auth-form{width:min(440px,100%)}.brand{display:flex;align-items:center;gap:.55rem;font-weight:800;letter-spacing:-.03em}.brand-mark{display:grid;place-items:center;width:30px;height:30px;border-radius:7px;background:var(--lime);font-weight:900}.auth-form h1{font-size:2rem;letter-spacing:-.045em;margin:2.3rem 0 .5rem}.auth-form>p{margin:0 0 2rem}.field{margin:.9rem 0}.field label{display:block;font-weight:650;font-size:.86rem;margin-bottom:.4rem}.control{width:100%;border:1px solid var(--line);background:white;border-radius:10px;padding:.82rem .9rem;color:var(--ink);outline:none}.control:focus{border-color:#8b8b79;box-shadow:0 0 0 3px rgba(207,255,57,.35)}textarea.control{resize:vertical}.btn{display:inline-block;text-decoration:none;border:1px solid var(--ink);background:var(--ink);color:#fff;border-radius:10px;padding:.75rem 1rem;font-weight:750}.btn:hover{transform:translateY(-1px)}.btn.lime{background:var(--lime);color:var(--ink);border-color:var(--lime)}.btn.ghost{background:#fff;color:var(--ink);border-color:var(--line)}.btn.small{padding:.5rem .7rem;font-size:.82rem}.auth-actions{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;margin-top:1rem}.message{min-height:1.3rem;font-size:.88rem;margin-top:.8rem}.err{color:var(--red)}.ok{color:var(--green)}
+    .shell{min-height:100vh;display:grid;grid-template-columns:232px 1fr}.sidebar{background:#151510;color:#fff;padding:1.2rem;display:flex;flex-direction:column;position:sticky;top:0;height:100vh}.sidebar .brand{padding:.4rem .35rem 1.3rem}.nav{display:grid;gap:.3rem}.nav button{display:flex;gap:.7rem;align-items:center;width:100%;border:0;background:transparent;color:#aaa99f;padding:.72rem .8rem;border-radius:9px;text-align:left;font-weight:600}.nav button:hover,.nav button.on{background:#2b2a23;color:#fff}.nav button.on:before{content:"";width:7px;height:7px;border-radius:50%;background:var(--lime)}.side-bottom{margin-top:auto;border-top:1px solid #333229;padding-top:1rem}.side-bottom b,.side-bottom span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.side-bottom span{color:#9e9d93;font-size:.78rem;margin-top:.2rem}
+    .main{min-width:0}.topbar{height:68px;padding:0 2rem;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);background:rgba(246,245,239,.9);backdrop-filter:blur(15px);position:sticky;top:0;z-index:2}.topbar h1{font-size:1.05rem;margin:0}.sync{display:flex;align-items:center;gap:.5rem;color:var(--muted);font-size:.82rem}.pulse{width:8px;height:8px;border-radius:50%;background:#4cc47c;box-shadow:0 0 0 4px #d8f2e3}.page{padding:2rem;max-width:1300px;margin:auto}.hero-row{display:flex;justify-content:space-between;align-items:end;gap:1rem;margin-bottom:1.6rem}.hero-row h2{font:400 clamp(2rem,4vw,3.5rem) Georgia,serif;letter-spacing:-.045em;margin:0}.hero-row p{margin:.35rem 0 0}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1rem}.card{background:var(--white);border:1px solid var(--line);border-radius:14px;padding:1.15rem;box-shadow:0 1px 0 rgba(0,0,0,.02)}.stat-card span{font-size:.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}.stat-card strong{display:block;font-size:1.9rem;margin-top:.45rem;letter-spacing:-.05em}.grid2{display:grid;grid-template-columns:1.05fr .95fr;gap:1rem}.card h3{margin:0 0 .85rem;font-size:1rem}.dropzone{border:1.5px dashed #c8c7bb;border-radius:12px;background:#fafaf6;padding:1.35rem;text-align:center;margin:.8rem 0}.dropzone input{width:100%;max-width:330px}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}.chips{display:flex;flex-wrap:wrap;gap:.45rem;margin:.55rem 0}.chip{border:1px solid var(--line);background:#fff;border-radius:99px;padding:.42rem .68rem;font-size:.8rem}.chip.on{background:var(--lime2);border-color:#a4c93b}.list{display:grid;gap:.55rem}.row-item{display:grid;grid-template-columns:auto 1fr auto;gap:.75rem;align-items:center;padding:.75rem;border:1px solid var(--line);border-radius:10px}.platform{width:34px;height:34px;border-radius:9px;background:#eeeecf;display:grid;place-items:center;font-weight:850;text-transform:uppercase;font-size:.68rem}.row-item b{display:block;font-size:.9rem}.row-item small{color:var(--muted)}.badge{padding:.27rem .5rem;border-radius:99px;background:#efeee8;font-size:.72rem;font-weight:700;text-transform:capitalize}.badge.posting,.badge.posted,.badge.completed{background:#dcf8e8;color:#147442}.badge.fresh,.badge.failed{background:#ffe8e5;color:#a9372f}.badge.matured,.badge.kept_warm{background:#ebffd0;color:#547512}.progress{height:5px;background:#ebeae4;border-radius:9px;margin-top:.4rem;overflow:hidden}.progress i{display:block;height:100%;background:var(--lime);border-radius:9px}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:.84rem}th,td{text-align:left;padding:.7rem .55rem;border-bottom:1px solid #ecebe5}th{font-size:.7rem;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)}.license{background:#181813;color:white;border-color:#181813}.license .key{font:600 .95rem ui-monospace,monospace;background:#292921;border:1px solid #3b3a31;padding:.8rem;border-radius:9px;word-break:break-all}.license .muted{color:#aaa99e}.empty{text-align:center;color:var(--muted);padding:2rem}.section{display:none}.section.on{display:block}.toolbar{display:flex;gap:.5rem;align-items:center}.account-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1rem}.device-card{display:flex;justify-content:space-between;gap:1rem}.device-led{width:11px;height:11px;border-radius:50%;background:#aaa;margin-top:.3rem}.device-led.on{background:#43c777}.activity-line{border-left:2px solid #d8d7cf;padding:.1rem 0 .9rem 1rem;margin-left:.3rem}.activity-line b{font-size:.84rem}.activity-line span{display:block;font-size:.76rem;color:var(--muted);margin-top:.2rem}
+    @media(max-width:850px){.auth{grid-template-columns:1fr}.auth-story{display:none}.shell{grid-template-columns:1fr}.sidebar{height:auto;position:fixed;bottom:0;top:auto;left:0;right:0;z-index:5;padding:.45rem}.sidebar>.brand,.side-bottom{display:none}.nav{display:flex;justify-content:space-around}.nav button{width:auto;font-size:0;padding:.7rem}.nav button:after{font-size:1.1rem}.nav button[data-page=overview]:after{content:"⌂"}.nav button[data-page=drop]:after{content:"↑"}.nav button[data-page=accounts]:after{content:"@"}.nav button[data-page=queue]:after{content:"≡"}.nav button[data-page=activity]:after{content:"◷"}.page{padding:1.1rem 1rem 5rem}.topbar{padding:0 1rem}.stats{grid-template-columns:1fr 1fr}.grid2{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}.hero-row{align-items:start;flex-direction:column}}
   </style>
 </head>
 <body>
-  <header>
-    <a class="logo" href="/">Heiss<span>.</span></a>
-    <div>
-      <a href="/" class="muted" style="margin-right:1rem">Marketing</a>
-      <span id="userLabel" class="muted">Signed out</span>
-      <button class="secondary" id="logoutBtn" type="button" style="margin-left:0.5rem">Log out</button>
-    </div>
-  </header>
-  <main>
-    <div id="authPanel" class="card">
-      <h1>Sign in</h1>
-      <p class="muted">Cloud Drop requires an account. Free — no card.</p>
-      <div class="row">
-        <div>
-          <label>Email</label>
-          <input id="email" type="email" placeholder="you@company.com" />
-        </div>
-        <div>
-          <label>Password</label>
-          <input id="password" type="password" placeholder="••••••••" />
-        </div>
-      </div>
-      <button type="button" id="signupBtn">Sign up</button>
-      <button type="button" class="secondary" id="loginBtn">Log in</button>
-      <p id="authMsg" class="muted"></p>
-    </div>
-
-    <div id="appPanel" class="hidden">
-      <div class="card">
-        <h1>Cloud Drop</h1>
-        <p class="muted">Drop a clip. Your local farm runner claims it and posts on the next open slot.</p>
-        <label>Caption</label>
-        <textarea id="caption" rows="2" placeholder="Ship in public…"></textarea>
-        <div class="row">
-          <div>
-            <label>Media ref (URL or path)</label>
-            <input id="mediaRef" value="https://cdn.example/clip.mp4" />
-          </div>
-          <div>
-            <label>Music (optional)</label>
-            <input id="music" placeholder="track name" />
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <label>Kind</label>
-            <select id="kind">
-              <option value="video">Video</option>
-              <option value="carousel">Carousel</option>
-            </select>
-          </div>
-        </div>
-        <label>Target accounts</label>
-        <div id="accountChips"></div>
-        <button type="button" id="dropBtn">Drop to queue</button>
-        <p id="dropMsg"></p>
-        <pre id="dropResult" class="hidden"></pre>
-      </div>
-
-      <div class="card">
-        <h2>Farm overview</h2>
-        <button type="button" class="secondary" id="refreshBtn">Refresh</button>
-        <div id="overview"></div>
-      </div>
-    </div>
+  <main id="auth" class="auth">
+    <section class="auth-story"><div class="kicker">— For the one-person company</div><div class="story-title">Your iPhones post and warm on autopilot.</div><div class="auth-stats"><div class="auth-stat"><strong>Real taps</strong><span>No APIs or emulators</span></div><div class="auth-stat"><strong>24/7</strong><span>Checkpointed runs</span></div></div><div class="story-list"><div class="story-item"><div class="story-icon">↕</div><div><b>It acts like a real person</b><span>Scrolls, likes, follows, and searches before it posts.</span></div></div><div class="story-item"><div class="story-icon">◌</div><div><b>Every account warms up first</b><span>Fresh accounts are gated until they mature.</span></div></div><div class="story-item"><div class="story-icon">▭</div><div><b>One Mac runs them all</b><span>Locks and recovery keep every iPhone coordinated.</span></div></div><div class="story-item"><div class="story-icon">↗</div><div><b>Post from anywhere</b><span>Cloud Drop feeds the same queue your Mac runs.</span></div></div></div></section>
+    <section class="auth-form-wrap"><div class="auth-form"><div class="brand"><span class="brand-mark">H</span> Heiss</div><h1>Run your farm</h1><p class="muted">Start free for 7 days. No card.</p><button class="btn ghost hidden" id="googleBtn" style="width:100%;margin-bottom:.9rem">Continue with Google</button><div class="field"><label for="email">Email</label><input class="control" id="email" type="email" autocomplete="email" placeholder="you@email.com"></div><button class="btn" id="magicBtn" style="width:100%">Email me a sign-in link</button><div style="display:flex;align-items:center;gap:.7rem;margin:1.2rem 0;color:var(--muted);font-size:.75rem"><i style="height:1px;background:var(--line);flex:1"></i>or use a password<i style="height:1px;background:var(--line);flex:1"></i></div><div class="field"><label for="password">Password</label><input class="control" id="password" type="password" autocomplete="current-password" placeholder="6+ characters"></div><div class="auth-actions"><button class="btn lime" id="signupBtn">Create account</button><button class="btn ghost" id="loginBtn">Sign in</button></div><div class="message" id="authMsg"></div></div></section>
   </main>
+  <div id="shell" class="shell hidden">
+    <aside class="sidebar"><div class="brand"><span class="brand-mark">H</span> Heiss</div><nav class="nav"><button class="on" data-page="overview">Overview</button><button data-page="drop">Cloud Drop</button><button data-page="accounts">Accounts</button><button data-page="queue">Queue</button><button data-page="activity">Activity</button></nav><div class="side-bottom"><b id="sideEmail"></b><span id="sidePlan">Free trial</span><button class="btn ghost small" id="logoutBtn" style="margin-top:.7rem">Sign out</button></div></aside>
+    <div class="main"><header class="topbar"><h1 id="pageTitle">Farm overview</h1><div class="sync"><i class="pulse"></i> Local farm ready</div></header><div class="page">
+      <section class="section on" id="page-overview"><div class="hero-row"><div><div class="kicker">Farm control</div><h2>Good morning.</h2><p class="muted">Your accounts keep moving even when you are not here.</p></div><button class="btn" id="refreshBtn">Refresh farm</button></div><div class="stats" id="stats"></div><div class="grid2"><div class="card"><h3>Accounts at a glance</h3><div class="list" id="accountPreview"></div></div><div class="card license"><h3>Your Mac app license</h3><p class="muted">Paste this key and dashboard URL into Heiss.app.</p><div class="key" id="licenseKey"></div><div class="toolbar"><button class="btn lime small" id="copyLicense">Copy key</button><a class="btn lime small hidden" id="downloadMac" href="/download/mac">Download Mac app</a></div><p class="muted">Dashboard URL: <span id="dashboardUrl"></span> <button class="btn ghost small" id="copyDashboardUrl">Copy URL</button></p><p class="muted" id="trialText"></p><div id="upgradeActions" class="toolbar"></div></div></div><div class="card" style="margin-top:1rem"><h3>Devices</h3><div class="account-grid" id="devices"></div></div></section>
+      <section class="section" id="page-drop"><div class="hero-row"><div><div class="kicker">Post from anywhere</div><h2>Cloud Drop</h2><p class="muted">Upload once, select accounts, and let your Mac claim the next slot.</p></div></div><div class="grid2"><div class="card"><h3>New drop</h3><div class="dropzone"><b>Choose a video or carousel images</b><p class="muted">Select two or more images for a carousel.</p><input id="mediaFile" type="file" multiple accept="video/*,image/*"></div><div class="field"><label for="caption">Caption</label><textarea class="control" id="caption" rows="4" placeholder="Write once. Publish everywhere."></textarea></div><div class="form-grid"><div class="field"><label for="kind">Format</label><select class="control" id="kind"><option value="video">Video / Reel</option><option value="carousel">Carousel</option></select></div><div class="field"><label for="music">Music (optional)</label><input class="control" id="music" placeholder="Track or sound"></div></div><div class="field"><label>Target accounts</label><div class="chips" id="accountChips"></div></div><button class="btn lime" id="dropBtn">Add to queue</button><div class="message" id="dropMsg"></div></div><div class="card"><h3>How it flows</h3><div class="story-list"><div class="story-item"><div class="story-icon">1</div><div><b>Upload</b><span>Media lands in the Cloud Drop inbox.</span></div></div><div class="story-item"><div class="story-icon">2</div><div><b>Claim</b><span>Your Mac downloads and checkpoints it.</span></div></div><div class="story-item"><div class="story-icon">3</div><div><b>Warm + post</b><span>Each mature account gets a human-like wrapper.</span></div></div><div class="story-item"><div class="story-icon">4</div><div><b>Recover</b><span>Stalls resume without publishing twice.</span></div></div></div></div></div></section>
+      <section class="section" id="page-accounts"><div class="hero-row"><div><div class="kicker">Lifecycle</div><h2>Accounts</h2><p class="muted">Fresh → warmed up → matured → kept warm → posting.</p></div></div><div class="account-grid" id="accountsGrid"></div></section>
+      <section class="section" id="page-queue"><div class="hero-row"><div><div class="kicker">Content pipeline</div><h2>Queue</h2><p class="muted">One ordered source of truth for web and Mac drops.</p></div></div><div class="card table-wrap"><table><thead><tr><th>Content</th><th>Targets</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody id="queueRows"></tbody></table></div></section>
+      <section class="section" id="page-activity"><div class="hero-row"><div><div class="kicker">Audit trail</div><h2>Activity</h2><p class="muted">Every action, checkpoint, resume, and publish.</p></div></div><div class="card" id="activityList"></div></section>
+    </div></div>
+  </div>
   <script>
-    const state = { token: localStorage.getItem("heiss_token") || "", accounts: [], selected: new Set() };
-
-    function headers() {
-      const h = { "Content-Type": "application/json" };
-      if (state.token) h.Authorization = "Bearer " + state.token;
-      return h;
-    }
-
-    async function api(path, opts = {}) {
-      const res = await fetch(path, { ...opts, headers: { ...headers(), ...(opts.headers || {}) } });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || res.statusText);
-      return data;
-    }
-
-    function showApp(email) {
-      document.getElementById("authPanel").classList.add("hidden");
-      document.getElementById("appPanel").classList.remove("hidden");
-      document.getElementById("userLabel").textContent = email || "Signed in";
-    }
-
-    function showAuth() {
-      document.getElementById("authPanel").classList.remove("hidden");
-      document.getElementById("appPanel").classList.add("hidden");
-      document.getElementById("userLabel").textContent = "Signed out";
-    }
-
-    async function auth(mode) {
-      const email = document.getElementById("email").value;
-      const password = document.getElementById("password").value;
-      const msg = document.getElementById("authMsg");
-      try {
-        const data = await api("/api/" + mode, {
-          method: "POST",
-          body: JSON.stringify({ email, password }),
-        });
-        state.token = data.token;
-        localStorage.setItem("heiss_token", state.token);
-        msg.innerHTML = '<span class="ok">OK</span>';
-        showApp(data.user.email);
-        await loadOverview();
-      } catch (e) {
-        msg.innerHTML = '<span class="err">' + e.message + '</span>';
-      }
-    }
-
-    function renderChips() {
-      const el = document.getElementById("accountChips");
-      el.innerHTML = state.accounts.map(a => {
-        const on = state.selected.has(a.id) ? " on" : "";
-        return '<span class="chip' + on + '" data-id="' + a.id + '">' + a.handle + ' · ' + a.platform + ' · ' + a.stage + '</span>';
-      }).join("");
-      el.querySelectorAll(".chip").forEach(chip => {
-        chip.addEventListener("click", () => {
-          const id = chip.getAttribute("data-id");
-          if (state.selected.has(id)) state.selected.delete(id);
-          else state.selected.add(id);
-          renderChips();
-        });
-      });
-    }
-
-    async function loadOverview() {
-      const data = await api("/api/overview");
-      state.accounts = data.accounts || [];
-      if (state.selected.size === 0) {
-        state.accounts.filter(a => a.stage !== "fresh" && (a.platform === "tiktok" || a.platform === "instagram"))
-          .forEach(a => state.selected.add(a.id));
-      }
-      renderChips();
-      const rows = (data.accounts || []).map(a =>
-        "<tr><td>" + a.handle + "</td><td>" + a.platform + "</td><td>" + a.stage + "</td><td>" + a.trustScore + "</td></tr>"
-      ).join("");
-      const q = (data.queue || []).map(q =>
-        "<tr><td>" + q.id.slice(0,8) + "</td><td>" + q.status + "</td><td>" + (q.accountIds||[]).join(", ") + "</td></tr>"
-      ).join("");
-      document.getElementById("overview").innerHTML =
-        "<h3>Accounts</h3><table><tr><th>Handle</th><th>Platform</th><th>Stage</th><th>Trust</th></tr>" + rows + "</table>" +
-        "<h3 style='margin-top:1rem'>Queue</h3><table><tr><th>ID</th><th>Status</th><th>Accounts</th></tr>" + q + "</table>";
-    }
-
-    document.getElementById("signupBtn").onclick = () => auth("signup");
-    document.getElementById("loginBtn").onclick = () => auth("login");
-    document.getElementById("logoutBtn").onclick = () => {
-      state.token = "";
-      localStorage.removeItem("heiss_token");
-      showAuth();
-    };
-    document.getElementById("refreshBtn").onclick = () => loadOverview().catch(e => alert(e.message));
-    document.getElementById("dropBtn").onclick = async () => {
-      const msg = document.getElementById("dropMsg");
-      const pre = document.getElementById("dropResult");
-      try {
-        const kind = document.getElementById("kind").value;
-        const mediaRef = document.getElementById("mediaRef").value;
-        const body = {
-          kind,
-          mediaRef,
-          caption: document.getElementById("caption").value,
-          music: document.getElementById("music").value || undefined,
-          accountIds: [...state.selected],
-          slides: kind === "carousel" ? [mediaRef, mediaRef + "-2"] : undefined,
-        };
-        const data = await api("/api/drop", { method: "POST", body: JSON.stringify(body) });
-        msg.innerHTML = '<span class="ok">Queued · claimable by runner</span>';
-        pre.classList.remove("hidden");
-        pre.textContent = JSON.stringify(data, null, 2);
-        await loadOverview();
-      } catch (e) {
-        msg.innerHTML = '<span class="err">' + e.message + '</span>';
-      }
-    };
-
-    (async () => {
-      if (!state.token) { showAuth(); return; }
-      try {
-        const me = await api("/api/me");
-        showApp(me.user.email);
-        await loadOverview();
-      } catch {
-        showAuth();
-      }
-    })();
+    const state={token:localStorage.getItem('heiss_token')||'',user:null,plan:null,checkoutPlans:[],downloadAvailable:false,data:null,selected:new Set()};
+    const el=id=>document.getElementById(id); const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const headers=(extra={})=>({...extra,...(state.token?{Authorization:'Bearer '+state.token}:{})});
+    async function api(path,opts={}){const res=await fetch(path,{...opts,headers:headers(opts.headers||{})});const data=await res.json().catch(()=>({}));if(!res.ok)throw new Error(data.error||res.statusText);return data}
+    function enter(){el('auth').classList.add('hidden');el('shell').classList.remove('hidden');el('sideEmail').textContent=state.user.email;el('sidePlan').textContent=(state.plan?.name||'Free')+' plan';el('licenseKey').textContent=state.user.licenseKey;el('dashboardUrl').textContent=location.origin;el('downloadMac').classList.toggle('hidden',!state.downloadAvailable);el('trialText').textContent='Trial ends '+new Date(state.user.trialEndsAt).toLocaleDateString();const free=state.user.planId==='free';el('kind').querySelector('option[value="carousel"]').disabled=free;el('music').disabled=free;if(free)el('music').placeholder='Solo plan feature';el('upgradeActions').innerHTML=state.checkoutPlans.map(plan=>'<button class="btn lime small upgrade" data-plan="'+esc(plan)+'">Upgrade to '+esc(plan)+'</button>').join(' ');el('upgradeActions').querySelectorAll('.upgrade').forEach(button=>button.onclick=()=>checkout(button.dataset.plan));}
+    function leave(){el('shell').classList.add('hidden');el('auth').classList.remove('hidden')}
+    async function authenticate(mode){const msg=el('authMsg');try{const data=await api('/api/'+mode,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:el('email').value,password:el('password').value})});state.token=data.token;localStorage.setItem('heiss_token',data.token);await bootstrap();msg.textContent=''}catch(e){msg.innerHTML='<span class="err">'+esc(e.message)+'</span>'}}
+    async function requestMagic(){const msg=el('authMsg');try{const data=await api('/api/magic/request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:el('email').value})});msg.innerHTML='<span class="ok">'+esc(data.message)+'</span>'}catch(e){msg.innerHTML='<span class="err">'+esc(e.message)+'</span>'}}
+    async function bootstrap(){const me=await api('/api/me');state.user=me.user;state.plan=me.plan;state.checkoutPlans=me.checkoutPlans||[];state.downloadAvailable=Boolean(me.downloadAvailable);enter();await loadOverview()}
+    async function checkout(planId){const data=await api('/api/billing/checkout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({planId})});window.location.href=data.url}
+    function badge(v){return '<span class="badge '+esc(v)+'">'+esc(String(v).replaceAll('_',' '))+'</span>'}
+    function platform(a){return '<div class="platform">'+esc(a.platform.slice(0,2))+'</div>'}
+    function accountRow(a){return '<div class="row-item">'+platform(a)+'<div><b>'+esc(a.handle)+'</b><small>'+esc(a.platform)+' · '+esc(a.stage.replaceAll('_',' '))+'</small><div class="progress"><i style="width:'+Math.min(100,a.trustScore)+'%"></i></div></div>'+badge(a.stage)+'</div>'}
+    function render(){const d=state.data,accounts=d.accounts||[],queue=d.queue||[],devices=d.devices||[];el('stats').innerHTML=[['iPhones',devices.length],['Accounts',accounts.length],['Ready to post',accounts.filter(a=>['matured','kept_warm','posting'].includes(a.stage)&&['tiktok','instagram'].includes(a.platform)).length],['Queued',queue.filter(q=>!['posted','failed','cancelled'].includes(q.status)).length]].map(x=>'<div class="card stat-card"><span>'+x[0]+'</span><strong>'+x[1]+'</strong></div>').join('');el('accountPreview').innerHTML=accounts.slice(0,5).map(accountRow).join('')||'<div class="empty">Add your first account in the Mac app.</div>';el('accountsGrid').innerHTML=accounts.map(a=>'<article class="card">'+accountRow(a)+'<p class="muted" style="font-size:.78rem">Search terms: '+esc((a.searchTerms||[]).join(', '))+'</p><p class="muted" style="font-size:.78rem">Last warmup: '+esc(a.lastWarmupAt?new Date(a.lastWarmupAt).toLocaleString():'Not yet')+'</p></article>').join('');el('devices').innerHTML=devices.map(x=>'<div class="card device-card"><div><b>'+esc(x.name)+'</b><div class="muted" style="font-size:.75rem">'+esc(x.udid)+'</div></div><i class="device-led '+(x.online?'on':'')+'"></i></div>').join('')||'<div class="empty">Connect an iPhone over USB to get started.</div>';el('queueRows').innerHTML=queue.map(q=>{const content=(d.contents||[]).find(c=>c.id===q.contentId);return '<tr><td><b>'+esc(content?.caption||content?.mediaRef||q.contentId.slice(0,8))+'</b><div class="muted">'+esc(content?.kind||'content')+'</div></td><td>'+q.accountIds.length+'</td><td>'+badge(q.status)+'</td><td>'+new Date(q.createdAt).toLocaleString()+'</td><td>'+(q.status==='queued'?'<button class="btn ghost small cancel-drop" data-id="'+esc(q.id)+'">Cancel</button>':'')+'</td></tr>'}).join('')||'<tr><td colspan="5" class="empty">Your queue is empty.</td></tr>';el('queueRows').querySelectorAll('.cancel-drop').forEach(button=>button.onclick=()=>cancelDrop(button.dataset.id));el('activityList').innerHTML=(d.activity||[]).slice().reverse().map(a=>'<div class="activity-line"><b>'+esc(a.message)+'</b><span>'+esc(a.kind)+' · '+new Date(a.at).toLocaleString()+'</span></div>').join('')||'<div class="empty">Activity appears after the first farm run.</div>';renderChips(accounts)}
+    function renderChips(accounts){if(state.selected.size===0)accounts.filter(a=>['tiktok','instagram'].includes(a.platform)&&a.stage!=='fresh').forEach(a=>state.selected.add(a.id));el('accountChips').innerHTML=accounts.filter(a=>['tiktok','instagram'].includes(a.platform)).map(a=>'<button type="button" class="chip '+(state.selected.has(a.id)?'on':'')+'" data-id="'+esc(a.id)+'">'+esc(a.handle)+' · '+esc(a.platform)+'</button>').join('');el('accountChips').querySelectorAll('.chip').forEach(c=>c.onclick=()=>{state.selected.has(c.dataset.id)?state.selected.delete(c.dataset.id):state.selected.add(c.dataset.id);renderChips(accounts)})}
+    async function loadOverview(){const [overview,q]=await Promise.all([api('/api/overview'),api('/api/queue')]);state.data={...overview,contents:q.contents};render()}
+    async function cancelDrop(queueId){await api('/api/queue/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({queueId})});await loadOverview()}
+    document.querySelectorAll('.nav button').forEach(btn=>btn.onclick=()=>{document.querySelectorAll('.nav button').forEach(x=>x.classList.toggle('on',x===btn));document.querySelectorAll('.section').forEach(x=>x.classList.remove('on'));el('page-'+btn.dataset.page).classList.add('on');el('pageTitle').textContent=btn.textContent==='Drop'?'Cloud Drop':btn.textContent});
+    el('googleBtn').onclick=()=>{location.href='/api/auth/google'};el('magicBtn').onclick=requestMagic;el('signupBtn').onclick=()=>authenticate('signup');el('loginBtn').onclick=()=>authenticate('login');el('logoutBtn').onclick=()=>{state.token='';localStorage.removeItem('heiss_token');leave()};el('refreshBtn').onclick=()=>loadOverview();el('copyLicense').onclick=async()=>{await navigator.clipboard.writeText(state.user.licenseKey);el('copyLicense').textContent='Copied';setTimeout(()=>el('copyLicense').textContent='Copy key',1200)};el('copyDashboardUrl').onclick=()=>navigator.clipboard.writeText(location.origin);
+    el('dropBtn').onclick=async()=>{const msg=el('dropMsg'),files=[...el('mediaFile').files];try{const kind=el('kind').value;if(files.length===0)throw new Error('Choose media first');if(kind==='video'&&files.length!==1)throw new Error('Choose one file for a video post');if(kind==='carousel'&&files.length<2)throw new Error('Choose at least two images for a carousel');if(state.selected.size===0)throw new Error('Select at least one account');msg.textContent='Uploading '+files.length+' file'+(files.length===1?'':'s')+'…';const uploaded=[];for(const file of files)uploaded.push(await api('/api/uploads?filename='+encodeURIComponent(file.name),{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream'},body:file}));await api('/api/drop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,mediaRef:uploaded[0].mediaRef,slides:kind==='carousel'?uploaded.map(item=>item.mediaRef):undefined,caption:el('caption').value,music:el('music').value||undefined,accountIds:[...state.selected]})});msg.innerHTML='<span class="ok">Queued for the next open slot.</span>';el('caption').value='';el('mediaFile').value='';await loadOverview()}catch(e){msg.innerHTML='<span class="err">'+esc(e.message)+'</span>'}};
+    (async()=>{try{const providers=await api('/api/auth/providers');el('googleBtn').classList.toggle('hidden',!providers.google);el('magicBtn').classList.toggle('hidden',!providers.magicLink)}catch{}const magic=new URLSearchParams(location.search).get('magic');if(magic){try{const data=await api('/api/magic/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:magic})});state.token=data.token;localStorage.setItem('heiss_token',data.token);history.replaceState({},'',location.pathname);await bootstrap();return}catch(e){el('authMsg').innerHTML='<span class="err">'+esc(e.message)+'</span>'}}if(!state.token)return leave();try{await bootstrap()}catch{state.token='';localStorage.removeItem('heiss_token');leave()}})();
   </script>
-</body>
-</html>`;
+</body></html>`;
 }

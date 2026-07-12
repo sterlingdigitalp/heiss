@@ -2,8 +2,8 @@
 /**
  * heiss-farm — local controller (physical iPhones only, no simulator).
  */
-import { mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import {
   JsonStore,
   FarmOrchestrator,
@@ -13,6 +13,8 @@ import {
   issueSessionToken,
   parseSessionToken,
   assertCanAddAccount,
+  assertWithinPlan,
+  PLAN_TIERS,
   createSlot,
   type Platform,
   type AccountStage,
@@ -31,7 +33,7 @@ import {
   detectLocalTeams,
 } from "@heiss/device";
 import { defaultDataDir, farmStatePath } from "./paths.js";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 
 function usage(): string {
   return `heiss-farm — Heiss local farm controller (real iPhones only)
@@ -42,15 +44,27 @@ Setup:
   heiss-farm runner install [--udid UDID] [--team TEAM_ID]
   heiss-farm signing show | set --team TEAM_ID | set --asc-key PATH --key-id ID --issuer ID
   heiss-farm devices list | sync [--data DIR]
+  heiss-farm devices rename <deviceId> <name>
+  heiss-farm license show | activate KEY [--url https://app.example]
+  heiss-farm proxies list | add <name> <host> <port> [--user U] [--password P]
+  heiss-farm proxies assign <proxyId> <deviceId>
+  heiss-farm proxies unassign <deviceId> | remove <proxyId>
+  heiss-farm cloud sync --url https://app.example [--license HEISS-…]
+  heiss-farm cloud push [--license HEISS-…]
 
 Farm:
   heiss-farm status [--data DIR]
   heiss-farm run [--time HH:mm] [--data DIR] [--interrupt N]
+  heiss-farm daemon [--interval-sec 30] [--data DIR]
   heiss-farm resume [--data DIR]
   heiss-farm register-device <name> <udid>
   heiss-farm add-account <deviceId> <platform> <handle> [--stage STAGE] [--terms a,b]
+  heiss-farm remove-account <accountId>
   heiss-farm add-slot <accountId> <HH:mm>
-  heiss-farm drop --accounts ID,ID --caption TEXT --media REF [--music M] [--carousel]
+  heiss-farm remove-slot <slotId>
+  heiss-farm cancel <queueItemId>
+  heiss-farm drop --accounts ID,ID --caption TEXT --media REF [--music M]
+  heiss-farm drop --accounts ID,ID --caption TEXT --carousel --slides a.jpg,b.jpg
   heiss-farm start-warmups [--time HH:mm] [--data DIR]   # alias: run after setup
   heiss-farm serve-api [--port 8787]
 
@@ -60,6 +74,7 @@ Env:
   HEISS_ASC_KEY_PATH  App Store Connect .p8
   HEISS_ASC_KEY_ID    ASC key id
   HEISS_ASC_ISSUER_ID ASC issuer id
+  HEISS_CLOUD_URL     Hosted Cloud Drop origin
 
 No simulator. Requires USB iPhone + HeissRunner.
 `;
@@ -79,6 +94,98 @@ function openStore(args: string[]): JsonStore {
   const data = getArg(args, "--data") ?? defaultDataDir();
   mkdirSync(data, { recursive: true });
   return new JsonStore(farmStatePath(data));
+}
+
+function activePlan(store: JsonStore) {
+  return PLAN_TIERS.find((p) => p.id === (store.state.license?.planId ?? "free")) ?? PLAN_TIERS[0]!;
+}
+
+function proxyImportUrl(proxy: { name: string; host: string; port: number; username?: string; password?: string }) {
+  const auth = proxy.username
+    ? `${encodeURIComponent(proxy.username)}${proxy.password ? `:${encodeURIComponent(proxy.password)}` : ""}@`
+    : "";
+  return `socks5://${auth}${proxy.host}:${proxy.port}#${encodeURIComponent(proxy.name)}`;
+}
+
+function cloudCredentials(store: JsonStore, args: string[]) {
+  const url = (getArg(args, "--url") ?? process.env.HEISS_CLOUD_URL ?? store.state.license?.cloudUrl ?? "").replace(/\/$/, "");
+  const license = getArg(args, "--license") ?? store.state.license?.key ?? "";
+  if (!url || !license) throw new Error("Cloud sync requires --url/HEISS_CLOUD_URL and an activated license");
+  return { url, license };
+}
+
+async function cloudJson(url: string, license: string, path: string, body: unknown) {
+  const response = await fetch(`${url}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${license}` },
+    body: JSON.stringify(body),
+  });
+  const json = await response.json() as Record<string, any>;
+  if (!response.ok) throw new Error(String(json.error ?? `Cloud request failed (${response.status})`));
+  return json;
+}
+
+async function syncCloudDrop(store: JsonStore, args: string[]) {
+  const { url, license } = cloudCredentials(store, args);
+  await cloudJson(url, license, "/api/runner/sync", {
+    devices: store.state.devices,
+    accounts: store.state.accounts,
+    slots: store.state.slots,
+  });
+  const profileResponse = await cloudJson(url, license, "/api/runner/profiles", {});
+  const expectedProfileSignature = createHmac("sha256", license)
+    .update(JSON.stringify(profileResponse.profiles)).digest("hex");
+  if (profileResponse.signature !== expectedProfileSignature) {
+    throw new Error("Cloud UI profile signature is invalid");
+  }
+  store.state.uiProfiles = profileResponse.profiles ?? store.state.uiProfiles;
+  store.save();
+  const claimed = await cloudJson(url, license, "/api/runner/claim", { runnerId: "heiss-mac" });
+  if (!claimed.item) return { ok: true, synced: true, claimed: null };
+  const remoteItem = claimed.item as { id: string; createdAt: string };
+  const remoteContent = claimed.content as { id: string; kind: "video"|"carousel"; mediaRef: string; slides?: string[]; mediaNames?: string[]; caption: string; music?: string; createdAt: string; createdBy: string };
+  const targets = (claimed.targets as Array<{ sourceId?: string }>).map((target) => target.sourceId).filter((id): id is string => Boolean(id && store.state.accounts.some((a) => a.id === id)));
+  if (targets.length === 0) throw new Error("Cloud Drop has no matching local accounts; sync account handles before claiming content");
+  const refs = remoteContent.kind === "carousel" ? (remoteContent.slides ?? [remoteContent.mediaRef]) : [remoteContent.mediaRef];
+  const names = remoteContent.mediaNames ?? [];
+  const cloudDir = join(dirname(store.path), "cloud-drop"); mkdirSync(cloudDir, { recursive: true });
+  const localRefs: string[] = [];
+  for (const [index, ref] of refs.entries()) {
+    const response = await fetch(new URL(ref, url), { headers: { Authorization: `Bearer ${license}` } });
+    if (!response.ok) throw new Error(`Cloud media download failed (${response.status})`);
+    const safe = basename(names[index] ?? `media-${index}.bin`).replace(/[^a-zA-Z0-9._-]/g, "-");
+    const localPath = join(cloudDir, `${remoteItem.id}-${index}-${safe}`);
+    writeFileSync(localPath, Buffer.from(await response.arrayBuffer())); localRefs.push(localPath);
+  }
+  if (!store.state.contents.some((content) => content.id === remoteContent.id)) {
+    store.state.contents.push({ ...remoteContent, mediaRef: localRefs[0]!, slides: remoteContent.kind === "carousel" ? localRefs : undefined });
+  }
+  if (!store.state.queue.some((item) => item.remoteQueueId === remoteItem.id)) {
+    store.state.queue.push({
+      id: randomUUID(), contentId: remoteContent.id, accountIds: targets, status: "queued",
+      postedAccountIds: [], createdAt: remoteItem.createdAt, remoteUrl: url,
+      remoteQueueId: remoteItem.id, remotePostedAccountIds: [],
+    });
+  }
+  store.save();
+  return { ok: true, synced: true, claimed: remoteItem.id, targets, media: localRefs };
+}
+
+async function pushCloudCompletions(store: JsonStore, licenseOverride?: string) {
+  const license = licenseOverride ?? store.state.license?.key;
+  if (!license) return { pushed: 0 };
+  let pushed = 0;
+  for (const item of store.state.queue.filter((q) => q.remoteUrl && q.remoteQueueId)) {
+    const acknowledged = new Set(item.remotePostedAccountIds ?? []);
+    for (const sourceAccountId of item.postedAccountIds ?? []) {
+      if (acknowledged.has(sourceAccountId)) continue;
+      await cloudJson(item.remoteUrl!, license, "/api/runner/complete", { queueId: item.remoteQueueId, sourceAccountId });
+      acknowledged.add(sourceAccountId); pushed += 1;
+    }
+    item.remotePostedAccountIds = [...acknowledged];
+  }
+  if (pushed > 0) store.save();
+  return { pushed };
 }
 
 /** Production driver only — real USB transport, never simulator. */
@@ -257,8 +364,99 @@ async function main(): Promise<void> {
         row.online = false;
       }
     }
+    assertWithinPlan(activePlan(store), store.state.devices.length, store.state.accounts.length);
     store.save();
     print({ ok: true, added, devices: store.state.devices, usb });
+    return;
+  }
+
+  if (cmd === "devices" && args[1] === "rename") {
+    const store = openStore(args);
+    const device = store.state.devices.find((row) => row.id === args[2] || row.udid === args[2]);
+    const name = args.slice(3).join(" ").trim();
+    if (!device || !name) throw new Error("Usage: devices rename <deviceId> <name>");
+    device.name = name; store.save(); print({ ok: true, device }); return;
+  }
+
+  if (cmd === "license" && args[1] === "show") {
+    const store = openStore(args);
+    print({ ok: true, activation: store.state.license ?? null, plan: activePlan(store) });
+    return;
+  }
+
+  if (cmd === "license" && args[1] === "activate") {
+    const store = openStore(args);
+    const key = args[2]?.trim();
+    if (!key || !/^HEISS-[A-Z0-9-]{8,}$/i.test(key)) {
+      throw new Error("Usage: license activate HEISS-… [--url https://app.example]");
+    }
+    const cloudUrl = (getArg(args, "--url") ?? process.env.HEISS_CLOUD_URL ?? "").replace(/\/$/, "");
+    let plan = PLAN_TIERS[0]!;
+    if (cloudUrl) {
+      const remote = await cloudJson(cloudUrl, key, "/api/runner/license", {});
+      plan = remote.plan;
+    }
+    assertWithinPlan(plan, store.state.devices.length, store.state.accounts.length);
+    store.state.license = { key, planId: plan.id, activatedAt: new Date().toISOString(), cloudUrl: cloudUrl || undefined };
+    store.save();
+    print({ ok: true, activation: store.state.license, plan });
+    return;
+  }
+
+  if (cmd === "proxies" && args[1] === "list") {
+    const store = openStore(args);
+    print({ ok: true, proxies: store.state.proxies.map((proxy) => ({ ...proxy, importUrl: proxyImportUrl(proxy) })) });
+    return;
+  }
+
+  if (cmd === "proxies" && args[1] === "add") {
+    const store = openStore(args);
+    const name = args[2], host = args[3], port = Number(args[4]);
+    if (!name || !host || !Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error("Usage: proxies add <name> <host> <port> [--user U] [--password P]");
+    }
+    const proxy = { id: randomUUID(), name, type: "socks5" as const, host, port, username: getArg(args, "--user"), password: getArg(args, "--password"), createdAt: new Date().toISOString() };
+    store.state.proxies.push(proxy); store.save(); print({ ok: true, proxy: { ...proxy, importUrl: proxyImportUrl(proxy) } }); return;
+  }
+
+  if (cmd === "proxies" && args[1] === "assign") {
+    const store = openStore(args);
+    const proxy = store.state.proxies.find((p) => p.id === args[2]);
+    const device = store.state.devices.find((d) => d.id === args[3] || d.udid === args[3]);
+    if (!proxy || !device) throw new Error("Unknown proxy or device");
+    if (store.state.proxies.some((p) => p.deviceId === device.id && p.id !== proxy.id)) {
+      throw new Error("Device already has a different proxy assigned");
+    }
+    if (proxy.deviceId && proxy.deviceId !== device.id) throw new Error("Proxy already belongs to another device");
+    proxy.deviceId = device.id; device.proxyId = proxy.id; store.save(); print({ ok: true, proxy: { ...proxy, importUrl: proxyImportUrl(proxy) }, device }); return;
+  }
+
+  if (cmd === "proxies" && args[1] === "unassign") {
+    const store = openStore(args);
+    const device = store.state.devices.find((row) => row.id === args[2] || row.udid === args[2]);
+    if (!device) throw new Error("Unknown device");
+    const proxy = store.state.proxies.find((row) => row.id === device.proxyId || row.deviceId === device.id);
+    if (proxy) proxy.deviceId = undefined; device.proxyId = undefined;
+    store.save(); print({ ok: true, device, proxy: proxy ?? null }); return;
+  }
+
+  if (cmd === "proxies" && args[1] === "remove") {
+    const store = openStore(args);
+    const index = store.state.proxies.findIndex((row) => row.id === args[2]);
+    if (index < 0) throw new Error("Unknown proxy");
+    if (store.state.proxies[index]!.deviceId) throw new Error("Unassign the proxy before removing it");
+    const [proxy] = store.state.proxies.splice(index, 1); store.save(); print({ ok: true, proxy }); return;
+  }
+
+  if (cmd === "cloud" && args[1] === "sync") {
+    const store = openStore(args);
+    print(await syncCloudDrop(store, args));
+    return;
+  }
+
+  if (cmd === "cloud" && args[1] === "push") {
+    const store = openStore(args);
+    print({ ok: true, ...(await pushCloudCompletions(store, getArg(args, "--license"))) });
     return;
   }
 
@@ -282,11 +480,61 @@ async function main(): Promise<void> {
       usb,
       accounts: store.state.accounts,
       queue: store.state.queue,
+      contents: store.state.contents,
+      slots: store.state.slots,
+      proxies: store.state.proxies.map((proxy) => ({ ...proxy, importUrl: proxyImportUrl(proxy) })),
+      license: store.state.license ?? null,
+      activePlan: activePlan(store),
       sessions: store.state.sessions.slice(-10),
       activity: store.state.activity.slice(-20),
       plan,
       locks: store.locks.snapshot(),
     });
+    return;
+  }
+
+  if (cmd === "daemon") {
+    const intervalMs = Math.max(5_000, Number(getArg(args, "--interval-sec") ?? 30) * 1000);
+    let stopping = false;
+    process.once("SIGINT", () => { stopping = true; });
+    process.once("SIGTERM", () => { stopping = true; });
+    print({ ok: true, daemon: "started", intervalMs, pid: process.pid });
+    while (!stopping) {
+      const store = openStore(args);
+      const now = new Date();
+      const timeOfDay = now.toTimeString().slice(0, 5);
+      try {
+        if ((process.env.HEISS_CLOUD_URL || store.state.license?.cloudUrl) && store.state.license?.key) {
+          await syncCloudDrop(store, args);
+        }
+        const usb = await listUsbIphones().catch(() => []);
+        for (const device of store.state.devices) {
+          device.online = usb.some((candidate) => candidate.udid === device.udid && candidate.available);
+        }
+        store.save();
+        if (store.state.devices.some((device) => device.online) && store.state.accounts.length > 0) {
+          const result = await new FarmOrchestrator(store, makeDriver()).runOnce({
+            runnerId: `daemon-${process.pid}`,
+            timeOfDay,
+            now: now.toISOString(),
+          });
+          const cloud = await pushCloudCompletions(store).catch((error) => ({ warning: String(error), pushed: 0 }));
+          console.log(JSON.stringify({
+            at: now.toISOString(), timeOfDay,
+            sessions: result.sessions.length,
+            posts: result.sessions.filter((session) => session.kind === "post" && session.checkpoint.posted).length,
+            completed: result.sessions.filter((session) => session.status === "completed").length,
+            interrupted: result.interrupted, cloud,
+          }));
+        } else {
+          console.log(JSON.stringify({ at: now.toISOString(), timeOfDay, waiting: "Connect an online iPhone and add an account" }));
+        }
+      } catch (error) {
+        console.error(JSON.stringify({ at: now.toISOString(), error: error instanceof Error ? error.message : String(error) }));
+      }
+      if (!stopping) await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, 60_000)));
+    }
+    print({ ok: true, daemon: "stopped" });
     return;
   }
 
@@ -309,6 +557,12 @@ async function main(): Promise<void> {
       );
       process.exit(1);
     }
+    const cloudPull = (process.env.HEISS_CLOUD_URL || store.state.license?.cloudUrl) && store.state.license?.key
+      ? await syncCloudDrop(store, args).catch((error) => ({
+          ok: false,
+          warning: error instanceof Error ? error.message : String(error),
+        }))
+      : { ok: true, skipped: true };
     const offline = store.state.devices.filter((d) => !d.online);
     // refresh online from USB
     try {
@@ -330,11 +584,17 @@ async function main(): Promise<void> {
       timeOfDay: time,
       interruptAfterSteps: interrupt ? Number(interrupt) : undefined,
     });
+    const cloud = await pushCloudCompletions(store).catch((error) => ({
+      pushed: 0,
+      warning: error instanceof Error ? error.message : String(error),
+    }));
     print({
       ok: true,
       driver: "ios",
       simulator: false,
       interrupted: result.interrupted,
+      cloudPull,
+      cloud,
       sessions: result.sessions.map((s) => ({
         id: s.id,
         accountId: s.accountId,
@@ -404,6 +664,7 @@ async function main(): Promise<void> {
       createdAt: new Date().toISOString(),
     };
     store.state.devices.push(device);
+    assertWithinPlan(activePlan(store), store.state.devices.length, store.state.accounts.length);
     store.save();
     print({ ok: true, device });
     return;
@@ -442,6 +703,7 @@ async function main(): Promise<void> {
       createdAt: new Date().toISOString(),
     };
     store.state.accounts.push(account);
+    assertWithinPlan(activePlan(store), store.state.devices.length, store.state.accounts.length);
     // default morning slot for posting platforms
     if (platform === "tiktok" || platform === "instagram") {
       store.state.slots.push(createSlot(account.id, "09:00"));
@@ -458,6 +720,23 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cmd === "remove-account") {
+    const store = openStore(args);
+    const index = store.state.accounts.findIndex((account) => account.id === args[1]);
+    if (index < 0) throw new Error("Unknown account");
+    const account = store.state.accounts[index]!;
+    if (store.state.sessions.some((session) => session.accountId === account.id && ["running", "checkpointed"].includes(session.status))) {
+      throw new Error("Account has an active or recoverable session; finish or resolve it before removal");
+    }
+    store.state.accounts.splice(index, 1);
+    store.state.slots = store.state.slots.filter((slot) => slot.accountId !== account.id);
+    for (const item of store.state.queue.filter((queue) => queue.accountIds.includes(account.id))) {
+      item.accountIds = item.accountIds.filter((id) => id !== account.id);
+      if (item.accountIds.length === 0 && item.status !== "posted") item.status = "cancelled";
+    }
+    store.save(); print({ ok: true, account }); return;
+  }
+
   if (cmd === "drop") {
     const store = openStore(args);
     const accounts = (getArg(args, "--accounts") ?? "").split(",").filter(Boolean);
@@ -465,10 +744,12 @@ async function main(): Promise<void> {
     const media = getArg(args, "--media") ?? "media.bin";
     const music = getArg(args, "--music");
     const carousel = hasFlag(args, "--carousel");
+    const slides = (getArg(args, "--slides") ?? "").split(",").filter(Boolean);
+    if (carousel && slides.length < 2) throw new Error("Carousel drop requires --slides first.jpg,second.jpg");
     const { content, queueItem } = dropContent({
       kind: carousel ? "carousel" : "video",
-      mediaRef: media,
-      slides: carousel ? [media, `${media}-2`] : undefined,
+      mediaRef: carousel ? slides[0]! : media,
+      slides: carousel ? slides : undefined,
       caption,
       music,
       accountIds: accounts,
@@ -496,12 +777,28 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cmd === "remove-slot") {
+    const store = openStore(args);
+    const index = store.state.slots.findIndex((slot) => slot.id === args[1]);
+    if (index < 0) throw new Error("Unknown slot");
+    const [slot] = store.state.slots.splice(index, 1); store.save(); print({ ok: true, slot }); return;
+  }
+
+  if (cmd === "cancel") {
+    const store = openStore(args);
+    const item = store.state.queue.find((queue) => queue.id === args[1]);
+    if (!item) throw new Error("Unknown queue item");
+    if (["posted", "assigned"].includes(item.status)) throw new Error(`Cannot cancel content in ${item.status} status`);
+    item.status = "cancelled"; store.save(); print({ ok: true, item }); return;
+  }
+
   if (cmd === "setup" && args[1] === "all") {
     // Full guided setup: detect → install runner → register
     const team = getArg(args, "--team");
     const { device, install } = await setupDeviceAndRunner({
       udid: getArg(args, "--udid"),
       teamId: team,
+      repoRoot: resolve(process.cwd()),
     });
     const store = openStore(args);
     if (!store.state.devices.find((d) => d.udid === device.udid)) {

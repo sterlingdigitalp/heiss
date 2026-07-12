@@ -44,8 +44,27 @@ describe("Cloud Drop queue", () => {
     item = assignToAccount(item, "acc-tt-mature");
     assert.equal(item.assignedAccountId, "acc-tt-mature");
     item = markPosted(item);
+    assert.equal(item.status, "stored_local");
+    assert.deepEqual(item.postedAccountIds, ["acc-tt-mature"]);
+    item = assignToAccount(item, "acc-ig-mature");
+    item = markPosted(item);
     assert.equal(item.status, "posted");
     assert.throws(() => ensureNotDoublePost(item), /double-post/);
+  });
+
+  it("fans one Cloud Drop out to every target exactly once", () => {
+    const { queueItem } = dropContent({
+      kind: "video", mediaRef: "clip.mp4", caption: "fan out",
+      accountIds: ["a1", "a2"], createdBy: "u1",
+    });
+    let item = storeLocally(claimQueueItem(queueItem, "runner"), "/tmp/clip.mp4");
+    item = markPosted(assignToAccount(item, "a1"));
+    assert.equal(item.status, "stored_local");
+    assert.deepEqual(item.postedAccountIds, ["a1"]);
+    assert.throws(() => assignToAccount(item, "a1"), /already posted/);
+    item = markPosted(assignToAccount(item, "a2"));
+    assert.equal(item.status, "posted");
+    assert.deepEqual(item.postedAccountIds, ["a1", "a2"]);
   });
 
   it("requires carousel slides", () => {

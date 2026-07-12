@@ -14,6 +14,7 @@ export interface IosTransport {
   runScriptAction?(
     udid: string,
     action: string,
+    context?: Record<string, unknown>,
   ): Promise<{ ok: true; detail: string }>;
 }
 
@@ -51,6 +52,7 @@ export class RealIosDriver implements DeviceDriver {
     deviceId: string,
     _accountId: string,
     action: string,
+    context?: Record<string, unknown>,
   ): Promise<{ ok: true; detail: string }> {
     const udid = this.connected.get(deviceId);
     if (!udid) {
@@ -58,7 +60,7 @@ export class RealIosDriver implements DeviceDriver {
     }
 
     if (this.transport.runScriptAction) {
-      return this.transport.runScriptAction(udid, action);
+      return this.transport.runScriptAction(udid, action, context);
     }
 
     if (action.includes("scroll") && this.transport.swipe) {

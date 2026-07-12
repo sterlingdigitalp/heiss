@@ -72,12 +72,19 @@ describe("USB device list parsing", () => {
             deviceType: "simulator",
             hardwareProperties: { deviceType: "simulator" },
           },
+          {
+            identifier: "WIFI-1",
+            name: "Network iPhone",
+            deviceState: "available (paired)",
+            hardwareProperties: { productType: "iPhone14,2" },
+            connectionProperties: { pairingState: "paired", transportType: "localNetwork" },
+          },
         ],
       },
     });
-    assert.equal(devices.length, 1);
-    assert.equal(devices[0]!.udid, "AAAA-BBBB");
-    assert.equal(devices[0]!.available, true);
+    assert.equal(devices.length, 2);
+    assert.equal(devices.find((device) => device.udid === "AAAA-BBBB")?.available, true);
+    assert.equal(devices.find((device) => device.udid === "WIFI-1")?.available, false);
   });
 });
 

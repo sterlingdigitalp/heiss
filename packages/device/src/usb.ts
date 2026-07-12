@@ -129,10 +129,13 @@ export function parseDeviceList(json: unknown): UsbIphone[] {
       Boolean(conn.pairingState === "paired" || d.paired === true) ||
       state.includes("available") ||
       state.includes("connected");
-    const available =
+    const reachable =
       state.includes("available") ||
       state.includes("connected") ||
       Boolean(conn.transportType);
+    const transport = conn.transportType ? String(conn.transportType) : undefined;
+    const isUsb = Boolean(transport && /usb|wired/i.test(transport));
+    const available = reachable && isUsb;
     // Exclude simulators / virtual devices
     const isSim =
       String(hw.deviceType ?? d.deviceType ?? "")
@@ -149,7 +152,7 @@ export function parseDeviceList(json: unknown): UsbIphone[] {
       !/iphone|ipad/i.test(name)
     ) {
       // still allow if state says available physical
-      if (!available) continue;
+      if (!reachable) continue;
     }
     out.push({
       udid: id,
@@ -157,14 +160,14 @@ export function parseDeviceList(json: unknown): UsbIphone[] {
       model,
       state,
       paired,
-      available: available || paired,
-      connection: conn.transportType ? String(conn.transportType) : undefined,
+      available,
+      connection: transport,
     });
   }
   return out;
 }
 
-/** List physical USB/network-paired iPhones (no simulators). */
+/** List paired physical iPhones; only wired/USB rows are marked available. */
 export async function listUsbIphones(): Promise<UsbIphone[]> {
   try {
     const json = await runJson<unknown>(["list", "devices"], 20_000);
@@ -194,7 +197,8 @@ async function listUsbIphonesFallback(): Promise<UsbIphone[]> {
         name,
         state: "available",
         paired: true,
-        available: true,
+        available: false,
+        connection: "unknown (USB cannot be verified)",
       });
     }
     return devices;

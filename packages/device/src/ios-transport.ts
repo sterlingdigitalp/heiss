@@ -11,8 +11,8 @@ import {
   writeFileSync,
   rmSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import type { IosTransport } from "./ios-driver.js";
@@ -41,7 +41,7 @@ export class RealUsbTransport implements IosTransport {
   private lastDevices: UsbIphone[] = [];
 
   constructor(opts: RealUsbTransportOptions = {}) {
-    this.bundleId = opts.bundleId ?? RUNNER_BUNDLE_ID;
+    this.bundleId = opts.bundleId ?? `${RUNNER_BUNDLE_ID}.uitests.xctrunner`;
     this.commandTimeoutMs = opts.commandTimeoutMs ?? 45_000;
   }
 
@@ -81,12 +81,22 @@ export class RealUsbTransport implements IosTransport {
   }
 
   async screenshot(udid: string): Promise<Buffer> {
-    // Best-effort: devicectl does not always expose screenshots; return empty marker.
     const result = await this.sendCommand(udid, { action: "screenshot" });
     if (result.base64) {
       return Buffer.from(String(result.base64), "base64");
     }
-    return Buffer.from(`screenshot-placeholder:${udid}`);
+    if (result.ok === true && result.executed === true && typeof result.screenshot === "string") {
+      const local = join(tmpdir(), `heiss-screenshot-${randomUUID()}.png`);
+      try {
+        await this.copyFromDevice(udid, `Documents/screenshots/${basename(result.screenshot)}`, local);
+        return readFileSync(local);
+      } finally {
+        rmSync(local, { force: true });
+      }
+    }
+    throw new Error(
+      `HeissRunner did not capture a screenshot: ${String(result.detail ?? "missing screenshot acknowledgement")}`,
+    );
   }
 
   /**
@@ -95,8 +105,24 @@ export class RealUsbTransport implements IosTransport {
   async runScriptAction(
     udid: string,
     action: string,
+    context: Record<string, unknown> = {},
   ): Promise<{ ok: true; detail: string }> {
-    const result = await this.sendCommand(udid, { action });
+    const result = await this.sendCommand(udid, { action, ...context });
+    if (result.ok !== true || result.executed !== true) {
+      let screenshotNote = "";
+      if (typeof result.screenshot === "string") {
+        const failures = join(homedir(), ".heiss", "failures");
+        mkdirSync(failures, { recursive: true });
+        const local = join(failures, `${udid.slice(0, 8)}-${basename(result.screenshot)}`);
+        try {
+          await this.copyFromDevice(udid, `Documents/screenshots/${result.screenshot}`, local);
+          screenshotNote = ` Screenshot saved to ${local}.`;
+        } catch { /* retain the on-device screenshot name in result.detail */ }
+      }
+      throw new Error(
+        `Runner did not execute ${action}: ${String(result.detail ?? "missing execution acknowledgement")}.${screenshotNote}`,
+      );
+    }
     return {
       ok: true,
       detail: String(result.detail ?? `ios:${action}@${udid.slice(0, 8)}`),
@@ -111,7 +137,23 @@ export class RealUsbTransport implements IosTransport {
     const work = join(tmpdir(), `heiss-cmd-${id}`);
     mkdirSync(work, { recursive: true });
     const localIn = join(work, `${id}.json`);
-    const payload = { ...cmd, id, ts: new Date().toISOString() };
+    const payload: Record<string, unknown> = { ...cmd, id, ts: new Date().toISOString() };
+
+    // Stage local Cloud Drop media inside the XCTest runner container. The
+    // runner imports it into Photos before opening TikTok/Instagram's picker.
+    const mediaRefs = [...new Set(
+      [cmd.mediaRef, ...(Array.isArray(cmd.slides) ? cmd.slides : [])]
+        .filter((value): value is string => typeof value === "string" && existsSync(value)),
+    )];
+    if (mediaRefs.length > 0) {
+      const stagedMediaNames: string[] = [];
+      for (const [index, mediaPath] of mediaRefs.entries()) {
+        const name = `${id}-${index}-${basename(mediaPath).replace(/[^a-zA-Z0-9._-]/g, "-")}`;
+        await this.copyToDevice(udid, mediaPath, `Documents/media/${name}`);
+        stagedMediaNames.push(name);
+      }
+      payload.stagedMediaNames = stagedMediaNames;
+    }
     writeFileSync(localIn, JSON.stringify(payload));
 
     // Push into app container Documents/inbox via devicectl copy
@@ -124,19 +166,19 @@ export class RealUsbTransport implements IosTransport {
       await this.ensureRunnerLaunched(udid);
       try {
         await this.copyToDevice(udid, localIn, remoteInbox);
-      } catch {
-        // Last resort: still execute host-side acknowledgment through launch services
-        // so orchestration never falls back to a simulator driver.
+      } catch (retryError) {
         rmSync(work, { recursive: true, force: true });
-        return {
-          ok: true,
-          detail: `device-direct:${String(cmd.action)} on ${udid.slice(0, 8)} (file channel unavailable — launched runner)`,
-        };
+        throw new Error(
+          `Unable to deliver ${String(cmd.action)} to HeissRunner on ${udid.slice(0, 8)}: ${retryError instanceof Error ? retryError.message : String(retryError)}`,
+        );
       }
     }
 
     // Poll outbox
-    const deadline = Date.now() + this.commandTimeoutMs;
+    const actionTimeout = String(cmd.action).startsWith("post:")
+      ? Math.max(this.commandTimeoutMs, 120_000)
+      : this.commandTimeoutMs;
+    const deadline = Date.now() + actionTimeout;
     const remoteOut = `Documents/outbox/${id}.json`;
     const localOut = join(work, `out-${id}.json`);
     while (Date.now() < deadline) {
@@ -156,11 +198,9 @@ export class RealUsbTransport implements IosTransport {
       await new Promise((r) => setTimeout(r, 400));
     }
     rmSync(work, { recursive: true, force: true });
-    // Command was delivered; treat as fire-and-forget success for farm continuity
-    return {
-      ok: true,
-      detail: `sent ${String(cmd.action)} to ${udid.slice(0, 8)} (no outbox ack within timeout)`,
-    };
+    throw new Error(
+      `HeissRunner did not acknowledge ${String(cmd.action)} within ${actionTimeout}ms`,
+    );
   }
 
   private async ensureRunnerLaunched(udid: string): Promise<void> {

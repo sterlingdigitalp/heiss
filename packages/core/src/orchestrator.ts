@@ -44,6 +44,16 @@ export interface DeviceDriver {
     deviceId: string,
     accountId: string,
     action: string,
+    context?: {
+      platform: SocialAccount["platform"];
+      handle: string;
+      caption?: string;
+      music?: string;
+      mediaRef?: string;
+      slides?: string[];
+      searchTerms?: string[];
+      uiProfile?: import("./types.js").PlatformUiProfile;
+    },
   ): Promise<{ ok: true; detail: string }>;
   disconnect(deviceId: string): Promise<void>;
 }
@@ -81,10 +91,11 @@ export class FarmOrchestrator {
     const activity: string[] = [];
     const sessions: FarmSession[] = [];
     let interrupted = false;
+    const runNow = opts.now ?? new Date().toISOString();
 
     // 1) Resume incomplete sessions first
     const checkpointed = this.store.state.sessions.filter(
-      (s) => s.status === "checkpointed",
+      (s) => s.status === "checkpointed" && (!s.nextRetryAt || s.nextRetryAt <= runNow),
     );
     for (const s of checkpointed) {
       const resumed = await this.continueSession(s, opts, activity);
@@ -110,7 +121,11 @@ export class FarmOrchestrator {
     // A second Cloud Drop on a later run (even the same calendar day) remains
     // claimable and will fill the open slot when the farm runs again.
     // Within one tick, an account is filled at most once (filledThisTick).
-    const filledThisTick = new Set<string>();
+    const filledThisTick = accountsFilledSlotOnDay(
+      this.store.state.sessions,
+      opts.timeOfDay,
+      calendarDay(runNow),
+    );
 
     const needingPost = accountsNeedingSlotFill(
       this.store.state.accounts,
@@ -169,6 +184,11 @@ export class FarmOrchestrator {
       if (this.store.locks.isDeviceLocked(account.deviceId)) continue;
       // Skip if already had a session this tick
       if (sessions.some((s) => s.accountId === account.id)) continue;
+      // Warmup maturity progresses at most once per calendar day. Post sessions
+      // still include their pre/post engagement wrapper at every configured slot.
+      if (account.lastWarmupAt && calendarDay(account.lastWarmupAt) === calendarDay(runNow)) {
+        continue;
+      }
 
       const kind: SessionKind =
         account.stage === "fresh" || account.stage === "warmed_up"
@@ -196,6 +216,7 @@ export class FarmOrchestrator {
         (q.status === "queued" ||
           (q.status === "stored_local" && !q.assignedAccountId)) &&
         q.accountIds.includes(accountId) &&
+        !(q.postedAccountIds ?? []).includes(accountId) &&
         !this.store.locks.isContentLocked(q.id),
     );
   }
@@ -220,6 +241,7 @@ export class FarmOrchestrator {
     const session = this.createSession(account, "post", item.id, opts.timeOfDay);
     this.store.locks.acquireDevice(account.deviceId, session.id);
     this.store.locks.acquireContent(item.id, session.id);
+    this.store.save();
 
     const script = postCycleScript(account.searchTerms);
     return this.executeSteps(session, account, script, opts, activity, item);
@@ -233,7 +255,8 @@ export class FarmOrchestrator {
   ): Promise<{ session: FarmSession; interrupted: boolean }> {
     const session = this.createSession(account, kind);
     this.store.locks.acquireDevice(account.deviceId, session.id);
-    const script = warmupOnlyScript(account.searchTerms);
+    this.store.save();
+    const script = warmupOnlyScript(account.searchTerms, account.trustScore);
     return this.executeSteps(session, account, script, opts, activity);
   }
 
@@ -246,6 +269,7 @@ export class FarmOrchestrator {
     const now = new Date().toISOString();
     const session: FarmSession = {
       id: randomUUID(),
+      ownerPid: process.pid,
       accountId: account.id,
       deviceId: account.deviceId,
       kind,
@@ -270,7 +294,22 @@ export class FarmOrchestrator {
     if (!account) {
       throw new Error(`Account ${session.accountId} missing for session ${session.id}`);
     }
-    let s = resumeSession(session);
+    const deviceHolder = this.store.locks.holderOfDevice(account.deviceId);
+    const contentHolder = session.queueItemId
+      ? this.store.locks.holderOfContent(session.queueItemId)
+      : undefined;
+    if ((deviceHolder && deviceHolder !== session.id) || (contentHolder && contentHolder !== session.id)) {
+      const message = `resume_deferred: resources held by ${deviceHolder ?? contentHolder}`;
+      activity.push(message);
+      this.store.pushActivity({
+        kind: "resume_deferred",
+        sessionId: session.id,
+        accountId: account.id,
+        message,
+      });
+      return { session, interrupted: false };
+    }
+    let s = { ...resumeSession(session), ownerPid: process.pid };
     this.replaceSession(s);
     activity.push(`resume: session ${s.id} from step ${s.checkpoint.stepIndex}`);
     this.store.pushActivity({
@@ -280,19 +319,16 @@ export class FarmOrchestrator {
       message: `Resumed from step ${s.checkpoint.stepIndex}`,
     });
 
-    try {
-      this.store.locks.acquireDevice(account.deviceId, s.id);
-      if (s.queueItemId) {
-        this.store.locks.acquireContent(s.queueItemId, s.id);
-      }
-    } catch {
-      // Already held by this session after restore — ok
+    this.store.locks.acquireDevice(account.deviceId, s.id);
+    if (s.queueItemId) {
+      this.store.locks.acquireContent(s.queueItemId, s.id);
     }
+    this.store.save();
 
     const script =
       s.kind === "post"
         ? postCycleScript(account.searchTerms)
-        : warmupOnlyScript(account.searchTerms);
+        : warmupOnlyScript(account.searchTerms, account.trustScore);
 
     let item: QueueItem | undefined;
     if (s.queueItemId) {
@@ -309,6 +345,7 @@ export class FarmOrchestrator {
     activity: string[],
     queueItem?: QueueItem,
   ): Promise<{ session: FarmSession; interrupted: boolean }> {
+    const runNow = opts.now ?? new Date().toISOString();
     const device = this.store.state.devices.find((d) => d.id === account.deviceId);
     if (device) {
       await this.driver.connect(device.id, device.udid);
@@ -332,6 +369,7 @@ export class FarmOrchestrator {
         };
         this.replaceSession(s);
         this.releaseLocks(s);
+        this.store.save();
         return { session: s, interrupted: false };
       }
 
@@ -346,8 +384,60 @@ export class FarmOrchestrator {
         continue;
       }
 
-      const result = await this.driver.runAction(account.deviceId, account.id, step);
-      const line = `${step} → ${result.detail}`;
+      const deviceAction = step === "post:publish" && s.checkpoint.publishAttempted
+        ? "post:verify_published"
+        : step;
+      if (step === "post:publish" && !s.checkpoint.publishAttempted) {
+        s = {
+          ...s,
+          checkpoint: { ...s.checkpoint, publishAttempted: true },
+          updatedAt: new Date().toISOString(),
+        };
+        this.replaceSession(s);
+        this.store.save();
+      }
+      let result: { ok: true; detail: string };
+      try {
+        const content = queueItem
+          ? this.store.state.contents.find((c) => c.id === queueItem.contentId)
+          : undefined;
+        result = await this.driver.runAction(account.deviceId, account.id, deviceAction, {
+          platform: account.platform,
+          handle: account.handle,
+          caption: content?.caption,
+          music: content?.music,
+          mediaRef: content?.mediaRef,
+          slides: content?.slides,
+          searchTerms: account.searchTerms,
+          uiProfile: this.store.state.uiProfiles[account.platform],
+        });
+      } catch (error) {
+        const message = `action_failed: ${deviceAction} → ${error instanceof Error ? error.message : String(error)}`;
+        s.activityLog.push(message);
+        activity.push(`${account.handle}: ${message}`);
+        this.store.pushActivity({
+          kind: "action_failed",
+          sessionId: s.id,
+          accountId: account.id,
+          deviceId: account.deviceId,
+          message,
+        });
+        const retryCount = (s.retryCount ?? 0) + 1;
+        const retryMinutes = Math.min(120, 5 * 2 ** (retryCount - 1));
+        s = checkpointSession({
+          ...s,
+          retryCount,
+          nextRetryAt: new Date(new Date(runNow).getTime() + retryMinutes * 60 * 1000).toISOString(),
+          lastError: message,
+          updatedAt: new Date().toISOString(),
+        });
+        this.replaceSession(s);
+        this.releaseLocks(s);
+        if (device) await this.driver.disconnect(device.id).catch(() => undefined);
+        this.store.save();
+        return { session: s, interrupted: true };
+      }
+      const line = `${deviceAction} → ${result.detail}`;
       s.activityLog.push(line);
       activity.push(`${account.handle}: ${line}`);
       this.store.pushActivity({
@@ -377,6 +467,7 @@ export class FarmOrchestrator {
         updatedAt: new Date().toISOString(),
       };
       this.replaceSession(s);
+      this.store.save();
       stepsThisRun += 1;
 
       if (
@@ -399,6 +490,8 @@ export class FarmOrchestrator {
     s = {
       ...s,
       status: "completed",
+      nextRetryAt: undefined,
+      lastError: undefined,
       completedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -406,16 +499,17 @@ export class FarmOrchestrator {
 
     let updated = account;
     if (s.kind === "post" && s.checkpoint.posted) {
-      updated = markPosting(applyWarmupProgress(account));
+      updated = markPosting(applyWarmupProgress(account, runNow), runNow);
     } else if (s.kind === "warmup") {
-      updated = applyWarmupProgress(account);
+      updated = applyWarmupProgress(account, runNow);
     } else {
-      updated = applyKeepWarm(account);
+      updated = applyKeepWarm(account, runNow);
     }
     const ai = this.store.state.accounts.findIndex((a) => a.id === account.id);
     this.store.state.accounts[ai] = updated;
 
     this.releaseLocks(s);
+    this.store.save();
     if (device) {
       await this.driver.disconnect(device.id);
     }
@@ -442,26 +536,11 @@ export class FarmOrchestrator {
     warmOnly: SocialAccount[];
     needingSlots: SocialAccount[];
   } {
-    // Status view: show who still has claimable work for this slot today,
-    // without treating lifetime posts as permanent exclusion.
+    // Status view mirrors execution: a day+time slot is filled at most once.
     const filledToday = accountsFilledSlotOnDay(
       this.store.state.sessions,
       timeOfDay,
       calendarDay(now),
-    );
-    // Prefer accounts that have claimable queue items even if they posted earlier today
-    // (another Cloud Drop waiting) — status lists them under needingSlots when content waits.
-    const withClaimable = new Set(
-      this.store.state.queue
-        .filter(
-          (q) =>
-            q.status === "queued" ||
-            (q.status === "stored_local" && !q.assignedAccountId),
-        )
-        .flatMap((q) => q.accountIds),
-    );
-    const filledForPlan = new Set(
-      [...filledToday].filter((id) => !withClaimable.has(id)),
     );
     return {
       canPost: this.store.state.accounts.filter((a) => canPost(a)),
@@ -471,25 +550,28 @@ export class FarmOrchestrator {
         this.store.state.accounts,
         this.store.state.slots,
         timeOfDay,
-        filledForPlan,
+        filledToday,
       ),
     };
   }
 }
 
 /** Seed helpers for demos/tests. */
-export function seedDemoFarm(store: JsonStore): void {
+export function seedDemoFarm(store: JsonStore, ownerId?: string): void {
   const now = new Date().toISOString();
-  if (store.state.devices.length === 0) {
+  const suffix = ownerId ? `-${ownerId.slice(0, 8)}` : "";
+  const deviceKey = `dev-1${suffix}`;
+  if (!store.state.devices.some((d) => d.id === deviceKey)) {
     store.state.devices.push({
-      id: "dev-1",
+      id: deviceKey,
+      ownerId,
       name: "iPhone Farm 1",
       udid: "SIM-0001",
       online: true,
       createdAt: now,
     });
   }
-  const deviceId = store.state.devices[0]!.id;
+  const deviceId = deviceKey;
 
   const ensure = (
     id: string,
@@ -498,9 +580,11 @@ export function seedDemoFarm(store: JsonStore): void {
     stage: SocialAccount["stage"],
     trust: number,
   ) => {
-    if (!store.state.accounts.find((a) => a.id === id)) {
+    const scopedId = `${id}${suffix}`;
+    if (!store.state.accounts.find((a) => a.id === scopedId)) {
       store.state.accounts.push({
-        id,
+        id: scopedId,
+        ownerId,
         deviceId,
         platform,
         handle,
@@ -518,7 +602,8 @@ export function seedDemoFarm(store: JsonStore): void {
   ensure("acc-x-warm", "x", "@warm_x", "matured", 100);
   ensure("acc-li-warm", "linkedin", "warm-li", "matured", 100);
 
-  for (const accId of ["acc-tt-mature", "acc-ig-mature"]) {
+  for (const baseId of ["acc-tt-mature", "acc-ig-mature"]) {
+    const accId = `${baseId}${suffix}`;
     if (!store.state.slots.find((s) => s.accountId === accId && s.timeOfDay === "09:00")) {
       store.state.slots.push({
         id: randomUUID(),

@@ -88,6 +88,78 @@ describe("checkpoint resume", () => {
 });
 
 describe("farm orchestrator (shipped path)", () => {
+  it("advances warmup maturity once per calendar day", async () => {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");
+    store.state.slots = [];
+    const orch = new FarmOrchestrator(store, new RecordingDriver());
+
+    await orch.runOnce({ runnerId: "r", timeOfDay: "09:00", now: "2026-07-12T14:00:00.000Z" });
+    assert.equal(store.state.accounts[0]!.trustScore, 25);
+    const sameDay = await orch.runOnce({ runnerId: "r", timeOfDay: "15:00", now: "2026-07-12T20:00:00.000Z" });
+    assert.equal(sameDay.sessions.length, 0);
+    assert.equal(store.state.accounts[0]!.trustScore, 25);
+    await orch.runOnce({ runnerId: "r", timeOfDay: "09:00", now: "2026-07-13T14:00:00.000Z" });
+    assert.equal(store.state.accounts[0]!.trustScore, 50);
+  });
+
+  it("checkpoints and releases locks when a device action fails", async () => {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");
+    store.state.slots = [];
+    const failing: DeviceDriver = {
+      kind: "ios",
+      async connect() {}, async disconnect() {},
+      async runAction() { throw new Error("runner did not acknowledge execution"); },
+    };
+    const result = await new FarmOrchestrator(store, failing).runOnce({ runnerId: "r", timeOfDay: "09:00" });
+    assert.equal(result.interrupted, true);
+    assert.equal(result.sessions[0]!.status, "checkpointed");
+    assert.deepEqual(store.locks.snapshot().devices, {});
+    assert.match(result.sessions[0]!.activityLog[0]!, /action_failed/);
+    assert.equal(result.sessions[0]!.retryCount, 1);
+    assert.ok(result.sessions[0]!.nextRetryAt);
+  });
+
+  it("defers a resume when another live session owns its device lock", async () => {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");
+    const account = store.state.accounts[0]!;
+    const session: FarmSession = {
+      id: "waiting", accountId: account.id, deviceId: account.deviceId,
+      kind: "warmup", status: "checkpointed",
+      startedAt: "2026-07-12T00:00:00.000Z", updatedAt: "2026-07-12T00:00:00.000Z",
+      checkpoint: createCheckpoint(), activityLog: [],
+    };
+    store.state.sessions.push(session);
+    store.locks.acquireDevice(account.deviceId, "other-live-session");
+    store.save();
+    const result = await new FarmOrchestrator(store, new RecordingDriver()).runOnce({ runnerId: "r", timeOfDay: "09:00" });
+    assert.equal(result.sessions[0]!.status, "checkpointed");
+    assert.ok(result.activity.some((line) => line.startsWith("resume_deferred:")));
+  });
+
+  it("recovers a process-crashed running session from disk", async () => {
+    const path = storePath();
+    const store = new JsonStore(path); seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");
+    const account = store.state.accounts[0]!;
+    store.state.sessions.push({
+      id: "crashed", accountId: account.id, deviceId: account.deviceId,
+      kind: "warmup", status: "running",
+      startedAt: "2026-07-12T00:00:00.000Z", updatedAt: "2026-07-12T00:00:00.000Z",
+      checkpoint: createCheckpoint(), activityLog: [],
+    });
+    store.locks.acquireDevice(account.deviceId, "crashed"); store.save();
+    const recovered = new JsonStore(path);
+    assert.equal(recovered.state.sessions[0]!.status, "checkpointed");
+    const result = await new FarmOrchestrator(recovered, new RecordingDriver()).runOnce({ runnerId: "r", timeOfDay: "09:00" });
+    assert.equal(result.sessions[0]!.status, "completed");
+  });
+
   it("blocks fresh from posting, posts matured with pre/post warmup, warms X/LinkedIn only", async () => {
     const store = new JsonStore(storePath());
     seedDemoFarm(store);
@@ -148,9 +220,11 @@ describe("farm orchestrator (shipped path)", () => {
     assert.ok(liSession);
     assert.notEqual(liSession.kind, "post");
 
-    const posted = store.state.queue.find((q) => q.status === "posted");
-    assert.ok(posted);
-    assert.equal(posted.assignedAccountId, "acc-tt-mature");
+    const delivered = store.state.queue.find((q) =>
+      q.postedAccountIds?.includes("acc-tt-mature"),
+    );
+    assert.ok(delivered);
+    assert.equal(delivered.status, "stored_local", "fresh target remains pending");
   });
 
   it("crash-recovery resumes without double-posting the same queue item", async () => {
@@ -226,5 +300,37 @@ describe("farm orchestrator (shipped path)", () => {
     );
     assert.equal(postSessions.length, 1, "exactly one successful post for the item");
     assert.ok(third.sessions.every((s) => s.queueItemId !== item.id || s.id === mid.id));
+  });
+
+  it("verifies an attempted publish after failure instead of tapping publish twice", async () => {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-mature");
+    store.state.slots = store.state.slots.filter((s) => s.accountId === "acc-tt-mature");
+    const drop = dropContent({
+      kind: "video", mediaRef: "v.mp4", caption: "two phase",
+      accountIds: ["acc-tt-mature"], createdBy: "test",
+    });
+    store.state.contents.push(drop.content); store.state.queue.push(drop.queueItem); store.save();
+    const firstDriver = new RecordingDriver();
+    firstDriver.runAction = async (_deviceId, _accountId, action) => {
+      firstDriver.actions.push(action);
+      if (action === "post:publish") throw new Error("connection lost after command delivery");
+      return { ok: true, detail: `sim:${action}` };
+    };
+    const first = await new FarmOrchestrator(store, firstDriver).runOnce({
+      runnerId: "r", timeOfDay: "09:00", now: "2026-07-12T14:00:00.000Z",
+    });
+    assert.equal(first.interrupted, true);
+    assert.equal(first.sessions[0]!.checkpoint.publishAttempted, true);
+    assert.equal(first.sessions[0]!.checkpoint.posted, false);
+
+    const resumedDriver = new RecordingDriver();
+    await new FarmOrchestrator(store, resumedDriver).runOnce({
+      runnerId: "r", timeOfDay: "09:00", now: "2026-07-12T14:06:00.000Z",
+    });
+    assert.ok(resumedDriver.actions.includes("post:verify_published"));
+    assert.equal(resumedDriver.actions.includes("post:publish"), false);
+    assert.equal(store.state.queue[0]!.status, "posted");
   });
 });

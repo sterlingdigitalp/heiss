@@ -181,6 +181,7 @@ export async function getSetupStatus(opts?: {
 export async function setupDeviceAndRunner(opts?: {
   udid?: string;
   teamId?: string;
+  repoRoot?: string;
 }): Promise<{
   device: UsbIphone;
   install: Awaited<ReturnType<typeof downloadBuildInstallRunner>>;
@@ -188,6 +189,7 @@ export async function setupDeviceAndRunner(opts?: {
   const device = await pollUntilReady({ udid: opts?.udid });
   const install = await downloadBuildInstallRunner({
     udid: device.udid,
+    repoRoot: opts?.repoRoot,
     signing: opts?.teamId ? { teamId: opts.teamId, method: "xcode" } : undefined,
   });
   return { device, install };

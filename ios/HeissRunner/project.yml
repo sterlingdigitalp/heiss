@@ -19,3 +19,24 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
+  HeissRunnerUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+    dependencies:
+      - target: HeissRunner
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: so.heiss.runner.uitests
+        TEST_TARGET_NAME: HeissRunner
+        CODE_SIGN_STYLE: Automatic
+schemes:
+  HeissRunner:
+    build:
+      targets:
+        HeissRunner: all
+        HeissRunnerUITests: [test]
+    test:
+      targets:
+        - HeissRunnerUITests

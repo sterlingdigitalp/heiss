@@ -75,5 +75,24 @@ npm run app
 | `HEISS_ASC_KEY_PATH` | App Store Connect `.p8` |
 | `HEISS_ASC_KEY_ID` | ASC key id |
 | `HEISS_ASC_ISSUER_ID` | ASC issuer id |
+| `HEISS_CLOUD_URL` | Hosted Cloud Drop dashboard origin used by the Mac daemon |
+
+## Hosted dashboard
+
+The web dashboard is deployable as a persistent Docker service. It provides
+passwordless sign-in, user-isolated Cloud Drop storage, license validation,
+plan enforcement, checkout/webhook integration, and the Mac runner sync API.
+
+```bash
+cp .env.example .env
+# Fill HEISS_PUBLIC_URL, HEISS_SESSION_SECRET, email, and billing values.
+docker build -t heiss-web .
+docker run --env-file .env -p 3000:3000 -v heiss-data:/data heiss-web
+```
+
+Use a durable encrypted volume for `/data` and terminate TLS in front of the
+container. After signing in, copy both the license key and dashboard URL into
+Heiss.app. The daemon then registers the real local farm, downloads queued
+media, pulls signed UI-layout profiles, and reports each account delivery.
 
 **No `HEISS_DRIVER=simulator`** — production path is iOS USB only.

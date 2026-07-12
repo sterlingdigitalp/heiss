@@ -7,6 +7,7 @@ import {
   isWarmOnlyPlatform,
   markPosting,
   postCycleScript,
+  warmupOnlyScript,
   supportsAutoPost,
   TRUST_PER_WARMUP,
   type SocialAccount,
@@ -75,5 +76,14 @@ describe("account lifecycle", () => {
     assert.ok(post.length >= 4);
     assert.ok(script.indexOf("post:publish") > script.indexOf(pre[0]!));
     assert.ok(script.indexOf(post[0]!) > script.indexOf("post:publish"));
+  });
+
+  it("ramps daily warmup volume across maturity phases", () => {
+    const fresh = warmupOnlyScript(["saas"], 0);
+    const matureRamp = warmupOnlyScript(["saas"], 75);
+    assert.equal(fresh.filter((step) => step === "warmup:scroll").length, 8);
+    assert.equal(fresh.includes("warmup:follow"), false);
+    assert.equal(matureRamp.filter((step) => step === "warmup:scroll").length, 15);
+    assert.equal(matureRamp.includes("warmup:follow"), true);
   });
 });

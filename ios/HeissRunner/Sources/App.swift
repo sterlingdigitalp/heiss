@@ -12,7 +12,7 @@ struct HeissRunnerApp: App {
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                Text("Keep this app open while the Mac farm runs.\nUSB control via Documents inbox.")
+                Text("The Mac launches the signed XCTest automation runner.\nYou can leave this app after trusting the developer certificate.")
                     .font(.caption)
                     .multilineTextAlignment(.center)
                     .padding()

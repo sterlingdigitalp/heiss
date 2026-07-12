@@ -26,6 +26,7 @@ export {
   ensureRunnerSources,
   isRunnerInstalled,
   runnerSourceDir,
+  launchAutomationRunner,
   RUNNER_BUNDLE_ID,
   RUNNER_APP_NAME,
   type InstallRunnerOptions,

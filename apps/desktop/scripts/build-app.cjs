@@ -1,68 +1,100 @@
-/**
- * Package a minimal Heiss.app macOS bundle that launches Electron.
- * For distribution, prefer `electron-builder`; this creates a runnable .app shell.
- */
-const fs = require("fs");
-const path = require("path");
-const { execSync } = require("child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { execFileSync } = require("node:child_process");
+const { build } = require("esbuild");
 
 const root = path.resolve(__dirname, "../../..");
 const desktop = path.resolve(__dirname, "..");
 const outDir = path.join(root, "dist");
-const appDir = path.join(outDir, "Heiss.app");
-const contents = path.join(appDir, "Contents");
-const macos = path.join(contents, "MacOS");
-const resources = path.join(contents, "Resources");
+const finalApp = path.join(outDir, "Heiss.app");
+const finalZip = path.join(outDir, "Heiss-mac-arm64.zip");
 
-fs.mkdirSync(macos, { recursive: true });
-fs.mkdirSync(resources, { recursive: true });
+async function main() {
+  const staging = fs.mkdtempSync(path.join(os.tmpdir(), "heiss-desktop-"));
+  try {
+    fs.cpSync(path.join(root, "ios"), path.join(staging, "ios"), { recursive: true });
+    fs.copyFileSync(path.join(desktop, "renderer.html"), path.join(staging, "renderer.html"));
+    fs.copyFileSync(path.join(desktop, "preload.cjs"), path.join(staging, "preload.cjs"));
+    fs.writeFileSync(path.join(staging, "package.json"), JSON.stringify({
+      name: "heiss-desktop",
+      productName: "Heiss",
+      version: "0.1.0",
+      main: "main.cjs",
+    }, null, 2));
 
-const launcher = `#!/bin/bash
-DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
-# Prefer monorepo root (dev) or Resources (packaged)
-if [ -f "$DIR/apps/desktop/main.cjs" ]; then
-  ROOT="$DIR"
-else
-  ROOT="$(cd "$(dirname "$0")/../Resources/app" && pwd)/../.."
-  if [ ! -f "$ROOT/package.json" ]; then
-    ROOT="$(cd "$(dirname "$0")/../Resources" && pwd)"
-  fi
-fi
-export HEISS_APP=1
-cd "$ROOT"
-if command -v npx >/dev/null 2>&1; then
-  exec npx electron "$ROOT/apps/desktop"
-else
-  echo "npx/electron not found" >&2
-  exit 1
-fi
-`;
+    await build({
+      entryPoints: [path.join(desktop, "main.cjs")],
+      outfile: path.join(staging, "main.cjs"),
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      target: "node20",
+      external: ["electron"],
+    });
+    await build({
+      entryPoints: [path.join(root, "apps/farm/src/cli.ts")],
+      outfile: path.join(staging, "farm-cli.mjs"),
+      bundle: true,
+      platform: "node",
+      format: "esm",
+      target: "node20",
+      banner: { js: "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);" },
+    });
 
-fs.writeFileSync(path.join(macos, "Heiss"), launcher, { mode: 0o755 });
-fs.chmodSync(path.join(macos, "Heiss"), 0o755);
-
-const plist = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleExecutable</key><string>Heiss</string>
-  <key>CFBundleIdentifier</key><string>so.heiss.app</string>
-  <key>CFBundleName</key><string>Heiss</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
-  <key>LSMinimumSystemVersion</key><string>14.0</string>
-  <key>NSHighResolutionCapable</key><true/>
-</dict>
-</plist>
-`;
-fs.writeFileSync(path.join(contents, "Info.plist"), plist);
-
-// Copy desktop app into Resources for offline launch reference
-const resApp = path.join(resources, "app");
-fs.mkdirSync(resApp, { recursive: true });
-for (const f of ["main.cjs", "preload.cjs", "renderer.html", "package.json"]) {
-  fs.copyFileSync(path.join(desktop, f), path.join(resApp, f));
+    const electronExecutable = require("electron");
+    const electronApp = path.resolve(path.dirname(electronExecutable), "../..");
+    fs.mkdirSync(outDir, { recursive: true });
+    fs.rmSync(finalApp, { recursive: true, force: true });
+    execFileSync("ditto", [electronApp, finalApp]);
+    const resources = path.join(finalApp, "Contents", "Resources");
+    fs.rmSync(path.join(resources, "default_app.asar"), { force: true });
+    fs.cpSync(staging, path.join(resources, "app"), { recursive: true });
+    const iconset = path.join(staging, "Heiss.iconset");
+    fs.mkdirSync(iconset);
+    const iconSource = path.join(desktop, "assets", "Heiss-icon.png");
+    for (const [name, size] of [
+      ["icon_16x16.png", 16], ["icon_16x16@2x.png", 32],
+      ["icon_32x32.png", 32], ["icon_32x32@2x.png", 64],
+      ["icon_128x128.png", 128], ["icon_128x128@2x.png", 256],
+      ["icon_256x256.png", 256], ["icon_256x256@2x.png", 512],
+      ["icon_512x512.png", 512], ["icon_512x512@2x.png", 1024],
+    ]) {
+      execFileSync("sips", ["-z", String(size), String(size), iconSource, "--out", path.join(iconset, name)], { stdio: "ignore" });
+    }
+    execFileSync("iconutil", ["-c", "icns", iconset, "-o", path.join(resources, "Heiss.icns")]);
+    const oldExecutable = path.join(finalApp, "Contents", "MacOS", "Electron");
+    const executable = path.join(finalApp, "Contents", "MacOS", "Heiss");
+    fs.renameSync(oldExecutable, executable);
+    const plist = path.join(finalApp, "Contents", "Info.plist");
+    for (const [key, value] of [
+      ["CFBundleDisplayName", "Heiss"],
+      ["CFBundleName", "Heiss"],
+      ["CFBundleIdentifier", "so.heiss.app"],
+      ["CFBundleExecutable", "Heiss"],
+      ["CFBundleIconFile", "Heiss.icns"],
+      ["CFBundleShortVersionString", "0.1.0"],
+      ["CFBundleVersion", "1"],
+    ]) {
+      execFileSync("plutil", ["-replace", key, "-string", value, plist]);
+    }
+    execFileSync("codesign", ["--force", "--deep", "--sign", "-", finalApp], { stdio: "pipe" });
+    fs.rmSync(finalZip, { force: true });
+    execFileSync("ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", finalApp, finalZip]);
+    console.log(JSON.stringify({
+      ok: true,
+      app: finalApp,
+      architecture: process.arch === "x64" ? "x64" : "arm64",
+      selfContained: true,
+      zip: finalZip,
+      open: `open ${finalApp}`,
+    }, null, 2));
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
+  }
 }
 
-console.log(JSON.stringify({ ok: true, app: appDir, open: `open ${appDir}` }, null, 2));
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

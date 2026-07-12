@@ -121,12 +121,29 @@ export function applyKeepWarm(
 
 /** Every post cycle is wrapped with pre-post and post-post warmup. */
 export function postCycleScript(searchTerms: string[]): string[] {
-  const warmup = defaultWarmupActions(searchTerms).map((a) => `pre_warmup:${a}`);
+  const warmup = ["scroll", "scroll", "like", ...(searchTerms.length ? ["search"] : [])]
+    .map((a) => `pre_warmup:${a}`);
   const post = ["post:upload", "post:caption", "post:music_optional", "post:publish"];
-  const after = defaultWarmupActions(searchTerms).map((a) => `post_warmup:${a}`);
+  const after = ["scroll", "scroll", "like", ...(searchTerms.length ? ["search"] : [])]
+    .map((a) => `post_warmup:${a}`);
   return [...warmup, ...post, ...after];
 }
 
-export function warmupOnlyScript(searchTerms: string[]): string[] {
-  return defaultWarmupActions(searchTerms).map((a) => `warmup:${a}`);
+export function warmupOnlyScript(searchTerms: string[], trustScore = 0): string[] {
+  const phase = Math.min(3, Math.floor(Math.max(0, trustScore) / TRUST_PER_WARMUP));
+  const plans = [
+    { scroll: 8, like: 0, follow: 0, search: 2 },
+    { scroll: 10, like: 2, follow: 0, search: 2 },
+    { scroll: 12, like: 3, follow: 1, search: 2 },
+    { scroll: 15, like: 4, follow: 1, search: 2 },
+  ] as const;
+  const plan = plans[phase]!;
+  const actions: WarmupAction[] = [];
+  actions.push(...Array.from({ length: plan.scroll }, () => "scroll" as const));
+  actions.push(...Array.from({ length: plan.like }, () => "like" as const));
+  actions.push(...Array.from({ length: plan.follow }, () => "follow" as const));
+  if (searchTerms.length > 0) {
+    actions.push(...Array.from({ length: plan.search }, () => "search" as const));
+  }
+  return actions.map((action) => `warmup:${action}`);
 }

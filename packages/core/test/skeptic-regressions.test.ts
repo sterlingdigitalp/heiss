@@ -33,7 +33,7 @@ function storePath(): string {
 }
 
 describe("skeptic regressions (shipped orchestrator path)", () => {
-  it("second Cloud Drop posts on a later run (not blocked by historical posts)", async () => {
+  it("second Cloud Drop waits for the next day's slot, not forever", async () => {
     const store = new JsonStore(storePath());
     seedDemoFarm(store);
     // Isolate to one matured TikTok account with a 09:00 slot
@@ -56,13 +56,14 @@ describe("skeptic regressions (shipped orchestrator path)", () => {
       runnerId: "r1",
       timeOfDay: "09:00",
       maxSessions: 5,
+      now: "2026-07-12T14:00:00.000Z",
     });
     assert.equal(run1.interrupted, false);
     const posted1 = store.state.queue.filter((q) => q.status === "posted");
     assert.equal(posted1.length, 1);
     assert.equal(posted1[0]!.id, d1.queueItem.id);
 
-    // Second Cloud Drop — must become posted on next farm run (not stuck queued forever)
+    // A filled slot cannot double-publish on the same day.
     const d2 = dropContent({
       kind: "video",
       mediaRef: "second.mp4",
@@ -78,8 +79,19 @@ describe("skeptic regressions (shipped orchestrator path)", () => {
       runnerId: "r1",
       timeOfDay: "09:00",
       maxSessions: 5,
+      now: "2026-07-12T15:00:00.000Z",
     });
     assert.equal(run2.interrupted, false);
+
+    assert.equal(store.state.queue.find((q) => q.id === d2.queueItem.id)?.status, "queued");
+
+    const run3 = await orch.runOnce({
+      runnerId: "r1",
+      timeOfDay: "09:00",
+      maxSessions: 5,
+      now: "2026-07-13T14:00:00.000Z",
+    });
+    assert.equal(run3.interrupted, false);
 
     const second = store.state.queue.find((q) => q.id === d2.queueItem.id);
     assert.ok(second);

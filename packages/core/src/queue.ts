@@ -14,6 +14,7 @@ export class QueueError extends Error {
 }
 
 export interface DropContentInput {
+  ownerId?: string;
   kind: ContentKind;
   mediaRef: string;
   slides?: string[];
@@ -34,12 +35,13 @@ export function dropContent(input: DropContentInput): DropResult {
   if (input.accountIds.length === 0) {
     throw new QueueError("At least one target account is required");
   }
-  if (input.kind === "carousel" && (!input.slides || input.slides.length < 1)) {
-    throw new QueueError("Carousel requires at least one slide in slides[]");
+  if (input.kind === "carousel" && (!input.slides || input.slides.length < 2)) {
+    throw new QueueError("Carousel requires at least two slides in slides[]");
   }
   const now = input.now ?? new Date().toISOString();
   const content: ContentAsset = {
     id: randomUUID(),
+    ownerId: input.ownerId,
     kind: input.kind,
     mediaRef: input.mediaRef,
     slides: input.slides,
@@ -50,9 +52,11 @@ export function dropContent(input: DropContentInput): DropResult {
   };
   const queueItem: QueueItem = {
     id: randomUUID(),
+    ownerId: input.ownerId,
     contentId: content.id,
     accountIds: [...input.accountIds],
     status: "queued",
+    postedAccountIds: [],
     createdAt: now,
   };
   return { content, queueItem };
@@ -106,6 +110,9 @@ export function assignToAccount(item: QueueItem, accountId: string): QueueItem {
       `Account ${accountId} is not a target of queue item ${item.id}`,
     );
   }
+  if ((item.postedAccountIds ?? []).includes(accountId)) {
+    throw new QueueError(`Queue item ${item.id} already posted to ${accountId}`);
+  }
   if (item.assignedAccountId) {
     throw new QueueError(
       `Queue item ${item.id} already assigned to ${item.assignedAccountId}`,
@@ -125,10 +132,14 @@ export function markPosted(
   if (item.status !== "assigned") {
     throw new QueueError(`Cannot mark posted: item ${item.id} is ${item.status}`);
   }
+  const delivered = [...new Set([...(item.postedAccountIds ?? []), item.assignedAccountId!])];
+  const complete = item.accountIds.every((id) => delivered.includes(id));
   return {
     ...item,
-    status: "posted",
-    postedAt: now,
+    status: complete ? "posted" : "stored_local",
+    assignedAccountId: complete ? item.assignedAccountId : undefined,
+    postedAccountIds: delivered,
+    postedAt: complete ? now : undefined,
   };
 }
 
@@ -142,6 +153,9 @@ export function ensureNotDoublePost(item: QueueItem): void {
     throw new QueueError(
       `Queue item ${item.id} already posted; refusing double-post`,
     );
+  }
+  if (item.assignedAccountId && (item.postedAccountIds ?? []).includes(item.assignedAccountId)) {
+    throw new QueueError(`Queue item ${item.id} already posted to ${item.assignedAccountId}`);
   }
 }
 

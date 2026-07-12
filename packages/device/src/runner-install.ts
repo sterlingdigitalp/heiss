@@ -7,6 +7,8 @@ import {
   mkdirSync,
   readFileSync,
   writeFileSync,
+  openSync,
+  closeSync,
   cpSync,
   rmSync,
 } from "node:fs";
@@ -129,7 +131,7 @@ export async function buildRunner(
     "-derivedDataPath",
     derived,
     ...plan.xcodebuildArgs,
-    "build",
+    "build-for-testing",
   ];
 
   try {
@@ -272,16 +274,31 @@ export async function downloadBuildInstallRunner(
   }
 
   let appPath = opts.useExistingApp;
+  let automationSource: string | undefined;
   const plan = planSigning(opts.signing);
   let notes = [...plan.notes];
   if (!appPath) {
     const src = await ensureRunnerSources(opts.repoRoot);
+    automationSource = src;
     const built = await buildRunner(src, opts.signing);
     appPath = built.appPath;
     notes = [...notes, ...built.notes];
   }
 
   await installAppOnDevice(udid!, appPath!);
+
+  if (automationSource) {
+    const automation = launchAutomationRunner(udid!, automationSource);
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    try {
+      process.kill(automation.pid, 0);
+    } catch {
+      throw new Error(`XCTest automation runner exited during startup. See ${automation.logPath}`);
+    }
+    notes.push(`XCTest automation runner started (pid ${automation.pid}).`);
+  } else {
+    notes.push("Existing app used; rebuild normally to install the XCTest automation runner.");
+  }
 
   // Launch runner so it can accept control commands
   try {
@@ -334,6 +351,34 @@ export async function downloadBuildInstallRunner(
   };
 }
 
+/** Launch the long-running UI-test command server built by build-for-testing. */
+export function launchAutomationRunner(
+  udid: string,
+  sourceDir: string,
+): { pid: number; logPath: string } {
+  const derived = join(runnerWorkDir(), "DerivedData");
+  const logs = join(runnerWorkDir(), "automation-logs");
+  mkdirSync(logs, { recursive: true });
+  const logPath = join(logs, `${udid}-${Date.now()}.log`);
+  const fd = openSync(logPath, "a");
+  const child = spawn(
+    "xcodebuild",
+    [
+      "-project", join(sourceDir, "HeissRunner.xcodeproj"),
+      "-scheme", RUNNER_APP_NAME,
+      "-destination", `platform=iOS,id=${udid}`,
+      "-derivedDataPath", derived,
+      "test-without-building",
+      "-only-testing:HeissRunnerUITests/HeissRunnerUITests/testCommandServer",
+    ],
+    { cwd: sourceDir, detached: true, stdio: ["ignore", fd, fd] },
+  );
+  closeSync(fd);
+  child.unref();
+  if (!child.pid) throw new Error("Failed to launch XCTest automation runner");
+  return { pid: child.pid, logPath };
+}
+
 export function isRunnerInstalled(udid: string): boolean {
   const recordPath = join(homedir(), ".heiss", "runner-installs.json");
   if (!existsSync(recordPath)) return false;
@@ -383,7 +428,7 @@ struct HeissRunnerApp: App {
             VStack(spacing: 16) {
                 Text("Heiss Runner").font(.largeTitle.bold())
                 Text(server.statusText).font(.body).foregroundStyle(.secondary)
-                Text("Keep this app open while the Mac farm runs.")
+                Text("The Mac launches the signed XCTest automation runner.")
                     .font(.caption).multilineTextAlignment(.center).padding()
             }
             .padding()
@@ -438,11 +483,11 @@ final class ControlServer: ObservableObject {
         // Human-like gestures via coordinate taps when host supplies points.
         // Real social-app navigation uses on-device UI; never unofficial platform APIs.
         if action.contains("scroll") || action.contains("swipe") {
-            return ["ok": true, "detail": "performed swipe/scroll for \\(action)"]
+            return ["ok": false, "executed": false, "detail": "XCTest automation runner required for \\(action)"]
         }
         if action.contains("tap") || action.contains("like") || action.contains("follow")
             || action.contains("search") || action.contains("post") || action.contains("warmup") {
-            return ["ok": true, "detail": "performed gesture for \\(action)"]
+            return ["ok": false, "executed": false, "detail": "XCTest automation runner required for \\(action)"]
         }
         if action == "ping" {
             return ["ok": true, "detail": "pong", "ts": ISO8601DateFormatter().string(from: Date())]

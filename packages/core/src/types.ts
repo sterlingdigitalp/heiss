@@ -19,13 +19,22 @@ export type WarmupAction = "scroll" | "like" | "follow" | "search";
 
 export type ContentKind = "video" | "carousel";
 
+export interface PlatformUiProfile {
+  platform: Platform;
+  revision: string;
+  bundleId?: string;
+  points: Record<string, { x: number; y: number }>;
+  updatedAt: string;
+}
+
 export type QueueItemStatus =
   | "queued"
   | "claimed"
   | "stored_local"
   | "assigned"
   | "posted"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export type SessionKind = "warmup" | "post" | "keep_warm";
 
@@ -38,15 +47,35 @@ export type SessionStatus =
 
 export interface Device {
   id: string;
+  ownerId?: string;
+  /** Stable id from the owner's Mac when mirrored to Cloud Drop. */
+  sourceId?: string;
   name: string;
   /** Simulated or physical identifier */
   udid: string;
   online: boolean;
+  /** Optional SOCKS5 proxy assigned one-per-device. */
+  proxyId?: string;
+  createdAt: string;
+}
+
+export interface ProxyConfig {
+  id: string;
+  ownerId?: string;
+  name: string;
+  type: "socks5";
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+  deviceId?: string;
   createdAt: string;
 }
 
 export interface SocialAccount {
   id: string;
+  ownerId?: string;
+  sourceId?: string;
   deviceId: string;
   platform: Platform;
   handle: string;
@@ -62,6 +91,7 @@ export interface SocialAccount {
 
 export interface ContentAsset {
   id: string;
+  ownerId?: string;
   kind: ContentKind;
   /** Local path or remote URL of primary media / first slide. */
   mediaRef: string;
@@ -75,6 +105,7 @@ export interface ContentAsset {
 
 export interface QueueItem {
   id: string;
+  ownerId?: string;
   contentId: string;
   /** Target account ids selected at drop time. */
   accountIds: string[];
@@ -83,7 +114,12 @@ export interface QueueItem {
   claimedAt?: string;
   localPath?: string;
   assignedAccountId?: string;
+  /** Targets that have already published this item; supports fan-out exactly once. */
+  postedAccountIds?: string[];
   postedAt?: string;
+  remoteUrl?: string;
+  remoteQueueId?: string;
+  remotePostedAccountIds?: string[];
   createdAt: string;
 }
 
@@ -112,10 +148,12 @@ export interface SessionCheckpoint {
   lastAction?: string;
   contentAssigned?: boolean;
   posted?: boolean;
+  publishAttempted?: boolean;
 }
 
 export interface FarmSession {
   id: string;
+  ownerPid?: number;
   accountId: string;
   deviceId: string;
   kind: SessionKind;
@@ -128,12 +166,29 @@ export interface FarmSession {
   completedAt?: string;
   checkpoint: SessionCheckpoint;
   activityLog: string[];
+  retryCount?: number;
+  nextRetryAt?: string;
+  lastError?: string;
 }
 
 export interface User {
   id: string;
   email: string;
   passwordHash: string;
+  planId: PlanTier["id"];
+  licenseKey: string;
+  trialEndsAt: string;
+  billingCustomerId?: string;
+  subscriptionId?: string;
+  createdAt: string;
+}
+
+export interface MagicLink {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  expiresAt: string;
+  usedAt?: string;
   createdAt: string;
 }
 
@@ -146,12 +201,19 @@ export interface PlanTier {
   priceMonthly: number;
 }
 
+export interface LicenseActivation {
+  key: string;
+  planId: PlanTier["id"];
+  activatedAt: string;
+  cloudUrl?: string;
+}
+
 export const PLAN_TIERS: readonly PlanTier[] = [
   {
     id: "free",
     name: "Free",
     maxDevices: 1,
-    maxAccounts: 4,
+    maxAccounts: 8,
     cloudDropGb: 0.5,
     priceMonthly: 0,
   },
