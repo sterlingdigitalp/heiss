@@ -68,6 +68,8 @@ export interface RunOptions {
   interruptAfterSteps?: number;
   /** Force resume of checkpointed sessions first. */
   resumeFirst?: boolean;
+  sessionId?: string;
+  accountId?: string;
   /** Clock override (ISO) for day-scoped slot fill; defaults to now. */
   now?: string;
 }
@@ -93,9 +95,31 @@ export class FarmOrchestrator {
     let interrupted = false;
     const runNow = opts.now ?? new Date().toISOString();
 
+    // A backoff-delayed checkpoint still owns the account logically even though
+    // its device lock is released. Retain the checkpoint with the most progress
+    // and retire any duplicates created by older controllers.
+    const pendingByAccount = new Map<string, FarmSession[]>();
+    for (const session of this.store.state.sessions.filter((item) => item.status === "checkpointed")) {
+      const group = pendingByAccount.get(session.accountId) ?? [];
+      group.push(session); pendingByAccount.set(session.accountId, group);
+    }
+    for (const group of pendingByAccount.values()) {
+      group.sort((a, b) => b.checkpoint.stepIndex - a.checkpoint.stepIndex || b.updatedAt.localeCompare(a.updatedAt));
+      for (const duplicate of group.slice(1)) {
+        duplicate.status = "failed";
+        duplicate.nextRetryAt = undefined;
+        duplicate.lastError = `superseded_by_checkpoint:${group[0]!.id}`;
+        duplicate.completedAt = runNow;
+        duplicate.updatedAt = runNow;
+      }
+    }
+
     // 1) Resume incomplete sessions first
     const checkpointed = this.store.state.sessions.filter(
-      (s) => s.status === "checkpointed" && (!s.nextRetryAt || s.nextRetryAt <= runNow),
+      (s) => s.status === "checkpointed"
+        && (!opts.sessionId || s.id === opts.sessionId)
+        && (!opts.accountId || s.accountId === opts.accountId)
+        && (opts.resumeFirst || !s.nextRetryAt || s.nextRetryAt <= runNow),
     );
     for (const s of checkpointed) {
       const resumed = await this.continueSession(s, opts, activity);
@@ -115,6 +139,9 @@ export class FarmOrchestrator {
     // 2) Plan new sessions
     const max = opts.maxSessions ?? 50;
     let started = 0;
+    const accountsAwaitingRetry = new Set(
+      this.store.state.sessions.filter((s) => s.status === "checkpointed").map((s) => s.accountId),
+    );
 
     // Posts for accounts with open slots + claimable content.
     // Exclusion is per-tick only — never lifetime "any historical post".
@@ -136,6 +163,8 @@ export class FarmOrchestrator {
 
     for (const account of needingPost) {
       if (started >= max) break;
+      if (opts.accountId && account.id !== opts.accountId) continue;
+      if (accountsAwaitingRetry.has(account.id)) continue;
       if (isWarmOnlyPlatform(account.platform)) continue;
       if (!canPost(account)) {
         activity.push(
@@ -181,6 +210,8 @@ export class FarmOrchestrator {
     // Warmups / keep-warm for remaining accounts
     for (const account of this.store.state.accounts) {
       if (started >= max) break;
+      if (opts.accountId && account.id !== opts.accountId) continue;
+      if (accountsAwaitingRetry.has(account.id)) continue;
       if (this.store.locks.isDeviceLocked(account.deviceId)) continue;
       // Skip if already had a session this tick
       if (sessions.some((s) => s.accountId === account.id)) continue;
@@ -365,7 +396,7 @@ export class FarmOrchestrator {
         s = {
           ...s,
           status: "failed",
-          updatedAt: new Date().toISOString(),
+          updatedAt: runNow,
         };
         this.replaceSession(s);
         this.releaseLocks(s);
@@ -378,7 +409,7 @@ export class FarmOrchestrator {
         s = {
           ...s,
           checkpoint: advanceCheckpoint(s.checkpoint, `skip:${step}`),
-          updatedAt: new Date().toISOString(),
+          updatedAt: runNow,
         };
         this.replaceSession(s);
         continue;
@@ -391,7 +422,7 @@ export class FarmOrchestrator {
         s = {
           ...s,
           checkpoint: { ...s.checkpoint, publishAttempted: true },
-          updatedAt: new Date().toISOString(),
+          updatedAt: runNow,
         };
         this.replaceSession(s);
         this.store.save();
@@ -429,7 +460,7 @@ export class FarmOrchestrator {
           retryCount,
           nextRetryAt: new Date(new Date(runNow).getTime() + retryMinutes * 60 * 1000).toISOString(),
           lastError: message,
-          updatedAt: new Date().toISOString(),
+          updatedAt: runNow,
         });
         this.replaceSession(s);
         this.releaseLocks(s);
@@ -464,7 +495,7 @@ export class FarmOrchestrator {
       s = {
         ...s,
         checkpoint: advanceCheckpoint(s.checkpoint, step, extras),
-        updatedAt: new Date().toISOString(),
+        updatedAt: runNow,
       };
       this.replaceSession(s);
       this.store.save();
@@ -492,8 +523,8 @@ export class FarmOrchestrator {
       status: "completed",
       nextRetryAt: undefined,
       lastError: undefined,
-      completedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      completedAt: runNow,
+      updatedAt: runNow,
     };
     this.replaceSession(s);
 

@@ -7,8 +7,6 @@ import {
   mkdirSync,
   readFileSync,
   writeFileSync,
-  openSync,
-  closeSync,
   cpSync,
   rmSync,
 } from "node:fs";
@@ -86,7 +84,8 @@ export async function ensureRunnerSources(repoRoot?: string): Promise<string> {
 export async function buildRunner(
   sourceDir: string,
   signing?: Partial<SigningConfig>,
-): Promise<{ appPath: string; notes: string[] }> {
+  udid?: string,
+): Promise<{ appPath: string; testRunnerPath: string; notes: string[] }> {
   const plan = planSigning(signing);
   const derived = join(runnerWorkDir(), "DerivedData");
   mkdirSync(derived, { recursive: true });
@@ -127,9 +126,11 @@ export async function buildRunner(
     "-configuration",
     "Release",
     "-destination",
-    "generic/platform=iOS",
+    udid ? `platform=iOS,id=${udid}` : "generic/platform=iOS",
     "-derivedDataPath",
     derived,
+    "-allowProvisioningUpdates",
+    "-allowProvisioningDeviceRegistration",
     ...plan.xcodebuildArgs,
     "build-for-testing",
   ];
@@ -158,10 +159,16 @@ export async function buildRunner(
     });
   } catch (e) {
     const err = e as { stderr?: string; stdout?: string; message?: string };
+    const combined = `${err.stderr ?? ""}\n${err.stdout ?? ""}`;
+    const diagnostics = combined
+      .split("\n")
+      .filter((line) => /error:|No Account for Team|No profiles for/.test(line))
+      .slice(-12)
+      .join("\n");
     throw new Error(
       `xcodebuild failed for HeissRunner.\n` +
         `Ensure Xcode is installed, Apple ID Team is set (HEISS_TEAM_ID), and a real iOS SDK is available.\n` +
-        `${err.stderr?.slice(-2000) ?? err.stdout?.slice(-2000) ?? err.message}`,
+        `${diagnostics || err.stderr?.slice(-2000) || err.stdout?.slice(-2000) || err.message}`,
     );
   }
 
@@ -169,7 +176,11 @@ export async function buildRunner(
   if (!appPath) {
     throw new Error(`Build succeeded but HeissRunner.app not found under ${derived}`);
   }
-  return { appPath, notes: plan.notes };
+  const testRunnerPath = join(derived, "Build", "Products", "Release-iphoneos", "HeissRunnerUITests-Runner.app");
+  if (!existsSync(testRunnerPath)) {
+    throw new Error(`Build succeeded but HeissRunnerUITests-Runner.app not found under ${derived}`);
+  }
+  return { appPath, testRunnerPath, notes: plan.notes };
 }
 
 function findBuiltApp(derived: string): string | null {
@@ -275,21 +286,26 @@ export async function downloadBuildInstallRunner(
 
   let appPath = opts.useExistingApp;
   let automationSource: string | undefined;
+  let testRunnerPath: string | undefined;
   const plan = planSigning(opts.signing);
   let notes = [...plan.notes];
   if (!appPath) {
     const src = await ensureRunnerSources(opts.repoRoot);
     automationSource = src;
-    const built = await buildRunner(src, opts.signing);
+    const built = await buildRunner(src, opts.signing, udid!);
     appPath = built.appPath;
+    testRunnerPath = built.testRunnerPath;
     notes = [...notes, ...built.notes];
   }
 
   await installAppOnDevice(udid!, appPath!);
 
   if (automationSource) {
-    const automation = launchAutomationRunner(udid!, automationSource);
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    // Xcode's test manager can reject its own first install of a Personal Team
+    // test host as untrusted. Preinstall the exact signed host built above.
+    await installAppOnDevice(udid!, testRunnerPath!);
+    const automation = await launchAutomationRunner(udid!, automationSource);
+    await new Promise((resolve) => setTimeout(resolve, 4_000));
     try {
       process.kill(automation.pid, 0);
     } catch {
@@ -300,23 +316,26 @@ export async function downloadBuildInstallRunner(
     notes.push("Existing app used; rebuild normally to install the XCTest automation runner.");
   }
 
-  // Launch runner so it can accept control commands
-  try {
-    await execFileAsync(
-      "xcrun",
-      [
-        "devicectl",
-        "device",
-        "process",
-        "launch",
-        "--device",
-        udid!,
-        plan.bundleId,
-      ],
-      { timeout: 30_000 },
-    );
-  } catch {
-    notes.push("Runner installed; launch manually once if control channel is idle.");
+  // The XCTest host is the control server. Launching the base app after it
+  // starts would steal foreground focus from the social app mid-command.
+  if (!automationSource) {
+    try {
+      await execFileAsync(
+        "xcrun",
+        [
+          "devicectl",
+          "device",
+          "process",
+          "launch",
+          "--device",
+          udid!,
+          plan.bundleId,
+        ],
+        { timeout: 30_000 },
+      );
+    } catch {
+      notes.push("Runner installed; launch manually once if control channel is idle.");
+    }
   }
 
   // Persist install record
@@ -352,31 +371,40 @@ export async function downloadBuildInstallRunner(
 }
 
 /** Launch the long-running UI-test command server built by build-for-testing. */
-export function launchAutomationRunner(
+export async function launchAutomationRunner(
   udid: string,
   sourceDir: string,
-): { pid: number; logPath: string } {
+): Promise<{ pid: number; logPath: string; label: string }> {
   const derived = join(runnerWorkDir(), "DerivedData");
   const logs = join(runnerWorkDir(), "automation-logs");
   mkdirSync(logs, { recursive: true });
   const logPath = join(logs, `${udid}-${Date.now()}.log`);
-  const fd = openSync(logPath, "a");
-  const child = spawn(
-    "xcodebuild",
-    [
+  const label = `so.heiss.automation.${udid.replace(/[^a-zA-Z0-9.-]/g, "-")}`;
+  try { await execFileAsync("launchctl", ["remove", label], { timeout: 10_000 }); }
+  catch { /* no previous job */ }
+  const args = [
       "-project", join(sourceDir, "HeissRunner.xcodeproj"),
       "-scheme", RUNNER_APP_NAME,
+      "-configuration", "Release",
       "-destination", `platform=iOS,id=${udid}`,
       "-derivedDataPath", derived,
       "test-without-building",
       "-only-testing:HeissRunnerUITests/HeissRunnerUITests/testCommandServer",
-    ],
-    { cwd: sourceDir, detached: true, stdio: ["ignore", fd, fd] },
-  );
-  closeSync(fd);
-  child.unref();
-  if (!child.pid) throw new Error("Failed to launch XCTest automation runner");
-  return { pid: child.pid, logPath };
+  ];
+  await execFileAsync("launchctl", [
+    "submit", "-l", label, "-o", logPath, "-e", logPath,
+    "--", "/usr/bin/xcodebuild", ...args,
+  ], { cwd: sourceDir, timeout: 10_000 });
+  let pid = 0;
+  for (let attempt = 0; attempt < 20 && !pid; attempt++) {
+    try {
+      const { stdout } = await execFileAsync("launchctl", ["print", `gui/${process.getuid?.() ?? 0}/${label}`], { timeout: 5_000 });
+      pid = Number(stdout.match(/\bpid = (\d+)/)?.[1] ?? 0);
+    } catch { /* job is still starting */ }
+    if (!pid) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!pid) throw new Error(`Failed to launch XCTest automation job ${label}. See ${logPath}`);
+  return { pid, logPath, label };
 }
 
 export function isRunnerInstalled(udid: string): boolean {

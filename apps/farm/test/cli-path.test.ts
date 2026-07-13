@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { findProjectRoot } from "../src/project-root.js";
 
 const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
@@ -17,6 +18,11 @@ function run(args: string[], dataDir: string) {
 }
 
 describe("farm CLI real-only path", () => {
+  it("finds vendored runner sources when npm starts inside apps/farm", () => {
+    const root = fileURLToPath(new URL("../../../", import.meta.url));
+    assert.equal(findProjectRoot(join(root, "apps", "farm")), root.replace(/\/$/, ""));
+  });
+
   it("exposes setup status, devices list, signing show (no seed simulator)", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "heiss-farm-real-"));
     const seed = run(["seed"], dataDir);

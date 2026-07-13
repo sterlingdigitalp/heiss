@@ -33,6 +33,7 @@ import {
   detectLocalTeams,
 } from "@heiss/device";
 import { defaultDataDir, farmStatePath } from "./paths.js";
+import { findProjectRoot } from "./project-root.js";
 import { createHmac, randomUUID } from "node:crypto";
 
 function usage(): string {
@@ -263,7 +264,7 @@ async function main(): Promise<void> {
   if (cmd === "runner" && args[1] === "install") {
     const udid = getArg(args, "--udid");
     const team = getArg(args, "--team");
-    const repoRoot = resolve(process.cwd());
+    const repoRoot = findProjectRoot();
     const result = await downloadBuildInstallRunner({
       udid,
       repoRoot,
@@ -582,6 +583,7 @@ async function main(): Promise<void> {
     const result = await orch.runOnce({
       runnerId: "local-farm",
       timeOfDay: time,
+      accountId: getArg(args, "--account"),
       interruptAfterSteps: interrupt ? Number(interrupt) : undefined,
     });
     const cloud = await pushCloudCompletions(store).catch((error) => ({
@@ -621,11 +623,17 @@ async function main(): Promise<void> {
     const driver = makeDriver();
     const orch = new FarmOrchestrator(store, driver);
     const time = getArg(args, "--time") ?? "09:00";
+    const sessionId = getArg(args, "--session");
     const result = await orch.runOnce({
       runnerId: "local-farm",
       timeOfDay: time,
       resumeFirst: true,
+      sessionId,
     });
+    if (sessionId) {
+      print({ ok: true, ...result, simulator: false });
+      return;
+    }
     if (store.state.sessions.some((s) => s.status === "checkpointed")) {
       const cont = await orch.runOnce({
         runnerId: "local-farm",
@@ -677,7 +685,7 @@ async function main(): Promise<void> {
     const handle = args[3];
     if (!deviceId || !platform || !handle) {
       console.error(
-        "Usage: add-account <deviceId> <tiktok|instagram|x|linkedin> <handle> [--stage fresh|matured]",
+        "Usage: add-account <deviceId> <tiktok|instagram|x|linkedin|youtube> <handle> [--stage fresh|matured]",
       );
       process.exit(1);
     }
@@ -798,7 +806,7 @@ async function main(): Promise<void> {
     const { device, install } = await setupDeviceAndRunner({
       udid: getArg(args, "--udid"),
       teamId: team,
-      repoRoot: resolve(process.cwd()),
+      repoRoot: findProjectRoot(),
     });
     const store = openStore(args);
     if (!store.state.devices.find((d) => d.udid === device.udid)) {

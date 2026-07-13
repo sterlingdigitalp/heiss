@@ -39,12 +39,15 @@ describe("account lifecycle", () => {
     assert.equal(canPost(account({ stage: "posting", platform: "tiktok" })), true);
   });
 
-  it("never allows X/LinkedIn auto-post", () => {
+  it("never allows X/LinkedIn/YouTube auto-post", () => {
     assert.equal(canPost(account({ stage: "matured", platform: "x" })), false);
     assert.equal(canPost(account({ stage: "matured", platform: "linkedin" })), false);
+    assert.equal(canPost(account({ stage: "matured", platform: "youtube" })), false);
     assert.equal(isWarmOnlyPlatform("x"), true);
     assert.equal(supportsAutoPost("instagram"), true);
     assert.equal(supportsAutoPost("linkedin"), false);
+    assert.equal(isWarmOnlyPlatform("youtube"), true);
+    assert.equal(supportsAutoPost("youtube"), false);
   });
 
   it("advances trust and stage through warmups until matured", () => {

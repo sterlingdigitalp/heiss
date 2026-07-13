@@ -123,6 +123,48 @@ describe("farm orchestrator (shipped path)", () => {
     assert.ok(result.sessions[0]!.nextRetryAt);
   });
 
+  it("keeps the most advanced checkpoint and does not start another session during backoff", async () => {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");
+    store.state.slots = [];
+    const account = store.state.accounts[0]!;
+    const base: FarmSession = {
+      id: "zero", accountId: account.id, deviceId: account.deviceId,
+      kind: "warmup", status: "checkpointed",
+      startedAt: "2026-07-12T00:00:00.000Z", updatedAt: "2026-07-12T00:01:00.000Z",
+      checkpoint: createCheckpoint(), activityLog: [], nextRetryAt: "2026-07-12T01:00:00.000Z",
+    };
+    store.state.sessions.push(base, {
+      ...base, id: "advanced", updatedAt: "2026-07-12T00:02:00.000Z",
+      checkpoint: { stepIndex: 8, stepsCompleted: Array(8).fill("warmup:scroll") },
+    });
+    const driver = new RecordingDriver();
+    const result = await new FarmOrchestrator(store, driver).runOnce({
+      runnerId: "r", timeOfDay: "09:00", now: "2026-07-12T00:30:00.000Z",
+    });
+    assert.equal(result.sessions.length, 0);
+    assert.equal(driver.actions.length, 0);
+    assert.equal(store.state.sessions.find((s) => s.id === "advanced")!.status, "checkpointed");
+    assert.equal(store.state.sessions.find((s) => s.id === "zero")!.status, "failed");
+  });
+
+  it("explicit resume bypasses retry backoff", async () => {
+    const store = new JsonStore(storePath()); seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");
+    const account = store.state.accounts[0]!;
+    store.state.sessions.push({
+      id: "waiting", accountId: account.id, deviceId: account.deviceId,
+      kind: "warmup", status: "checkpointed",
+      startedAt: "2026-07-12T00:00:00.000Z", updatedAt: "2026-07-12T00:00:00.000Z",
+      checkpoint: createCheckpoint(), activityLog: [], nextRetryAt: "2026-07-13T00:00:00.000Z",
+    });
+    const result = await new FarmOrchestrator(store, new RecordingDriver()).runOnce({
+      runnerId: "r", timeOfDay: "09:00", now: "2026-07-12T01:00:00.000Z", resumeFirst: true,
+    });
+    assert.equal(result.sessions[0]!.status, "completed");
+  });
+
   it("defers a resume when another live session owns its device lock", async () => {
     const store = new JsonStore(storePath());
     seedDemoFarm(store);

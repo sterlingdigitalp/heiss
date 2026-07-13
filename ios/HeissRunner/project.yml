@@ -31,6 +31,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: so.heiss.runner.uitests
         TEST_TARGET_NAME: HeissRunner
         CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: YES
 schemes:
   HeissRunner:
     build:

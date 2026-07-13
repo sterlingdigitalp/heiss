@@ -2,6 +2,7 @@ import {
   MATURITY_TRUST_THRESHOLD,
   POSTING_PLATFORMS,
   TRUST_PER_WARMUP,
+  WARM_ONLY_PLATFORMS,
   type AccountStage,
   type Platform,
   type SocialAccount,
@@ -28,9 +29,9 @@ export function canPost(account: Pick<SocialAccount, "stage" | "platform">): boo
   return stageIndex(account.stage) >= stageIndex("matured");
 }
 
-/** X and LinkedIn are warm-only. */
+/** X, LinkedIn, and YouTube are warm-only. */
 export function isWarmOnlyPlatform(platform: Platform): boolean {
-  return platform === "x" || platform === "linkedin";
+  return WARM_ONLY_PLATFORMS.includes(platform);
 }
 
 export function supportsAutoPost(platform: Platform): boolean {

@@ -1,12 +1,12 @@
 /** Shared domain types for Heiss (Warmr-style farm). */
 
-export type Platform = "tiktok" | "instagram" | "x" | "linkedin";
+export type Platform = "tiktok" | "instagram" | "x" | "linkedin" | "youtube";
 
 /** Platforms that support scheduled auto-post (video/carousel). */
 export const POSTING_PLATFORMS: readonly Platform[] = ["tiktok", "instagram"] as const;
 
 /** Platforms that only warm (no auto-post). */
-export const WARM_ONLY_PLATFORMS: readonly Platform[] = ["x", "linkedin"] as const;
+export const WARM_ONLY_PLATFORMS: readonly Platform[] = ["x", "linkedin", "youtube"] as const;
 
 export type AccountStage =
   | "fresh"

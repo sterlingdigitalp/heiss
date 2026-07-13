@@ -41,7 +41,7 @@ export class RealUsbTransport implements IosTransport {
   private lastDevices: UsbIphone[] = [];
 
   constructor(opts: RealUsbTransportOptions = {}) {
-    this.bundleId = opts.bundleId ?? `${RUNNER_BUNDLE_ID}.uitests.xctrunner`;
+    this.bundleId = opts.bundleId ?? `${RUNNER_BUNDLE_ID}.xctrunner`;
     this.commandTimeoutMs = opts.commandTimeoutMs ?? 45_000;
   }
 
@@ -175,7 +175,8 @@ export class RealUsbTransport implements IosTransport {
     }
 
     // Poll outbox
-    const actionTimeout = String(cmd.action).startsWith("post:")
+    const action = String(cmd.action);
+    const actionTimeout = action.startsWith("post:") || action.startsWith("warmup:")
       ? Math.max(this.commandTimeoutMs, 120_000)
       : this.commandTimeoutMs;
     const deadline = Date.now() + actionTimeout;
