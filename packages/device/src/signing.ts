@@ -37,7 +37,13 @@ export function loadSigningConfig(
   configPath = join(homedir(), ".heiss", "signing.json"),
 ): SigningConfig | null {
   if (!existsSync(configPath)) return null;
-  return JSON.parse(readFileSync(configPath, "utf8")) as SigningConfig;
+  try {
+    return JSON.parse(readFileSync(configPath, "utf8")) as SigningConfig;
+  } catch {
+    // A corrupt config must not take down every signing operation; behave as
+    // if unset so env vars / defaults still resolve.
+    return null;
+  }
 }
 
 export function saveSigningConfig(
@@ -51,8 +57,9 @@ export function saveSigningConfig(
 /** Prefer ASC when key env is set; else Xcode team. */
 export function resolveSigningConfig(
   overrides: Partial<SigningConfig> = {},
+  configPath?: string,
 ): SigningConfig {
-  const fromFile = loadSigningConfig() ?? { method: "xcode" as const };
+  const fromFile = loadSigningConfig(configPath) ?? { method: "xcode" as const };
   const env: Partial<SigningConfig> = {
     teamId: process.env.HEISS_TEAM_ID ?? process.env.DEVELOPMENT_TEAM,
     bundleId: process.env.HEISS_BUNDLE_ID,
@@ -79,8 +86,11 @@ export function resolveSigningConfig(
     merged.ascKeyPath &&
     merged.ascKeyId &&
     merged.ascIssuerId &&
+    existsSync(merged.ascKeyPath) &&
     !overrides.method
   ) {
+    // Only auto-prefer ASC when the key material actually exists; a stale
+    // env var pointing at a deleted .p8 must not break the working Xcode path.
     merged.method = "asc";
   }
   return merged;

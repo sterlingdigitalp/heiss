@@ -123,6 +123,30 @@ describe("farm orchestrator (shipped path)", () => {
     assert.ok(result.sessions[0]!.nextRetryAt);
   });
 
+  it("checkpoints and releases locks when device connect fails", async () => {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");
+    store.state.slots = [];
+    const unreachable: DeviceDriver = {
+      kind: "ios",
+      async connect() { throw new Error("device UDID not found on USB"); },
+      async disconnect() {},
+      async runAction() { throw new Error("unreachable"); },
+    };
+    const result = await new FarmOrchestrator(store, unreachable).runOnce({ runnerId: "r", timeOfDay: "09:00" });
+    assert.equal(result.interrupted, true);
+    assert.equal(result.sessions[0]!.status, "checkpointed");
+    assert.deepEqual(store.locks.snapshot().devices, {});
+    assert.match(result.sessions[0]!.lastError!, /connect_failed/);
+    assert.equal(result.sessions[0]!.retryCount, 1);
+    assert.ok(result.sessions[0]!.nextRetryAt);
+    // The persisted session must be checkpointed too, not stranded as running.
+    const reloaded = new JsonStore(store.path);
+    assert.equal(reloaded.state.sessions[0]!.status, "checkpointed");
+    assert.deepEqual(reloaded.locks.snapshot().devices, {});
+  });
+
   it("honors emergency stop and daily action caps before device actions", async () => {
     const store = new JsonStore(storePath()); seedDemoFarm(store);
     store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");
@@ -359,6 +383,37 @@ describe("farm orchestrator (shipped path)", () => {
     );
     assert.equal(postSessions.length, 1, "exactly one successful post for the item");
     assert.ok(third.sessions.every((s) => s.queueItemId !== item.id || s.id === mid.id));
+  });
+
+  it("does not refill the same local-day slot after UTC midnight (evening double-post)", async () => {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    store.state.settings.timeZone = "America/Chicago";
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-mature");
+    store.state.slots = [{ id: "slot-23", accountId: "acc-tt-mature", timeOfDay: "23:00", enabled: true }];
+    const drop1 = dropContent({
+      kind: "video", mediaRef: "a.mp4", caption: "one",
+      accountIds: ["acc-tt-mature"], createdBy: "test",
+    });
+    store.state.contents.push(drop1.content); store.state.queue.push(drop1.queueItem); store.save();
+    const orch = new FarmOrchestrator(store, new RecordingDriver());
+
+    // 23:05 local on Jul 12 — already Jul 13 in UTC.
+    const first = await orch.runOnce({ runnerId: "r", timeOfDay: "23:00", now: "2026-07-13T04:05:00.000Z" });
+    assert.ok(first.sessions.some((s) => s.kind === "post" && s.checkpoint.posted));
+
+    // Second Cloud Drop later the same local evening must wait for tomorrow's slot.
+    const drop2 = dropContent({
+      kind: "video", mediaRef: "b.mp4", caption: "two",
+      accountIds: ["acc-tt-mature"], createdBy: "test",
+    });
+    store.state.contents.push(drop2.content); store.state.queue.push(drop2.queueItem); store.save();
+    const sameEvening = await orch.runOnce({ runnerId: "r", timeOfDay: "23:00", now: "2026-07-13T04:35:00.000Z" });
+    assert.equal(sameEvening.sessions.filter((s) => s.kind === "post").length, 0, "same local-day slot must not refill");
+
+    // Next local evening the second drop posts.
+    const nextEvening = await orch.runOnce({ runnerId: "r", timeOfDay: "23:00", now: "2026-07-14T04:30:00.000Z" });
+    assert.ok(nextEvening.sessions.some((s) => s.kind === "post" && s.checkpoint.posted));
   });
 
   it("verifies an attempted publish after failure instead of tapping publish twice", async () => {

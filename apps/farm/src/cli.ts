@@ -34,6 +34,9 @@ import {
   getSetupStatus,
   setupDeviceAndRunner,
   downloadBuildInstallRunner,
+  checkAutomationRunner,
+  ensureAutomationRunner,
+  stopAutomationRunner,
   planSigning,
   saveSigningConfig,
   resolveSigningConfig,
@@ -41,7 +44,13 @@ import {
 } from "@heiss/device";
 import { defaultDataDir, farmStatePath } from "./paths.js";
 import { findProjectRoot } from "./project-root.js";
+import {
+  controllerAgentStatus,
+  installControllerAgent,
+  uninstallControllerAgent,
+} from "./daemon-agent.js";
 import { createHmac, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 function usage(): string {
   return `heiss-farm — Heiss local farm controller (real iPhones only)
@@ -50,6 +59,7 @@ Setup:
   heiss-farm setup status [--data DIR]
   heiss-farm setup device [--udid UDID] [--wait-ms N]
   heiss-farm runner install [--udid UDID] [--team TEAM_ID]
+  heiss-farm runner status | ensure | stop [--udid UDID]
   heiss-farm signing show | set --team TEAM_ID | set --asc-key PATH --key-id ID --issuer ID
   heiss-farm devices list | sync [--data DIR]
   heiss-farm devices rename <deviceId> <name>
@@ -64,12 +74,14 @@ Farm:
   heiss-farm status [--data DIR]
   heiss-farm run [--time HH:mm] [--data DIR] [--interrupt N]
   heiss-farm daemon [--interval-sec 30] [--data DIR]
+  heiss-farm daemon install | uninstall | status [--data DIR]   # persistent launchd agent
   heiss-farm resume [--data DIR]
   heiss-farm register-device <name> <udid>
   heiss-farm add-account <deviceId> <platform> <handle> [--stage STAGE] [--terms a,b]
   heiss-farm add-account-set <deviceId> <name> --instagram @h --tiktok @h --x @h --youtube @h [--terms "term,term"]
   heiss-farm account-set terms <groupId> "term,term"
   heiss-farm account handle <accountId> @handle
+  heiss-farm account switcher <accountId> "picker label"
   heiss-farm remove-account <accountId>
   heiss-farm add-slot <accountId> <HH:mm>
   heiss-farm remove-slot <slotId>
@@ -229,12 +241,13 @@ interface RunnerInstallRecord {
   signingMethod?: "xcode" | "asc";
 }
 
-function runnerExpiryWarning(now: Date): { key: string; body: string } | null {
+/** Signed-runner installs with their provisioning expiry. */
+function runnerInstallExpiries(now: Date): Array<{ udid: string; name: string; expiresAt: Date; remainingMs: number }> {
   const recordPath = join(homedir(), ".heiss", "runner-installs.json");
-  if (!existsSync(recordPath)) return null;
+  if (!existsSync(recordPath)) return [];
   try {
     const records = JSON.parse(readFileSync(recordPath, "utf8")) as Record<string, RunnerInstallRecord>;
-    const warnings = Object.entries(records).flatMap(([udid, record]) => {
+    return Object.entries(records).flatMap(([udid, record]) => {
       if (!record.installedAt) return [];
       const installedAt = new Date(record.installedAt);
       if (!Number.isFinite(installedAt.getTime())) return [];
@@ -242,10 +255,21 @@ function runnerExpiryWarning(now: Date): { key: string; body: string } | null {
       // paid App Store Connect path is valid for about one year.
       const validityDays = record.signingMethod === "asc" ? 365 : 7;
       const expiresAt = new Date(installedAt.getTime() + validityDays * 86_400_000);
-      const remainingMs = expiresAt.getTime() - now.getTime();
-      if (remainingMs > 48 * 3_600_000) return [];
-      return [{ udid, name: record.deviceName ?? udid, expiresAt, remainingMs }];
+      return [{ udid, name: record.deviceName ?? udid, expiresAt, remainingMs: expiresAt.getTime() - now.getTime() }];
     }).sort((a, b) => a.expiresAt.getTime() - b.expiresAt.getTime());
+  } catch {
+    return [];
+  }
+}
+
+/** Installs the daemon should proactively re-sign (within 24h of expiry). */
+function runnersNeedingReinstall(now: Date): Array<{ udid: string; name: string; expiresAt: Date }> {
+  return runnerInstallExpiries(now).filter((entry) => entry.remainingMs <= 24 * 3_600_000);
+}
+
+function runnerExpiryWarning(now: Date): { key: string; body: string } | null {
+  try {
+    const warnings = runnerInstallExpiries(now).filter((entry) => entry.remainingMs <= 48 * 3_600_000);
     const warning = warnings[0];
     if (!warning) return null;
     const date = warning.expiresAt.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -371,6 +395,24 @@ async function main(): Promise<void> {
       usb: device,
       next: "heiss-farm runner install --udid " + device.udid,
     });
+    return;
+  }
+
+  if (cmd === "runner" && ["status", "ensure", "stop"].includes(args[1] ?? "")) {
+    const requested = getArg(args, "--udid");
+    const udid = requested ?? (await listUsbIphones()).find((d) => d.available)?.udid;
+    if (!udid) throw new Error("No USB iPhone available; connect one or pass --udid");
+    if (args[1] === "status") {
+      print({ ok: true, health: await checkAutomationRunner(udid) });
+      return;
+    }
+    if (args[1] === "stop") {
+      await stopAutomationRunner(udid);
+      print({ ok: true, stopped: udid });
+      return;
+    }
+    const repair = await ensureAutomationRunner(udid, { repoRoot: findProjectRoot() });
+    print({ udid, ...repair });
     return;
   }
 
@@ -616,11 +658,72 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cmd === "daemon" && ["install", "uninstall", "status"].includes(args[1] ?? "")) {
+    const dataDir = getArg(args, "--data") ?? defaultDataDir();
+    const here = dirname(fileURLToPath(import.meta.url));
+    const distCliPath = resolve(here, "..", "dist", "cli.js");
+    const srcCliPath = resolve(here, "..", "src", "cli.ts");
+    if (args[1] === "install") {
+      const intervalSec = getArg(args, "--interval-sec");
+      print(installControllerAgent({
+        dataDir,
+        distCliPath,
+        srcCliPath,
+        intervalSec: intervalSec ? Number(intervalSec) : undefined,
+      }));
+    } else if (args[1] === "uninstall") {
+      print(uninstallControllerAgent(dataDir));
+    } else {
+      print(controllerAgentStatus(dataDir));
+    }
+    return;
+  }
+
   if (cmd === "daemon") {
     const intervalMs = Math.max(5_000, Number(getArg(args, "--interval-sec") ?? 30) * 1000);
     let stopping = false;
     process.once("SIGINT", () => { stopping = true; });
     process.once("SIGTERM", () => { stopping = true; });
+    // Cooldowns so a failing relaunch/rebuild cannot thrash every tick.
+    const runnerRepairAttempts = new Map<string, number>();
+    const runnerReinstallAttempts = new Map<string, number>();
+    const superviseAutomationRunner = async (device: { udid: string; name: string }): Promise<void> => {
+      const last = runnerRepairAttempts.get(device.udid) ?? 0;
+      if (Date.now() - last < 10 * 60 * 1000) return;
+      try {
+        const repair = await ensureAutomationRunner(device.udid, { repoRoot: findProjectRoot() });
+        if (repair.action === "none") return;
+        runnerRepairAttempts.set(device.udid, Date.now());
+        notifyDesktop(
+          repair.ok ? "Heiss runner recovered" : "Heiss runner repair failed",
+          `${device.name}: ${repair.detail}`,
+        );
+        console.log(JSON.stringify({ at: new Date().toISOString(), runnerRepair: { udid: device.udid, ...repair } }));
+      } catch (error) {
+        runnerRepairAttempts.set(device.udid, Date.now());
+        const message = error instanceof Error ? error.message : String(error);
+        notifyDesktop("Heiss runner repair failed", `${device.name}: ${message}`);
+        console.error(JSON.stringify({ at: new Date().toISOString(), runnerRepairError: { udid: device.udid, message } }));
+      }
+    };
+    const renewExpiringRunners = async (onlineUdids: Set<string>, now: Date): Promise<void> => {
+      for (const renewal of runnersNeedingReinstall(now)) {
+        if (!onlineUdids.has(renewal.udid)) continue;
+        const last = runnerReinstallAttempts.get(renewal.udid) ?? 0;
+        if (now.getTime() - last < 6 * 60 * 60 * 1000) continue;
+        runnerReinstallAttempts.set(renewal.udid, now.getTime());
+        notifyDesktop("Heiss re-signing runner", `${renewal.name}: certificate expires soon; rebuilding now.`);
+        try {
+          await downloadBuildInstallRunner({ udid: renewal.udid, repoRoot: findProjectRoot(), waitForDevice: false });
+          notifyDesktop("Heiss runner re-signed", `${renewal.name} is provisioned for another cycle.`);
+          console.log(JSON.stringify({ at: now.toISOString(), runnerReinstalled: renewal.udid }));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          notifyDesktop("Heiss runner re-sign failed", `${renewal.name}: ${message}`);
+          console.error(JSON.stringify({ at: now.toISOString(), runnerReinstallError: { udid: renewal.udid, message } }));
+        }
+      }
+    };
     print({ ok: true, daemon: "started", intervalMs, pid: process.pid });
     while (!stopping) {
       const store = openStore(args);
@@ -649,17 +752,33 @@ async function main(): Promise<void> {
         for (const transition of transitions) {
           notifyDesktop(transition.online ? "Heiss iPhone reconnected" : "Heiss iPhone disconnected", `${transition.name} is ${transition.online ? "ready" : "offline"}.`);
         }
+        const onlineUdids = new Set(store.state.devices.filter((device) => device.online).map((device) => device.udid));
+        await renewExpiringRunners(onlineUdids, now);
         if (store.state.devices.some((device) => device.online) && store.state.accounts.length > 0) {
+          const dueWarmupIds = store.state.warmupSchedules.filter((schedule) => {
+            const account = store.state.accounts.find((candidate) => candidate.id === schedule.accountId);
+            return account && warmupScheduleIsDue(schedule, nowIso, store.state.settings.timeZone, account.lastWarmupAt);
+          }).map((schedule) => schedule.accountId);
+          // Supervise the on-device automation runner whenever this tick has
+          // work to send it — a dead/wedged runner is relaunched first instead
+          // of every action timing out.
+          const retryDue = store.state.sessions.some(
+            (session) => session.status === "checkpointed" && (!session.nextRetryAt || session.nextRetryAt <= nowIso),
+          );
+          const claimable = store.state.queue.some(
+            (item) => item.status === "queued" || (item.status === "stored_local" && !item.assignedAccountId),
+          );
+          if (dueWarmupIds.length > 0 || retryDue || claimable) {
+            for (const device of store.state.devices.filter((row) => row.online)) {
+              await superviseAutomationRunner(device);
+            }
+          }
           const posting = await new FarmOrchestrator(store, makeDriver()).runOnce({
             runnerId: `daemon-${process.pid}`,
             timeOfDay,
             now: nowIso,
             skipWarmups: true,
           });
-          const dueWarmupIds = store.state.warmupSchedules.filter((schedule) => {
-            const account = store.state.accounts.find((candidate) => candidate.id === schedule.accountId);
-            return account && warmupScheduleIsDue(schedule, nowIso, store.state.settings.timeZone, account.lastWarmupAt);
-          }).map((schedule) => schedule.accountId);
           const warmups = dueWarmupIds.length > 0
             ? await new FarmOrchestrator(store, makeDriver()).runOnce({
                 runnerId: `daemon-${process.pid}`,
@@ -839,6 +958,17 @@ async function main(): Promise<void> {
       throw new Error("Usage: account handle <accountId> @handle");
     }
     account.handle = handle;
+    store.save(); print({ ok: true, account }); return;
+  }
+
+  if (cmd === "account" && args[1] === "switcher") {
+    const store = openStore(args);
+    const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
+    const switcherHint = args[3]?.trim();
+    if (!account || !switcherHint) {
+      throw new Error("Usage: account switcher <accountId> \"picker label\"");
+    }
+    account.switcherHint = switcherHint;
     store.save(); print({ ok: true, account }); return;
   }
 

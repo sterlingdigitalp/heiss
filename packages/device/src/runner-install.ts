@@ -6,6 +6,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   writeFileSync,
   cpSync,
   rmSync,
@@ -377,7 +378,37 @@ export async function downloadBuildInstallRunner(
   };
 }
 
-async function waitForAutomationRunnerReady(
+export function automationRunnerLabel(udid: string): string {
+  return `so.heiss.automation.${udid.replace(/[^a-zA-Z0-9.-]/g, "-")}`;
+}
+
+export function automationLogPath(udid: string): string {
+  return join(runnerWorkDir(), "automation-logs", `${udid}.log`);
+}
+
+function automationPlistPath(label: string): string {
+  return join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+}
+
+function xmlEscape(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+/** LaunchAgent plist for the long-running XCTest command server. */
+export function automationPlistXml(
+  label: string,
+  programArguments: string[],
+  workingDirectory: string,
+  logPath: string,
+): string {
+  const argsXml = programArguments.map((arg) => `<string>${xmlEscape(arg)}</string>`).join("");
+  return `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>${xmlEscape(label)}</string><key>ProgramArguments</key><array>${argsXml}</array><key>WorkingDirectory</key><string>${xmlEscape(workingDirectory)}</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>15</integer><key>StandardOutPath</key><string>${xmlEscape(logPath)}</string><key>StandardErrorPath</key><string>${xmlEscape(logPath)}</string></dict></plist>`;
+}
+
+export async function waitForAutomationRunnerReady(
   label: string,
   logPath: string,
   timeoutMs = 300_000,
@@ -387,10 +418,10 @@ async function waitForAutomationRunnerReady(
     if (existsSync(logPath)) {
       const log = readFileSync(logPath, "utf8");
       if (/HEISS_COMMAND_SERVER_READY/.test(log)) return "ready";
+      // With KeepAlive the job stays loaded across crash-restarts, so a
+      // missing job no longer signals failure — the build/test log does.
+      if (/TEST EXECUTE FAILED|Testing failed:|xcodebuild: error/.test(log)) return "exited";
     }
-    // launchd may restart xcodebuild under a new PID while the iPhone clears a
-    // transient "device busy" state. Follow the submitted job label instead
-    // of treating that expected PID replacement as a terminal exit.
     try {
       await execFileAsync("launchctl", ["print", `gui/${process.getuid?.() ?? 0}/${label}`], { timeout: 5_000 });
     } catch {
@@ -401,28 +432,45 @@ async function waitForAutomationRunnerReady(
   return "timeout";
 }
 
-/** Launch the long-running UI-test command server built by build-for-testing. */
+/** Unload the automation runner job and remove its LaunchAgent plist. */
+export async function stopAutomationRunner(udid: string): Promise<void> {
+  const label = automationRunnerLabel(udid);
+  const uid = process.getuid?.() ?? 0;
+  await execFileAsync("launchctl", ["bootout", `gui/${uid}/${label}`], { timeout: 10_000 }).catch(() => undefined);
+  // Legacy jobs from older builds were created with `launchctl submit`.
+  await execFileAsync("launchctl", ["remove", label], { timeout: 10_000 }).catch(() => undefined);
+  rmSync(automationPlistPath(label), { force: true });
+}
+
+/**
+ * Launch the long-running UI-test command server built by build-for-testing.
+ * Installed as a KeepAlive LaunchAgent so it restarts after crashes, the
+ * runner's own 12-hour recycle, and Mac reboots.
+ */
 export async function launchAutomationRunner(
   udid: string,
   sourceDir: string,
 ): Promise<{ pid: number; logPath: string; label: string }> {
   const derived = join(runnerWorkDir(), "DerivedData");
-  const logs = join(runnerWorkDir(), "automation-logs");
-  mkdirSync(logs, { recursive: true });
-  const logPath = join(logs, `${udid}-${Date.now()}.log`);
-  const label = `so.heiss.automation.${udid.replace(/[^a-zA-Z0-9.-]/g, "-")}`;
-  try { await execFileAsync("launchctl", ["remove", label], { timeout: 10_000 }); }
-  catch { /* no previous job */ }
-  // `launchctl remove` may return while the old xcodebuild is still tearing
-  // down. Do not submit or sample a PID under the same label until that job is
-  // actually gone, otherwise the new launch can be mistaken for the old PID.
+  mkdirSync(join(runnerWorkDir(), "automation-logs"), { recursive: true });
+  const logPath = automationLogPath(udid);
+  const label = automationRunnerLabel(udid);
+  const uid = process.getuid?.() ?? 0;
+  await stopAutomationRunner(udid);
+  // Teardown may return while the old xcodebuild is still releasing the
+  // device test session. Do not bootstrap under the same label until the
+  // previous job is actually gone.
   for (let attempt = 0; attempt < 100; attempt++) {
     try {
-      await execFileAsync("launchctl", ["print", `gui/${process.getuid?.() ?? 0}/${label}`], { timeout: 5_000 });
+      await execFileAsync("launchctl", ["print", `gui/${uid}/${label}`], { timeout: 5_000 });
       await new Promise((resolve) => setTimeout(resolve, 100));
     } catch {
       break;
     }
+  }
+  // Rotate the log so readiness checks only ever read this launch's output.
+  if (existsSync(logPath)) {
+    renameSync(logPath, `${logPath}.previous`);
   }
   const args = [
       "-project", join(sourceDir, "HeissRunner.xcodeproj"),
@@ -433,14 +481,15 @@ export async function launchAutomationRunner(
       "test-without-building",
       "-only-testing:HeissRunnerUITests/HeissRunnerUITests/testCommandServer",
   ];
-  await execFileAsync("launchctl", [
-    "submit", "-l", label, "-o", logPath, "-e", logPath,
-    "--", "/usr/bin/xcodebuild", ...args,
-  ], { cwd: sourceDir, timeout: 10_000 });
+  const plistPath = automationPlistPath(label);
+  mkdirSync(dirname(plistPath), { recursive: true });
+  writeFileSync(plistPath, automationPlistXml(label, ["/usr/bin/xcodebuild", ...args], sourceDir, logPath));
+  await execFileAsync("launchctl", ["bootstrap", `gui/${uid}`, plistPath], { timeout: 10_000 });
+  await execFileAsync("launchctl", ["kickstart", `gui/${uid}/${label}`], { timeout: 10_000 }).catch(() => undefined);
   let pid = 0;
   for (let attempt = 0; attempt < 20 && !pid; attempt++) {
     try {
-      const { stdout } = await execFileAsync("launchctl", ["print", `gui/${process.getuid?.() ?? 0}/${label}`], { timeout: 5_000 });
+      const { stdout } = await execFileAsync("launchctl", ["print", `gui/${uid}/${label}`], { timeout: 5_000 });
       pid = Number(stdout.match(/\bpid = (\d+)/)?.[1] ?? 0);
     } catch { /* job is still starting */ }
     if (!pid) await new Promise((resolve) => setTimeout(resolve, 100));

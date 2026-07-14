@@ -20,6 +20,9 @@ import { listUsbIphones, type UsbIphone } from "./usb.js";
 import {
   downloadBuildInstallRunner,
   installAppOnDevice,
+  launchAutomationRunner,
+  runnerWorkDir,
+  waitForAutomationRunnerReady,
   RUNNER_BUNDLE_ID,
 } from "./runner-install.js";
 
@@ -205,22 +208,16 @@ export class RealUsbTransport implements IosTransport {
   }
 
   private async ensureRunnerLaunched(udid: string): Promise<void> {
+    // Launching the xctrunner app bundle via devicectl cannot revive the
+    // XCTest command server — only xcodebuild test-without-building can.
+    // Relaunch the automation job from the last install's build products.
     try {
-      await execFileAsync(
-        "xcrun",
-        [
-          "devicectl",
-          "device",
-          "process",
-          "launch",
-          "--device",
-          udid,
-          this.bundleId,
-        ],
-        { timeout: 20_000 },
-      );
+      const sourceDir = join(runnerWorkDir(), "HeissRunner");
+      if (!existsSync(join(sourceDir, "HeissRunner.xcodeproj"))) return;
+      const launched = await launchAutomationRunner(udid, sourceDir);
+      await waitForAutomationRunnerReady(launched.label, launched.logPath, 120_000);
     } catch {
-      /* already running or needs trust */
+      /* best effort — the caller retries the copy and reports the real error */
     }
   }
 

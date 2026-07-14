@@ -53,13 +53,19 @@ final class HeissRunnerUITests: XCTestCase {
 
         // xcodebuild owns the runner process. It is intentionally long-lived so
         // the Mac can drive many actions without rebuilding between gestures.
+        // At the recycle deadline the launchd KeepAlive job restarts a fresh
+        // session; only exit once the inbox is drained so an in-flight command
+        // is never abandoned mid-gesture.
         let deadline = Date().addingTimeInterval(12 * 60 * 60)
-        while Date() < deadline {
-            for file in (try? fm.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil)) ?? [] where file.pathExtension == "json" {
+        while true {
+            let pending = ((try? fm.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension == "json" }
+            for file in pending {
                 autoreleasepool {
                     self.handle(file, outbox: outbox)
                 }
             }
+            if Date() >= deadline && pending.isEmpty { break }
             RunLoop.current.run(until: Date().addingTimeInterval(0.25))
         }
     }
@@ -121,8 +127,9 @@ final class HeissRunnerUITests: XCTestCase {
         // normal Home/profile controls. TikTok's animated accessibility
         // process can also wedge after a gesture. Relaunch either app to a
         // known Home state before every independent command.
-        // YouTube only needs this reset before its first command.
-        if (platform == "tiktok" || platform == "x" || (platform == "youtube" && activeHandles[platform] == nil)), app.state != .notRunning {
+        // YouTube search results can leave a sponsored bottom sheet over the
+        // account controls, so it also starts each command from a clean state.
+        if (platform == "tiktok" || platform == "x" || platform == "youtube"), app.state != .notRunning {
             app.terminate()
             Thread.sleep(forTimeInterval: 0.8)
         }
@@ -174,6 +181,13 @@ final class HeissRunnerUITests: XCTestCase {
             if try screenContainsTextUsingOCR("Swipe up for more") {
                 throw NSError(domain: "HeissRunner", code: 18, userInfo: [NSLocalizedDescriptionKey: "TikTok swipe tutorial did not dismiss after three gestures"])
             }
+        }
+        if platform == "youtube" { try dismissYouTubeDefaultAccountPrompt(app) }
+        if platform == "youtube",
+           try screenContainsTextUsingOCR("Sponsored"),
+           try screenContainsTextUsingOCR("Learn more") {
+            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.625)).tap()
+            Thread.sleep(forTimeInterval: 0.8)
         }
         let handle = command["handle"] as? String ?? ""
         if action != "post:verify_published" {
@@ -235,6 +249,24 @@ final class HeissRunnerUITests: XCTestCase {
                     window.coordinate(withNormalizedOffset: point(command, "search", .init(dx: 0.92, dy: 0.08))).tap()
                 }
             } else {
+                if platform == "youtube" {
+                    let readyDeadline = Date().addingTimeInterval(15)
+                    var navigationReady = false
+                    while Date() < readyDeadline {
+                        navigationReady = try screenContainsTextUsingOCR("Home")
+                        if !navigationReady { navigationReady = try screenContainsTextUsingOCR("Shorts") }
+                        if navigationReady { break }
+                        if try screenContainsTextUsingOCR("Default Account") {
+                            try dismissYouTubeDefaultAccountPrompt(app)
+                            try ensureAccount(app, platform: platform, handle: handle, command: command)
+                            continue
+                        }
+                        Thread.sleep(forTimeInterval: 0.5)
+                    }
+                    guard navigationReady else {
+                        throw NSError(domain: "HeissRunner", code: 21, userInfo: [NSLocalizedDescriptionKey: "YouTube navigation did not finish loading before search"])
+                    }
+                }
                 let notNow = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Not now"))
                 if notNow.count > 0, notNow.firstMatch.isHittable { notNow.firstMatch.tap() }
                 let searchButtons = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search"))
@@ -242,7 +274,9 @@ final class HeissRunnerUITests: XCTestCase {
                 else {
                     let fallback: CGVector
                     if platform == "x" { fallback = CGVector(dx: 0.30, dy: 0.95) }
-                    else if platform == "youtube" { fallback = CGVector(dx: 0.88, dy: 0.08) }
+                    // YouTube Shorts places Search immediately left of the
+                    // overflow menu; 0.88 hits the menu on compact iPhones.
+                    else if platform == "youtube" { fallback = CGVector(dx: 0.79, dy: 0.065) }
                     else { fallback = CGVector(dx: 0.50, dy: 0.94) }
                     window.coordinate(withNormalizedOffset: point(command, "search", fallback)).tap()
                 }
@@ -414,6 +448,10 @@ final class HeissRunnerUITests: XCTestCase {
         } else {
             window = app.windows.firstMatch
         }
+        if platform == "x", try screenContainsTextUsingOCR("Subscribe & pay") {
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.06, dy: 0.12)).tap()
+            Thread.sleep(forTimeInterval: 0.8)
+        }
         // If a prior attempt left Instagram's switcher sheet open, use that
         // exact state instead of mistaking a visible-but-unselected row for
         // the active profile.
@@ -465,6 +503,10 @@ final class HeissRunnerUITests: XCTestCase {
             }
             let summary = inspectedAccounts.enumerated().map { "slot\($0.offset): \($0.element)" }.joined(separator: "; ")
             throw NSError(domain: "HeissRunner", code: 15, userInfo: [NSLocalizedDescriptionKey: "X signed-in accounts did not verify exact handle \(handle). OCR headers: \(summary)"])
+        }
+        if platform == "youtube" {
+            try ensureYouTubeAccount(app, surface: window, handle: handle, normalized: normalized, command: command)
+            return
         }
         if platform == "tiktok" { dismissTikTokPasskey() }
         if platform == "x" {
@@ -600,6 +642,118 @@ final class HeissRunnerUITests: XCTestCase {
         }
         if try tapExactHandleUsingOCR(surface: surface, normalized: normalized) { return }
         throw NSError(domain: "HeissRunner", code: 5, userInfo: [NSLocalizedDescriptionKey: "Account \(handle) was not found in the \(platform) switcher"])
+    }
+
+    private func ensureYouTubeAccount(
+        _ app: XCUIApplication,
+        surface: XCUIElement,
+        handle: String,
+        normalized: String,
+        command: [String: Any]
+    ) throws {
+        // YouTube's current iOS UI puts account identity under the bottom
+        // "You" tab. A channel page has a back arrow where the old profile
+        // menu used to be, so always return to You before switching.
+        surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        try dismissYouTubeDefaultAccountPrompt(app)
+        surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        if try screenContainsTextUsingOCR("Manage accounts") {
+            surface.coordinate(withNormalizedOffset: CGVector(dx: 0.06, dy: 0.06)).tap()
+            Thread.sleep(forTimeInterval: 0.8)
+            surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
+            Thread.sleep(forTimeInterval: 0.8)
+        }
+        if try screenContainsExactHandleUsingOCR(normalized: normalized) {
+            activeHandles["youtube"] = handle
+            surface.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
+            return
+        }
+
+        let switchAccount = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "label ==[c] %@ OR label CONTAINS[c] %@ OR identifier CONTAINS[c] %@",
+                "Accounts", "Switch account", "switch-account"
+            )
+        ).firstMatch
+        if switchAccount.waitForExistence(timeout: 2), switchAccount.isHittable {
+            switchAccount.tap()
+        } else {
+            // Stable account-header position in the You tab (avatar/name/chevron).
+            surface.coordinate(withNormalizedOffset: point(command, "accountMenu", .init(dx: 0.30, dy: 0.12))).tap()
+        }
+        Thread.sleep(forTimeInterval: 1.0)
+        var selected = try tapExactHandleUsingOCR(surface: surface, normalized: normalized)
+        if !selected, let switcherHint = command["switcherHint"] as? String, !switcherHint.isEmpty {
+            selected = try tapTextUsingOCR(surface: surface, expected: switcherHint)
+        }
+        guard selected else {
+            throw NSError(domain: "HeissRunner", code: 5, userInfo: [NSLocalizedDescriptionKey: "Account \(handle) was not found in the youtube switcher"])
+        }
+        Thread.sleep(forTimeInterval: 1.2)
+
+        surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        if !(try screenContainsExactHandleUsingOCR(normalized: normalized)) {
+            let channel = app.descendants(matching: .any).matching(
+                NSPredicate(format: "label CONTAINS[c] %@ OR label CONTAINS[c] %@", "View channel", "Your channel")
+            ).firstMatch
+            if channel.waitForExistence(timeout: 2), channel.isHittable {
+                channel.tap()
+                Thread.sleep(forTimeInterval: 1.0)
+            }
+        }
+        guard try screenContainsExactHandleUsingOCR(normalized: normalized) else {
+            throw NSError(domain: "HeissRunner", code: 15, userInfo: [NSLocalizedDescriptionKey: "Account switch did not verify exact handle \(handle) on youtube"])
+        }
+        activeHandles["youtube"] = handle
+        surface.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
+    }
+
+    private func dismissYouTubeDefaultAccountPrompt(_ app: XCUIApplication) throws {
+        guard try screenContainsTextUsingOCR("Default Account") else { return }
+        let surface = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        disableAutomaticInterruptionHandling(surface)
+        // "Manage accounts" is also a row label on the account-switcher sheet
+        // that sits UNDER the full-screen manager, so keying detection and
+        // dismissal-verification on that title reports false failures after a
+        // successful Done tap. The per-account "Remove from this device" rows
+        // exist only on the manager screen itself.
+        if try screenContainsTextUsingOCR("Remove from this device") {
+            if !(try tapTextUsingOCR(surface: surface, expected: "Done")) {
+                surface.coordinate(withNormalizedOffset: CGVector(dx: 0.89, dy: 0.075)).tap()
+            }
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline, try screenContainsTextUsingOCR("Remove from this device") {
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+            if try screenContainsTextUsingOCR("Remove from this device") {
+                throw NSError(domain: "HeissRunner", code: 20, userInfo: [NSLocalizedDescriptionKey: "YouTube Manage accounts screen could not be dismissed after tapping Done"])
+            }
+            Thread.sleep(forTimeInterval: 0.5)
+            // Done may drop back onto the default-account sheet underneath;
+            // fall through and dismiss that too when it is still visible.
+            if !(try screenContainsTextUsingOCR("Default Account")) { return }
+        }
+        let doneButton = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Done")).firstMatch
+        if doneButton.waitForExistence(timeout: 1), doneButton.isHittable {
+            doneButton.tap()
+        } else if !(try tapTextUsingOCR(surface: surface, expected: "Done")) {
+            let start = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.82))
+            let end = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.50))
+            start.press(forDuration: 0.08, thenDragTo: end)
+            Thread.sleep(forTimeInterval: 0.8)
+            if !(try tapTextUsingOCR(surface: surface, expected: "Done")) {
+                // On compact iPhones only the top edge of the blue Done
+                // button is visible until the sheet accepts this tap.
+                surface.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.985)).tap()
+            }
+        }
+        Thread.sleep(forTimeInterval: 1.0)
+        guard !(try screenContainsTextUsingOCR("Default Account")) else {
+            throw NSError(domain: "HeissRunner", code: 20, userInfo: [NSLocalizedDescriptionKey: "YouTube default-account prompt could not be dismissed"])
+        }
     }
 
     private func instagramTitleMatches(_ app: XCUIApplication, normalized: String) -> Bool {

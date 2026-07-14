@@ -132,13 +132,14 @@ export function accountsFilledSlotOnDay(
   sessions: { accountId: string; kind: string; status: string; completedAt?: string; slotTimeOfDay?: string; checkpoint: { posted?: boolean } }[],
   timeOfDay: string,
   day: string,
+  timeZone = "UTC",
 ): Set<string> {
   const filled = new Set<string>();
   for (const s of sessions) {
     if (s.kind !== "post") continue;
     if (s.status !== "completed") continue;
     if (!s.checkpoint.posted) continue;
-    if (!s.completedAt || calendarDay(s.completedAt) !== day) continue;
+    if (!s.completedAt || calendarDay(s.completedAt, timeZone) !== day) continue;
     // Sessions without slotTimeOfDay (legacy) count for any slot that day
     if (s.slotTimeOfDay !== undefined && s.slotTimeOfDay !== timeOfDay) continue;
     filled.add(s.accountId);

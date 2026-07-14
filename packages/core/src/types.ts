@@ -81,6 +81,8 @@ export interface SocialAccount {
   deviceId: string;
   platform: Platform;
   handle: string;
+  /** Optional on-device picker label when the platform does not show the public handle. */
+  switcherHint?: string;
   stage: AccountStage;
   /** Warmup progress toward maturity (0–100). */
   trustScore: number;

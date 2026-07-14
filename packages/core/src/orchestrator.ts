@@ -47,6 +47,7 @@ export interface DeviceDriver {
     context?: {
       platform: SocialAccount["platform"];
       handle: string;
+      switcherHint?: string;
       caption?: string;
       music?: string;
       mediaRef?: string;
@@ -161,6 +162,7 @@ export class FarmOrchestrator {
       this.store.state.sessions,
       opts.timeOfDay,
       calendarDay(runNow, timeZone),
+      timeZone,
     );
 
     const needingPost = accountsNeedingSlotFill(
@@ -415,7 +417,35 @@ export class FarmOrchestrator {
     }
     const device = this.store.state.devices.find((d) => d.id === account.deviceId);
     if (device) {
-      await this.driver.connect(device.id, device.udid);
+      try {
+        await this.driver.connect(device.id, device.udid);
+      } catch (error) {
+        // A failed connect must not strand the session as "running" with the
+        // device lock held — the daemon PID stays alive, so the crash-recovery
+        // path in the store never reclaims it. Checkpoint with backoff instead.
+        const message = `connect_failed: ${device.name} → ${error instanceof Error ? error.message : String(error)}`;
+        activity.push(`${account.handle}: ${message}`);
+        this.store.pushActivity({
+          kind: "connect_failed",
+          sessionId: session.id,
+          accountId: account.id,
+          deviceId: account.deviceId,
+          message,
+        });
+        const retryCount = (session.retryCount ?? 0) + 1;
+        const retryMinutes = Math.min(120, 5 * 2 ** (retryCount - 1));
+        const paused = checkpointSession({
+          ...session,
+          retryCount,
+          nextRetryAt: new Date(new Date(runNow).getTime() + retryMinutes * 60 * 1000).toISOString(),
+          lastError: message,
+          updatedAt: runNow,
+        });
+        this.replaceSession(paused);
+        this.releaseLocks(paused);
+        this.store.save();
+        return { session: paused, interrupted: true };
+      }
     }
 
     let s = { ...session, activityLog: [...session.activityLog] };
@@ -487,6 +517,7 @@ export class FarmOrchestrator {
         result = await this.driver.runAction(account.deviceId, account.id, deviceAction, {
           platform: account.platform,
           handle: account.handle,
+          switcherHint: account.switcherHint,
           caption: content?.caption,
           music: content?.music,
           mediaRef: content?.mediaRef,
@@ -638,6 +669,7 @@ export class FarmOrchestrator {
       this.store.state.sessions,
       timeOfDay,
       calendarDay(now, this.store.state.settings.timeZone),
+      this.store.state.settings.timeZone,
     );
     return {
       canPost: this.store.state.accounts.filter((a) => canPost(a)),

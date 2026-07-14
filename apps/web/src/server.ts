@@ -363,9 +363,12 @@ export function createWebServer() {
           (q.status === "claimed" && q.claimedAt && now - new Date(q.claimedAt).getTime() > 10 * 60 * 1000)
         ));
         if (!item) { send(res, 200, { ok: true, item: null }); return; }
-        item.status = "claimed"; item.claimedBy = json.runnerId ?? "mac"; item.claimedAt = new Date().toISOString();
+        // Validate content BEFORE mutating the item: a failed claim must not
+        // leave an in-memory "claimed" state that diverges from disk and
+        // wedges the item for the whole stale-reclaim window.
         const content = s.state.contents.find((c) => c.id === item.contentId && c.ownerId === user.id);
         if (!content) { send(res, 409, { error: "Queue content missing" }); return; }
+        item.status = "claimed"; item.claimedBy = json.runnerId ?? "mac"; item.claimedAt = new Date().toISOString();
         const targets = item.accountIds.map((id) => s.state.accounts.find((a) => a.id === id && a.ownerId === user.id)).filter(Boolean).map((a) => ({ cloudId: a!.id, sourceId: a!.sourceId, handle: a!.handle, platform: a!.platform }));
         s.save();
         const refs = [...new Set([content.mediaRef, ...(content.slides ?? [])])];
