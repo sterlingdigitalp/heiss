@@ -7,6 +7,7 @@ import {
   isWarmOnlyPlatform,
   markPosting,
   postCycleScript,
+  warmupOnlyScript,
   supportsAutoPost,
   TRUST_PER_WARMUP,
   type SocialAccount,
@@ -38,12 +39,13 @@ describe("account lifecycle", () => {
     assert.equal(canPost(account({ stage: "posting", platform: "tiktok" })), true);
   });
 
-  it("never allows X/LinkedIn auto-post", () => {
+  it("never allows X/YouTube auto-post", () => {
     assert.equal(canPost(account({ stage: "matured", platform: "x" })), false);
-    assert.equal(canPost(account({ stage: "matured", platform: "linkedin" })), false);
+    assert.equal(canPost(account({ stage: "matured", platform: "youtube" })), false);
     assert.equal(isWarmOnlyPlatform("x"), true);
     assert.equal(supportsAutoPost("instagram"), true);
-    assert.equal(supportsAutoPost("linkedin"), false);
+    assert.equal(isWarmOnlyPlatform("youtube"), true);
+    assert.equal(supportsAutoPost("youtube"), false);
   });
 
   it("advances trust and stage through warmups until matured", () => {
@@ -75,5 +77,24 @@ describe("account lifecycle", () => {
     assert.ok(post.length >= 4);
     assert.ok(script.indexOf("post:publish") > script.indexOf(pre[0]!));
     assert.ok(script.indexOf(post[0]!) > script.indexOf("post:publish"));
+  });
+
+  it("ramps daily warmup volume across maturity phases", () => {
+    const fresh = warmupOnlyScript(["saas"], 0);
+    const matureRamp = warmupOnlyScript(["saas"], 75);
+    assert.equal(fresh.filter((step) => step === "warmup:scroll").length, 8);
+    assert.equal(fresh.includes("warmup:follow"), false);
+    assert.equal(matureRamp.filter((step) => step === "warmup:scroll").length, 15);
+    assert.equal(matureRamp.includes("warmup:follow"), true);
+  });
+
+  it("randomizes deterministically per session while preserving action counts", () => {
+    const first = warmupOnlyScript(["saas"], 50, "session-a");
+    const resumed = warmupOnlyScript(["saas"], 50, "session-a");
+    const other = warmupOnlyScript(["saas"], 50, "session-b");
+    assert.deepEqual(first, resumed);
+    assert.notDeepEqual(first, other);
+    assert.equal(first.filter((step) => step === "warmup:scroll").length, 12);
+    assert.ok(first.some((step, index) => step !== "warmup:scroll" && index < first.length - 2));
   });
 });

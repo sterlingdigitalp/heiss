@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { findProjectRoot } from "../src/project-root.js";
+import { JsonStore } from "@heiss/core";
 
 const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
@@ -17,6 +19,11 @@ function run(args: string[], dataDir: string) {
 }
 
 describe("farm CLI real-only path", () => {
+  it("finds vendored runner sources when npm starts inside apps/farm", () => {
+    const root = fileURLToPath(new URL("../../../", import.meta.url));
+    assert.equal(findProjectRoot(join(root, "apps", "farm")), root.replace(/\/$/, ""));
+  });
+
   it("exposes setup status, devices list, signing show (no seed simulator)", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "heiss-farm-real-"));
     const seed = run(["seed"], dataDir);
@@ -69,5 +76,42 @@ describe("farm CLI real-only path", () => {
     const acc = JSON.parse(add.stdout);
     assert.equal(acc.account.platform, "tiktok");
     assert.equal(acc.account.stage, "fresh");
+  });
+
+  it("adds one named person with four linked platform handles atomically", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "heiss-farm-set-"));
+    const store = new JsonStore(join(dataDir, "farm.json"));
+    store.state.devices.push({ id: "d1", name: "iPhone", udid: "REAL", online: false, createdAt: new Date().toISOString() });
+    store.save();
+    const result = run([
+      "add-account-set", "d1", "Person 2",
+      "--instagram", "@ig2", "--tiktok", "@tt2", "--x", "@x2", "--youtube", "@yt2",
+      "--terms", "humanoid robots,robotics",
+    ], dataDir);
+    assert.equal(result.status, 0, result.stderr);
+    const body = JSON.parse(result.stdout);
+    assert.equal(body.group.name, "Person 2");
+    assert.equal(body.accounts.length, 4);
+    assert.ok(body.accounts.every((account: { groupId: string }) => account.groupId === body.group.id));
+    assert.ok(body.accounts.every((account: { searchTerms: string[] }) => account.searchTerms.join("|") === "humanoid robots|robotics"));
+    const terms = run(["account-set", "terms", body.group.id, "automation, embodied AI"], dataDir);
+    assert.equal(terms.status, 0, terms.stderr);
+    const handle = run(["account", "handle", body.accounts[2].id, "@XCase"], dataDir);
+    assert.equal(handle.status, 0, handle.stderr);
+    const saved = new JsonStore(join(dataDir, "farm.json"));
+    assert.ok(saved.state.accounts.every((account) => account.searchTerms.join("|") === "automation|embodied AI"));
+    assert.equal(saved.state.accounts.find((account) => account.id === body.accounts[2].id)?.handle, "@XCase");
+    assert.equal(saved.state.warmupSchedules.length, 4);
+    assert.deepEqual(saved.state.warmupSchedules.map((schedule) => schedule.timeOfDay), ["20:00", "20:15", "20:30", "20:45"]);
+
+    const disable = run(["warmup-schedule", "disable", body.accounts[3].id], dataDir);
+    assert.equal(disable.status, 0, disable.stderr);
+    assert.equal(JSON.parse(disable.stdout).schedule.enabled, false);
+    const disabled = new JsonStore(join(dataDir, "farm.json"));
+    assert.equal(disabled.state.warmupSchedules.find((schedule) => schedule.accountId === body.accounts[3].id)?.enabled, false);
+
+    const enable = run(["warmup-schedule", "enable", body.accounts[3].id], dataDir);
+    assert.equal(enable.status, 0, enable.stderr);
+    assert.equal(JSON.parse(enable.stdout).schedule.enabled, true);
   });
 });

@@ -12,7 +12,7 @@
     "test": "npm run test -w @heiss/core && npm run test -w @heiss/device && npm run test -w @heiss/farm && npm run test -w @heiss/web",
     "test:all": "npm test",
     "dev:web": "npm run dev -w @heiss/web",
-    "farm": "npm run start -w @heiss/farm",
+    "farm": "npm run start -w @heiss/farm --",
     "app": "npm run start -w @heiss/desktop",
     "typecheck": "npm run typecheck -w @heiss/core && npm run typecheck -w @heiss/device && npm run typecheck -w @heiss/farm && npm run typecheck -w @heiss/web"
   },

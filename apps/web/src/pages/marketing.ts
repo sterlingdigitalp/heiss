@@ -8,18 +8,18 @@ export function marketingHtml(): string {
   <title>Heiss · Run your socials on autopilot</title>
   <style>
     :root {
-      --bg: #0c0a09;
-      --fg: #fafaf9;
-      --muted: #a8a29e;
-      --accent: #f97316;
-      --card: #1c1917;
-      --border: #292524;
+      --bg: #050604;
+      --fg: #f7f7ef;
+      --muted: #a5a79a;
+      --accent: #cfff39;
+      --card: #11120e;
+      --border: #2b2d24;
       --good: #4ade80;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
       background: var(--bg);
       color: var(--fg);
       line-height: 1.55;
@@ -27,7 +27,8 @@ export function marketingHtml(): string {
     a { color: var(--accent); text-decoration: none; }
     header {
       display: flex; justify-content: space-between; align-items: center;
-      padding: 1.25rem 2rem; border-bottom: 1px solid var(--border);
+      max-width: 980px; margin: 1rem auto 0; padding: .8rem 1rem; border: 1px solid var(--border);
+      border-radius: 1rem; background: rgba(10,11,8,.88); position: sticky; top: 1rem; z-index: 5;
     }
     .logo { font-weight: 700; letter-spacing: -0.03em; font-size: 1.25rem; color: var(--fg); }
     .logo span { color: var(--accent); }
@@ -39,18 +40,18 @@ export function marketingHtml(): string {
     }
     .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--border); }
     .hero {
-      max-width: 960px; margin: 0 auto; padding: 5rem 1.5rem 3rem; text-align: center;
+      max-width: 1040px; margin: 0 auto; padding: 8rem 1.5rem 5rem; text-align: center;
     }
     .hero .eyebrow { color: var(--accent); font-size: 0.85rem; letter-spacing: 0.08em; text-transform: uppercase; }
-    h1 { font-size: clamp(2.4rem, 6vw, 3.75rem); line-height: 1.05; letter-spacing: -0.04em; margin: 0.75rem 0; }
-    h1 em { font-style: normal; color: var(--accent); }
+    h1 { font-family: Georgia, serif; font-weight: 400; font-size: clamp(3.6rem, 8vw, 6.8rem); line-height: .94; letter-spacing: -0.06em; margin: 1rem 0 1.5rem; }
+    h1 em { font-weight: 400; color: var(--accent); }
     .lead { color: var(--muted); font-size: 1.15rem; max-width: 40rem; margin: 0 auto 2rem; }
     .stats { display: flex; gap: 2rem; justify-content: center; flex-wrap: wrap; margin: 2.5rem 0; }
     .stat strong { display: block; font-size: 1.75rem; }
     .stat span { color: var(--muted); font-size: 0.9rem; }
     section { max-width: 1000px; margin: 0 auto; padding: 3rem 1.5rem; }
-    h2 { font-size: 2rem; letter-spacing: -0.03em; }
-    h2 em { font-style: normal; color: var(--accent); }
+    h2 { font-family: Georgia, serif; font-weight: 400; font-size: clamp(2.2rem,5vw,3.8rem); letter-spacing: -0.05em; }
+    h2 em { color: var(--accent); }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
     .card {
       background: var(--card); border: 1px solid var(--border); border-radius: 1rem; padding: 1.25rem;
@@ -83,6 +84,10 @@ export function marketingHtml(): string {
     }
     .check { color: var(--good); }
     .x { color: #f87171; }
+    details { border-top:1px solid var(--border); padding:1rem 0; }
+    summary { cursor:pointer; font-weight:700; }
+    details p { color:var(--muted); max-width:52rem; }
+    @media(max-width:720px){header{margin:.5rem}.hero{padding-top:5rem}nav a:not(.btn){display:none}}
   </style>
 </head>
 <body>
@@ -92,6 +97,8 @@ export function marketingHtml(): string {
       <a href="#how">How it works</a>
       <a href="#lifecycle">Lifecycle</a>
       <a href="#pricing">Pricing</a>
+      <a href="/blog.html">Blog</a>
+      <a href="/resources.html">Resources</a>
       <a class="btn" href="/app">Open app →</a>
     </nav>
   </header>
@@ -103,7 +110,7 @@ export function marketingHtml(): string {
       <p class="lead">
         Plug in iPhones and Heiss takes any account — even brand-new ones — from cold to consistently posting.
         Warms them up, keeps them healthy, and auto-posts to <strong>TikTok and Instagram</strong> on schedule.
-        X and LinkedIn stay warm.
+        X and YouTube stay warm.
       </p>
       <a class="btn" href="/app">Try Heiss free →</a>
       <a class="btn ghost" href="#how" style="margin-left:0.5rem">See how it works</a>
@@ -172,7 +179,7 @@ export function marketingHtml(): string {
           <div class="amt">$0</div>
           <ul>
             <li>Shadowban-safe warmups</li>
-            <li>TikTok, Instagram, X, LinkedIn</li>
+            <li>TikTok, Instagram, X, YouTube</li>
             <li>1 iPhone · 500 MB Cloud Drop</li>
           </ul>
           <a class="btn" href="/app">Get started →</a>
@@ -209,6 +216,14 @@ export function marketingHtml(): string {
       <p style="color:var(--muted);font-size:0.85rem;margin-top:1rem">Billing modeled only — no live payment processor in this clone.</p>
     </section>
 
+    <section id="faq">
+      <h2>Before you <em>start.</em></h2>
+      <details><summary>Can a brand-new account post immediately?</summary><p>No. Heiss gates fresh accounts and runs a phased scroll, like, follow, and search routine until they mature enough to join the posting rotation.</p></details>
+      <details><summary>What happens if an iPhone or app stalls?</summary><p>Runs checkpoint after every action. The controller resumes from the unfinished step and refuses to publish the same queue item twice.</p></details>
+      <details><summary>Where does my data live?</summary><p>Devices, accounts, schedules, credentials, and activity stay on your Mac. Cloud Drop only stages content long enough for your local controller to claim it.</p></details>
+      <details><summary>Do I need a proxy?</summary><p>One or two accounts on one iPhone can use a normal home connection. Larger farms should assign one dedicated SOCKS5 or mobile IP to each iPhone.</p></details>
+    </section>
+
     <section>
       <h2>The farm posts. You <em>build.</em></h2>
       <p class="lead" style="margin:0 0 1.5rem;text-align:left;max-width:none">
@@ -219,7 +234,7 @@ export function marketingHtml(): string {
   </main>
 
   <footer>
-    Heiss — Warmr.so-style clone · hi@heiss.local · <a href="/app">App</a>
+    Heiss · <a href="/app">App</a> · <a href="/blog.html">Blog</a> · <a href="/resources.html">Resources</a> · <a href="/privacy.html">Privacy</a> · <a href="/terms.html">Terms</a>
   </footer>
 </body>
 </html>`;

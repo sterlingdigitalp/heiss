@@ -6,6 +6,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   writeFileSync,
   cpSync,
   rmSync,
@@ -84,7 +85,8 @@ export async function ensureRunnerSources(repoRoot?: string): Promise<string> {
 export async function buildRunner(
   sourceDir: string,
   signing?: Partial<SigningConfig>,
-): Promise<{ appPath: string; notes: string[] }> {
+  udid?: string,
+): Promise<{ appPath: string; testRunnerPath: string; notes: string[] }> {
   const plan = planSigning(signing);
   const derived = join(runnerWorkDir(), "DerivedData");
   mkdirSync(derived, { recursive: true });
@@ -125,11 +127,13 @@ export async function buildRunner(
     "-configuration",
     "Release",
     "-destination",
-    "generic/platform=iOS",
+    udid ? `platform=iOS,id=${udid}` : "generic/platform=iOS",
     "-derivedDataPath",
     derived,
+    "-allowProvisioningUpdates",
+    "-allowProvisioningDeviceRegistration",
     ...plan.xcodebuildArgs,
-    "build",
+    "build-for-testing",
   ];
 
   try {
@@ -156,10 +160,16 @@ export async function buildRunner(
     });
   } catch (e) {
     const err = e as { stderr?: string; stdout?: string; message?: string };
+    const combined = `${err.stderr ?? ""}\n${err.stdout ?? ""}`;
+    const diagnostics = combined
+      .split("\n")
+      .filter((line) => /error:|No Account for Team|No profiles for/.test(line))
+      .slice(-12)
+      .join("\n");
     throw new Error(
       `xcodebuild failed for HeissRunner.\n` +
         `Ensure Xcode is installed, Apple ID Team is set (HEISS_TEAM_ID), and a real iOS SDK is available.\n` +
-        `${err.stderr?.slice(-2000) ?? err.stdout?.slice(-2000) ?? err.message}`,
+        `${diagnostics || err.stderr?.slice(-2000) || err.stdout?.slice(-2000) || err.message}`,
     );
   }
 
@@ -167,7 +177,11 @@ export async function buildRunner(
   if (!appPath) {
     throw new Error(`Build succeeded but HeissRunner.app not found under ${derived}`);
   }
-  return { appPath, notes: plan.notes };
+  const testRunnerPath = join(derived, "Build", "Products", "Release-iphoneos", "HeissRunnerUITests-Runner.app");
+  if (!existsSync(testRunnerPath)) {
+    throw new Error(`Build succeeded but HeissRunnerUITests-Runner.app not found under ${derived}`);
+  }
+  return { appPath, testRunnerPath, notes: plan.notes };
 }
 
 function findBuiltApp(derived: string): string | null {
@@ -272,34 +286,64 @@ export async function downloadBuildInstallRunner(
   }
 
   let appPath = opts.useExistingApp;
+  let automationSource: string | undefined;
+  let testRunnerPath: string | undefined;
   const plan = planSigning(opts.signing);
   let notes = [...plan.notes];
   if (!appPath) {
     const src = await ensureRunnerSources(opts.repoRoot);
-    const built = await buildRunner(src, opts.signing);
+    automationSource = src;
+    const built = await buildRunner(src, opts.signing, udid!);
     appPath = built.appPath;
+    testRunnerPath = built.testRunnerPath;
     notes = [...notes, ...built.notes];
   }
 
   await installAppOnDevice(udid!, appPath!);
 
-  // Launch runner so it can accept control commands
-  try {
-    await execFileAsync(
-      "xcrun",
-      [
-        "devicectl",
-        "device",
-        "process",
-        "launch",
-        "--device",
-        udid!,
-        plan.bundleId,
-      ],
-      { timeout: 30_000 },
-    );
-  } catch {
-    notes.push("Runner installed; launch manually once if control channel is idle.");
+  if (automationSource) {
+    // Xcode's test manager can reject its own first install of a Personal Team
+    // test host as untrusted. Preinstall the exact signed host built above.
+    await installAppOnDevice(udid!, testRunnerPath!);
+    let automation = await launchAutomationRunner(udid!, automationSource);
+    let automationState = await waitForAutomationRunnerReady(automation.label, automation.logPath);
+    if (automationState === "exited") {
+      // launchctl can return from removing the previous xcodebuild job before
+      // XCTest has fully released the device test session. One bounded retry
+      // avoids reporting a failed install for that normal teardown race.
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      automation = await launchAutomationRunner(udid!, automationSource);
+      automationState = await waitForAutomationRunnerReady(automation.label, automation.logPath);
+    }
+    if (automationState !== "ready") {
+      const reason = automationState === "exited" ? "exited during startup" : "did not become ready within five minutes";
+      throw new Error(`XCTest automation runner ${reason}. See ${automation.logPath}`);
+    }
+    notes.push(`XCTest automation runner is ready (${automation.label}).`);
+  } else {
+    notes.push("Existing app used; rebuild normally to install the XCTest automation runner.");
+  }
+
+  // The XCTest host is the control server. Launching the base app after it
+  // starts would steal foreground focus from the social app mid-command.
+  if (!automationSource) {
+    try {
+      await execFileAsync(
+        "xcrun",
+        [
+          "devicectl",
+          "device",
+          "process",
+          "launch",
+          "--device",
+          udid!,
+          plan.bundleId,
+        ],
+        { timeout: 30_000 },
+      );
+    } catch {
+      notes.push("Runner installed; launch manually once if control channel is idle.");
+    }
   }
 
   // Persist install record
@@ -332,6 +376,126 @@ export async function downloadBuildInstallRunner(
     notes,
     installedAt: new Date().toISOString(),
   };
+}
+
+export function automationRunnerLabel(udid: string): string {
+  return `so.heiss.automation.${udid.replace(/[^a-zA-Z0-9.-]/g, "-")}`;
+}
+
+export function automationLogPath(udid: string): string {
+  return join(runnerWorkDir(), "automation-logs", `${udid}.log`);
+}
+
+function automationPlistPath(label: string): string {
+  return join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+}
+
+function xmlEscape(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+/** LaunchAgent plist for the long-running XCTest command server. */
+export function automationPlistXml(
+  label: string,
+  programArguments: string[],
+  workingDirectory: string,
+  logPath: string,
+): string {
+  const argsXml = programArguments.map((arg) => `<string>${xmlEscape(arg)}</string>`).join("");
+  return `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>${xmlEscape(label)}</string><key>ProgramArguments</key><array>${argsXml}</array><key>WorkingDirectory</key><string>${xmlEscape(workingDirectory)}</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>15</integer><key>StandardOutPath</key><string>${xmlEscape(logPath)}</string><key>StandardErrorPath</key><string>${xmlEscape(logPath)}</string></dict></plist>`;
+}
+
+export async function waitForAutomationRunnerReady(
+  label: string,
+  logPath: string,
+  timeoutMs = 300_000,
+): Promise<"ready" | "exited" | "timeout"> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(logPath)) {
+      const log = readFileSync(logPath, "utf8");
+      if (/HEISS_COMMAND_SERVER_READY/.test(log)) return "ready";
+      // With KeepAlive the job stays loaded across crash-restarts, so a
+      // missing job no longer signals failure — the build/test log does.
+      if (/TEST EXECUTE FAILED|Testing failed:|xcodebuild: error/.test(log)) return "exited";
+    }
+    try {
+      await execFileAsync("launchctl", ["print", `gui/${process.getuid?.() ?? 0}/${label}`], { timeout: 5_000 });
+    } catch {
+      return "exited";
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return "timeout";
+}
+
+/** Unload the automation runner job and remove its LaunchAgent plist. */
+export async function stopAutomationRunner(udid: string): Promise<void> {
+  const label = automationRunnerLabel(udid);
+  const uid = process.getuid?.() ?? 0;
+  await execFileAsync("launchctl", ["bootout", `gui/${uid}/${label}`], { timeout: 10_000 }).catch(() => undefined);
+  // Legacy jobs from older builds were created with `launchctl submit`.
+  await execFileAsync("launchctl", ["remove", label], { timeout: 10_000 }).catch(() => undefined);
+  rmSync(automationPlistPath(label), { force: true });
+}
+
+/**
+ * Launch the long-running UI-test command server built by build-for-testing.
+ * Installed as a KeepAlive LaunchAgent so it restarts after crashes, the
+ * runner's own 12-hour recycle, and Mac reboots.
+ */
+export async function launchAutomationRunner(
+  udid: string,
+  sourceDir: string,
+): Promise<{ pid: number; logPath: string; label: string }> {
+  const derived = join(runnerWorkDir(), "DerivedData");
+  mkdirSync(join(runnerWorkDir(), "automation-logs"), { recursive: true });
+  const logPath = automationLogPath(udid);
+  const label = automationRunnerLabel(udid);
+  const uid = process.getuid?.() ?? 0;
+  await stopAutomationRunner(udid);
+  // Teardown may return while the old xcodebuild is still releasing the
+  // device test session. Do not bootstrap under the same label until the
+  // previous job is actually gone.
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      await execFileAsync("launchctl", ["print", `gui/${uid}/${label}`], { timeout: 5_000 });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } catch {
+      break;
+    }
+  }
+  // Rotate the log so readiness checks only ever read this launch's output.
+  if (existsSync(logPath)) {
+    renameSync(logPath, `${logPath}.previous`);
+  }
+  const args = [
+      "-project", join(sourceDir, "HeissRunner.xcodeproj"),
+      "-scheme", RUNNER_APP_NAME,
+      "-configuration", "Release",
+      "-destination", `platform=iOS,id=${udid}`,
+      "-derivedDataPath", derived,
+      "test-without-building",
+      "-only-testing:HeissRunnerUITests/HeissRunnerUITests/testCommandServer",
+  ];
+  const plistPath = automationPlistPath(label);
+  mkdirSync(dirname(plistPath), { recursive: true });
+  writeFileSync(plistPath, automationPlistXml(label, ["/usr/bin/xcodebuild", ...args], sourceDir, logPath));
+  await execFileAsync("launchctl", ["bootstrap", `gui/${uid}`, plistPath], { timeout: 10_000 });
+  await execFileAsync("launchctl", ["kickstart", `gui/${uid}/${label}`], { timeout: 10_000 }).catch(() => undefined);
+  let pid = 0;
+  for (let attempt = 0; attempt < 20 && !pid; attempt++) {
+    try {
+      const { stdout } = await execFileAsync("launchctl", ["print", `gui/${uid}/${label}`], { timeout: 5_000 });
+      pid = Number(stdout.match(/\bpid = (\d+)/)?.[1] ?? 0);
+    } catch { /* job is still starting */ }
+    if (!pid) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!pid) throw new Error(`Failed to launch XCTest automation job ${label}. See ${logPath}`);
+  return { pid, logPath, label };
 }
 
 export function isRunnerInstalled(udid: string): boolean {
@@ -383,7 +547,7 @@ struct HeissRunnerApp: App {
             VStack(spacing: 16) {
                 Text("Heiss Runner").font(.largeTitle.bold())
                 Text(server.statusText).font(.body).foregroundStyle(.secondary)
-                Text("Keep this app open while the Mac farm runs.")
+                Text("The Mac launches the signed XCTest automation runner.")
                     .font(.caption).multilineTextAlignment(.center).padding()
             }
             .padding()
@@ -438,11 +602,11 @@ final class ControlServer: ObservableObject {
         // Human-like gestures via coordinate taps when host supplies points.
         // Real social-app navigation uses on-device UI; never unofficial platform APIs.
         if action.contains("scroll") || action.contains("swipe") {
-            return ["ok": true, "detail": "performed swipe/scroll for \\(action)"]
+            return ["ok": false, "executed": false, "detail": "XCTest automation runner required for \\(action)"]
         }
         if action.contains("tap") || action.contains("like") || action.contains("follow")
             || action.contains("search") || action.contains("post") || action.contains("warmup") {
-            return ["ok": true, "detail": "performed gesture for \\(action)"]
+            return ["ok": false, "executed": false, "detail": "XCTest automation runner required for \\(action)"]
         }
         if action == "ping" {
             return ["ok": true, "detail": "pong", "ts": ISO8601DateFormatter().string(from: Date())]

@@ -54,11 +54,11 @@ final class ControlServer: ObservableObject {
             return ["ok": true, "detail": "pong", "ts": ts]
         }
         if action == "screenshot" {
-            return ["ok": true, "detail": "screenshot-not-exported", "ts": ts]
+            return ["ok": false, "executed": false, "detail": "screenshot export requires the UI automation runner", "ts": ts]
         }
         // Gesture intents — host may supply coordinates for CV-calibrated taps
         if action.contains("scroll") || action == "swipe" {
-            return ["ok": true, "detail": "swipe/scroll \(action)", "ts": ts]
+            return ["ok": false, "executed": false, "detail": "gesture queued but no XCTest automation runner is active", "ts": ts]
         }
         if action.contains("like") || action.contains("follow") || action.contains("search")
             || action.contains("post") || action.contains("warmup") || action == "tap"
@@ -66,8 +66,9 @@ final class ControlServer: ObservableObject {
             let x = cmd["x"] as? Double ?? 195
             let y = cmd["y"] as? Double ?? 420
             return [
-                "ok": true,
-                "detail": "gesture \(action) @(\(Int(x)),\(Int(y)))",
+                "ok": false,
+                "executed": false,
+                "detail": "gesture \(action) @(\(Int(x)),\(Int(y))) requires XCTest automation",
                 "ts": ts,
             ]
         }

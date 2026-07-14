@@ -26,11 +26,27 @@ export {
   ensureRunnerSources,
   isRunnerInstalled,
   runnerSourceDir,
+  runnerWorkDir,
+  launchAutomationRunner,
+  stopAutomationRunner,
+  waitForAutomationRunnerReady,
+  automationRunnerLabel,
+  automationLogPath,
+  automationPlistXml,
   RUNNER_BUNDLE_ID,
   RUNNER_APP_NAME,
   type InstallRunnerOptions,
   type InstallRunnerResult,
 } from "./runner-install.js";
+export {
+  checkAutomationRunner,
+  ensureAutomationRunner,
+  hasAutomationBuildProducts,
+  planRunnerRepair,
+  type AutomationHealth,
+  type RunnerRepairAction,
+  type RunnerRepairResult,
+} from "./runner-health.js";
 export {
   RealUsbTransport,
   createProductionTransport,
