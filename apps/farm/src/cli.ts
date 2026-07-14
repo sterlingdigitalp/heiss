@@ -2,7 +2,9 @@
 /**
  * heiss-farm — local controller (physical iPhones only, no simulator).
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import {
   JsonStore,
@@ -16,6 +18,11 @@ import {
   assertWithinPlan,
   PLAN_TIERS,
   createSlot,
+  createWarmupSchedule,
+  warmupScheduleIsDue,
+  nextWarmupSummary,
+  localTimeOfDay,
+  calendarDay,
   type Platform,
   type AccountStage,
 } from "@heiss/core";
@@ -60,9 +67,16 @@ Farm:
   heiss-farm resume [--data DIR]
   heiss-farm register-device <name> <udid>
   heiss-farm add-account <deviceId> <platform> <handle> [--stage STAGE] [--terms a,b]
+  heiss-farm add-account-set <deviceId> <name> --instagram @h --tiktok @h --x @h --youtube @h [--terms "term,term"]
+  heiss-farm account-set terms <groupId> "term,term"
+  heiss-farm account handle <accountId> @handle
   heiss-farm remove-account <accountId>
   heiss-farm add-slot <accountId> <HH:mm>
   heiss-farm remove-slot <slotId>
+  heiss-farm warmup-schedule list | set <accountId> <HH:mm> [--jitter N] | enable <accountId> | disable <accountId> | remove <accountId>
+  heiss-farm settings show | timezone <IANA_ZONE> | caps <farm> <account>
+  heiss-farm safety stop | resume
+  heiss-farm data migrate --from DIR
   heiss-farm cancel <queueItemId>
   heiss-farm drop --accounts ID,ID --caption TEXT --media REF [--music M]
   heiss-farm drop --accounts ID,ID --caption TEXT --carousel --slides a.jpg,b.jpg
@@ -70,7 +84,7 @@ Farm:
   heiss-farm serve-api [--port 8787]
 
 Env:
-  HEISS_DATA          Data directory (default ~/.heiss)
+  HEISS_DATA          Data directory (default ~/.heiss/live)
   HEISS_TEAM_ID       Xcode DEVELOPMENT_TEAM
   HEISS_ASC_KEY_PATH  App Store Connect .p8
   HEISS_ASC_KEY_ID    ASC key id
@@ -198,6 +212,64 @@ function print(obj: unknown): void {
   console.log(JSON.stringify(obj, null, 2));
 }
 
+function notifyDesktop(title: string, body: string): void {
+  if (process.platform !== "darwin" || process.env.HEISS_DISABLE_NOTIFICATIONS === "1") return;
+  const safe = (value: string) => value.replace(/["\\]/g, " ").slice(0, 180);
+  execFile("osascript", ["-e", `display notification "${safe(body)}" with title "${safe(title)}"`], () => undefined);
+}
+
+function parseSearchTerms(value: string | undefined, fallback = "founders"): string[] {
+  const terms = (value ?? fallback).split(",").map((term) => term.trim()).filter(Boolean);
+  return [...new Set(terms)];
+}
+
+interface RunnerInstallRecord {
+  deviceName?: string;
+  installedAt?: string;
+  signingMethod?: "xcode" | "asc";
+}
+
+function runnerExpiryWarning(now: Date): { key: string; body: string } | null {
+  const recordPath = join(homedir(), ".heiss", "runner-installs.json");
+  if (!existsSync(recordPath)) return null;
+  try {
+    const records = JSON.parse(readFileSync(recordPath, "utf8")) as Record<string, RunnerInstallRecord>;
+    const warnings = Object.entries(records).flatMap(([udid, record]) => {
+      if (!record.installedAt) return [];
+      const installedAt = new Date(record.installedAt);
+      if (!Number.isFinite(installedAt.getTime())) return [];
+      // Xcode personal-team provisioning is valid for about seven days. The
+      // paid App Store Connect path is valid for about one year.
+      const validityDays = record.signingMethod === "asc" ? 365 : 7;
+      const expiresAt = new Date(installedAt.getTime() + validityDays * 86_400_000);
+      const remainingMs = expiresAt.getTime() - now.getTime();
+      if (remainingMs > 48 * 3_600_000) return [];
+      return [{ udid, name: record.deviceName ?? udid, expiresAt, remainingMs }];
+    }).sort((a, b) => a.expiresAt.getTime() - b.expiresAt.getTime());
+    const warning = warnings[0];
+    if (!warning) return null;
+    const date = warning.expiresAt.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+    return {
+      key: `${warning.udid}:${warning.expiresAt.toISOString()}`,
+      body: warning.remainingMs <= 0
+        ? `${warning.name}'s HeissRunner signing has expired. Reinstall the runner before the next session.`
+        : `${warning.name}'s HeissRunner signing expires ${date}. Reinstall it before then.`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function rebalanceWarmupSchedules(store: JsonStore): void {
+  if (store.state.warmupSchedules.length > 16) {
+    throw new Error("One iPhone supports at most 16 scheduled handles in the four-platform account-set layout");
+  }
+  for (const [index, schedule] of store.state.warmupSchedules.entries()) {
+    const minutes = 20 * 60 + index * 15;
+    schedule.timeOfDay = `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const cmd = args[0];
@@ -205,6 +277,47 @@ async function main(): Promise<void> {
   if (!cmd || cmd === "--help" || cmd === "-h") {
     console.log(usage());
     process.exit(0);
+  }
+
+  if (cmd === "data" && args[1] === "migrate") {
+    const from = getArg(args, "--from");
+    if (!from) throw new Error("Usage: data migrate --from DIR [--data DIR]");
+    const source = farmStatePath(resolve(from));
+    const target = farmStatePath(getArg(args, "--data") ?? defaultDataDir());
+    if (!existsSync(source)) throw new Error(`Source farm state does not exist: ${source}`);
+    if (existsSync(target) && !hasFlag(args, "--replace")) throw new Error(`Target already exists: ${target}; use --replace only after backing it up`);
+    mkdirSync(dirname(target), { recursive: true });
+    copyFileSync(source, target);
+    const store = new JsonStore(target);
+    store.save();
+    print({ ok: true, source, target, accounts: store.state.accounts.length, devices: store.state.devices.length });
+    return;
+  }
+
+  if (cmd === "settings" && args[1] === "show") {
+    const store = openStore(args); print({ ok: true, settings: store.state.settings }); return;
+  }
+
+  if (cmd === "settings" && args[1] === "timezone") {
+    const zone = args[2];
+    if (!zone) throw new Error("Usage: settings timezone <IANA_ZONE>");
+    try { new Intl.DateTimeFormat("en-US", { timeZone: zone }).format(); } catch { throw new Error(`Invalid IANA timezone: ${zone}`); }
+    const store = openStore(args); store.state.settings.timeZone = zone; store.save(); print({ ok: true, settings: store.state.settings }); return;
+  }
+
+  if (cmd === "settings" && args[1] === "caps") {
+    const farmCap = Number(args[2]), accountCap = Number(args[3]);
+    if (!Number.isInteger(farmCap) || !Number.isInteger(accountCap) || farmCap < 1 || accountCap < 1 || accountCap > farmCap) {
+      throw new Error("Usage: settings caps <farm-positive-int> <account-positive-int>");
+    }
+    const store = openStore(args); store.state.settings.dailyActionCap = farmCap; store.state.settings.accountDailyActionCap = accountCap;
+    store.save(); print({ ok: true, settings: store.state.settings }); return;
+  }
+
+  if (cmd === "safety" && (args[1] === "stop" || args[1] === "resume")) {
+    const store = openStore(args); store.state.settings.emergencyStop = args[1] === "stop";
+    store.pushActivity({ kind: "safety", message: store.state.settings.emergencyStop ? "Emergency stop engaged" : "Emergency stop cleared" });
+    store.save(); print({ ok: true, emergencyStop: store.state.settings.emergencyStop }); return;
   }
 
   // ── Setup ──────────────────────────────────────────────
@@ -480,9 +593,18 @@ async function main(): Promise<void> {
       devices: store.state.devices,
       usb,
       accounts: store.state.accounts,
+      accountGroups: store.state.accountGroups,
       queue: store.state.queue,
       contents: store.state.contents,
       slots: store.state.slots,
+      warmupSchedules: store.state.warmupSchedules,
+      settings: store.state.settings,
+      nextWarmups: nextWarmupSummary(
+        store.state.warmupSchedules,
+        store.state.accounts,
+        new Date().toISOString(),
+        store.state.settings.timeZone,
+      ),
       proxies: store.state.proxies.map((proxy) => ({ ...proxy, importUrl: proxyImportUrl(proxy) })),
       license: store.state.license ?? null,
       activePlan: activePlan(store),
@@ -503,35 +625,67 @@ async function main(): Promise<void> {
     while (!stopping) {
       const store = openStore(args);
       const now = new Date();
-      const timeOfDay = now.toTimeString().slice(0, 5);
+      const nowIso = now.toISOString();
+      const timeOfDay = localTimeOfDay(nowIso, store.state.settings.timeZone);
       try {
+        const expiry = runnerExpiryWarning(now);
+        if (expiry && store.state.settings.notificationKeys.runnerExpiry !== expiry.key) {
+          notifyDesktop("HeissRunner signing expires soon", expiry.body);
+          store.state.settings.notificationKeys.runnerExpiry = expiry.key;
+        }
         if ((process.env.HEISS_CLOUD_URL || store.state.license?.cloudUrl) && store.state.license?.key) {
           await syncCloudDrop(store, args);
         }
         const usb = await listUsbIphones().catch(() => []);
+        const transitions: Array<{ name: string; online: boolean }> = [];
         for (const device of store.state.devices) {
-          device.online = usb.some((candidate) => candidate.udid === device.udid && candidate.available);
+          const online = usb.some((candidate) => candidate.udid === device.udid && candidate.available);
+          const previous = store.state.settings.deviceStates[device.id];
+          device.online = online;
+          store.state.settings.deviceStates[device.id] = online ? "online" : "offline";
+          if (previous && previous !== store.state.settings.deviceStates[device.id]) transitions.push({ name: device.name, online });
         }
         store.save();
+        for (const transition of transitions) {
+          notifyDesktop(transition.online ? "Heiss iPhone reconnected" : "Heiss iPhone disconnected", `${transition.name} is ${transition.online ? "ready" : "offline"}.`);
+        }
         if (store.state.devices.some((device) => device.online) && store.state.accounts.length > 0) {
-          const result = await new FarmOrchestrator(store, makeDriver()).runOnce({
+          const posting = await new FarmOrchestrator(store, makeDriver()).runOnce({
             runnerId: `daemon-${process.pid}`,
             timeOfDay,
-            now: now.toISOString(),
+            now: nowIso,
+            skipWarmups: true,
           });
+          const dueWarmupIds = store.state.warmupSchedules.filter((schedule) => {
+            const account = store.state.accounts.find((candidate) => candidate.id === schedule.accountId);
+            return account && warmupScheduleIsDue(schedule, nowIso, store.state.settings.timeZone, account.lastWarmupAt);
+          }).map((schedule) => schedule.accountId);
+          const warmups = dueWarmupIds.length > 0
+            ? await new FarmOrchestrator(store, makeDriver()).runOnce({
+                runnerId: `daemon-${process.pid}`,
+                timeOfDay,
+                now: nowIso,
+                warmupAccountIds: dueWarmupIds,
+              })
+            : { sessions: [], activity: [], interrupted: false };
+          const result = { sessions: [...posting.sessions, ...warmups.sessions], interrupted: posting.interrupted || warmups.interrupted };
           const cloud = await pushCloudCompletions(store).catch((error) => ({ warning: String(error), pushed: 0 }));
+          const completed = result.sessions.filter((session) => session.status === "completed").length;
+          if (completed > 0) notifyDesktop("Heiss session complete", `${completed} scheduled session${completed === 1 ? "" : "s"} completed.`);
+          if (result.interrupted) notifyDesktop("Heiss needs attention", "A session paused safely and will retry after its backoff window.");
           console.log(JSON.stringify({
-            at: now.toISOString(), timeOfDay,
+            at: nowIso, timeOfDay, timeZone: store.state.settings.timeZone,
             sessions: result.sessions.length,
             posts: result.sessions.filter((session) => session.kind === "post" && session.checkpoint.posted).length,
-            completed: result.sessions.filter((session) => session.status === "completed").length,
-            interrupted: result.interrupted, cloud,
+            completed, interrupted: result.interrupted, dueWarmupIds, cloud,
           }));
         } else {
-          console.log(JSON.stringify({ at: now.toISOString(), timeOfDay, waiting: "Connect an online iPhone and add an account" }));
+          console.log(JSON.stringify({ at: nowIso, timeOfDay, waiting: "Connect an online iPhone and add an account" }));
         }
       } catch (error) {
-        console.error(JSON.stringify({ at: now.toISOString(), error: error instanceof Error ? error.message : String(error) }));
+        const message = error instanceof Error ? error.message : String(error);
+        notifyDesktop("Heiss controller error", message);
+        console.error(JSON.stringify({ at: nowIso, error: message }));
       }
       if (!stopping) await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, 60_000)));
     }
@@ -564,7 +718,6 @@ async function main(): Promise<void> {
           warning: error instanceof Error ? error.message : String(error),
         }))
       : { ok: true, skipped: true };
-    const offline = store.state.devices.filter((d) => !d.online);
     // refresh online from USB
     try {
       const usb = await listUsbIphones();
@@ -678,6 +831,66 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cmd === "account" && args[1] === "handle") {
+    const store = openStore(args);
+    const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
+    const handle = args[3]?.trim();
+    if (!account || !handle || !/^@[A-Za-z0-9._-]+$/.test(handle)) {
+      throw new Error("Usage: account handle <accountId> @handle");
+    }
+    account.handle = handle;
+    store.save(); print({ ok: true, account }); return;
+  }
+
+  if (cmd === "account-set" && args[1] === "terms") {
+    const store = openStore(args);
+    const group = store.state.accountGroups.find((candidate) => candidate.id === args[2]);
+    const terms = parseSearchTerms(args[3], "");
+    if (!group || terms.length === 0) throw new Error("Usage: account-set terms <groupId> \"term,term\"");
+    const accounts = store.state.accounts.filter((account) => account.groupId === group.id);
+    if (accounts.length === 0) throw new Error(`Account set ${group.name} has no linked accounts`);
+    for (const account of accounts) account.searchTerms = terms;
+    store.save(); print({ ok: true, group, terms, accounts: accounts.map((account) => account.id) }); return;
+  }
+
+  if (cmd === "add-account-set") {
+    const store = openStore(args);
+    const deviceId = args[1];
+    const name = args[2]?.trim();
+    const device = store.state.devices.find((candidate) => candidate.id === deviceId || candidate.udid === deviceId);
+    const platforms = ["instagram", "tiktok", "x", "youtube"] as const;
+    const handles = Object.fromEntries(platforms.map((platform) => [platform, getArg(args, `--${platform}`)?.trim()]));
+    if (!device || !name || platforms.some((platform) => !handles[platform])) {
+      throw new Error("Usage: add-account-set <deviceId> <name> --instagram @h --tiktok @h --x @h --youtube @h [--terms \"term,term\"]");
+    }
+    const proposed = [...store.state.accounts];
+    for (const platform of platforms) {
+      assertCanAddAccount(proposed, device.id, platform);
+      proposed.push({
+        id: `pending-${platform}`, deviceId: device.id, platform, handle: handles[platform]!, stage: "fresh",
+        trustScore: 0, searchTerms: [], createdAt: new Date().toISOString(),
+      });
+    }
+    assertWithinPlan(activePlan(store), store.state.devices.length, proposed.length);
+    const group = { id: randomUUID(), name, deviceId: device.id, createdAt: new Date().toISOString() };
+    const created = platforms.map((platform) => ({
+      id: randomUUID(), groupId: group.id, deviceId: device.id, platform, handle: handles[platform]!,
+      stage: "fresh" as const, trustScore: 0, warmupLocalDays: [],
+      searchTerms: parseSearchTerms(getArg(args, "--terms")), createdAt: new Date().toISOString(),
+    }));
+    store.state.accountGroups.push(group);
+    for (const account of created) {
+      store.state.accounts.push(account);
+      if (account.platform === "tiktok" || account.platform === "instagram") store.state.slots.push(createSlot(account.id, "09:00"));
+      const index = store.state.warmupSchedules.length;
+      const minutes = 20 * 60 + 30 + index * 20;
+      const time = `${String(Math.floor(minutes / 60) % 24).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+      store.state.warmupSchedules.push(createWarmupSchedule(account.id, time, 8));
+    }
+    rebalanceWarmupSchedules(store);
+    store.save(); print({ ok: true, group, accounts: created }); return;
+  }
+
   if (cmd === "add-account") {
     const store = openStore(args);
     const deviceId = args[1];
@@ -685,9 +898,12 @@ async function main(): Promise<void> {
     const handle = args[3];
     if (!deviceId || !platform || !handle) {
       console.error(
-        "Usage: add-account <deviceId> <tiktok|instagram|x|linkedin|youtube> <handle> [--stage fresh|matured]",
+        "Usage: add-account <deviceId> <tiktok|instagram|x|youtube> <handle> [--stage fresh|matured]",
       );
       process.exit(1);
+    }
+    if (!["tiktok", "instagram", "x", "youtube"].includes(platform)) {
+      throw new Error(`Unsupported platform ${platform}; expected tiktok, instagram, x, or youtube`);
     }
     const device = store.state.devices.find(
       (d) => d.id === deviceId || d.udid === deviceId,
@@ -707,7 +923,7 @@ async function main(): Promise<void> {
       handle,
       stage,
       trustScore: stage === "fresh" ? 0 : 100,
-      searchTerms: (getArg(args, "--terms") ?? "founders").split(","),
+      searchTerms: parseSearchTerms(getArg(args, "--terms")),
       createdAt: new Date().toISOString(),
     };
     store.state.accounts.push(account);
@@ -716,6 +932,11 @@ async function main(): Promise<void> {
     if (platform === "tiktok" || platform === "instagram") {
       store.state.slots.push(createSlot(account.id, "09:00"));
     }
+    const warmupIndex = store.state.warmupSchedules.length;
+    const minutes = 20 * 60 + 30 + warmupIndex * 20;
+    const warmupTime = `${String(Math.floor(minutes / 60) % 24).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+    store.state.warmupSchedules.push(createWarmupSchedule(account.id, warmupTime, 8));
+    if (store.state.warmupSchedules.length > 4) rebalanceWarmupSchedules(store);
     store.save();
     print({
       ok: true,
@@ -738,9 +959,13 @@ async function main(): Promise<void> {
     }
     store.state.accounts.splice(index, 1);
     store.state.slots = store.state.slots.filter((slot) => slot.accountId !== account.id);
+    store.state.warmupSchedules = store.state.warmupSchedules.filter((slot) => slot.accountId !== account.id);
     for (const item of store.state.queue.filter((queue) => queue.accountIds.includes(account.id))) {
       item.accountIds = item.accountIds.filter((id) => id !== account.id);
       if (item.accountIds.length === 0 && item.status !== "posted") item.status = "cancelled";
+    }
+    if (account.groupId && !store.state.accounts.some((candidate) => candidate.groupId === account.groupId)) {
+      store.state.accountGroups = store.state.accountGroups.filter((group) => group.id !== account.groupId);
     }
     store.save(); print({ ok: true, account }); return;
   }
@@ -783,6 +1008,44 @@ async function main(): Promise<void> {
     store.save();
     print({ ok: true, slot });
     return;
+  }
+
+  if (cmd === "warmup-schedule" && args[1] === "list") {
+    const store = openStore(args);
+    print({
+      ok: true,
+      timeZone: store.state.settings.timeZone,
+      schedules: store.state.warmupSchedules,
+      next: nextWarmupSummary(store.state.warmupSchedules, store.state.accounts, new Date().toISOString(), store.state.settings.timeZone),
+    });
+    return;
+  }
+
+  if (cmd === "warmup-schedule" && args[1] === "set") {
+    const store = openStore(args);
+    const accountId = args[2], time = args[3];
+    const account = store.state.accounts.find((candidate) => candidate.id === accountId);
+    if (!account || !time) throw new Error("Usage: warmup-schedule set <accountId> <HH:mm> [--jitter N]");
+    const jitter = Number(getArg(args, "--jitter") ?? 8);
+    store.state.warmupSchedules = store.state.warmupSchedules.filter((schedule) => schedule.accountId !== accountId);
+    const schedule = createWarmupSchedule(account.id, time, jitter);
+    store.state.warmupSchedules.push(schedule);
+    store.save(); print({ ok: true, account, schedule }); return;
+  }
+
+  if (cmd === "warmup-schedule" && args[1] === "remove") {
+    const store = openStore(args); const accountId = args[2];
+    const removed = store.state.warmupSchedules.filter((schedule) => schedule.accountId === accountId);
+    store.state.warmupSchedules = store.state.warmupSchedules.filter((schedule) => schedule.accountId !== accountId);
+    store.save(); print({ ok: true, removed }); return;
+  }
+
+  if (cmd === "warmup-schedule" && (args[1] === "enable" || args[1] === "disable")) {
+    const store = openStore(args); const accountId = args[2];
+    const schedule = store.state.warmupSchedules.find((candidate) => candidate.accountId === accountId);
+    if (!schedule) throw new Error(`No warmup schedule for account ${accountId ?? ""}`.trim());
+    schedule.enabled = args[1] === "enable";
+    store.save(); print({ ok: true, schedule }); return;
   }
 
   if (cmd === "remove-slot") {

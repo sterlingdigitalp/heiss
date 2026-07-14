@@ -11,6 +11,12 @@ import {
   ensureNotDoublePost,
   QueueError,
   createSlot,
+  createWarmupSchedule,
+  calendarDay,
+  localTimeOfDay,
+  effectiveWarmupTime,
+  warmupScheduleIsDue,
+  nextWarmupSummary,
   accountsNeedingSlotFill,
   pickAccountForQueueItem,
   assertCanAddAccount,
@@ -112,6 +118,33 @@ describe("schedule slot fill", () => {
     assert.equal(needing[0]!.id, "mature");
     const picked = pickAccountForQueueItem(["fresh", "mature"], needing);
     assert.equal(picked?.id, "mature");
+  });
+});
+
+describe("local warmup schedule", () => {
+  it("uses the configured local day instead of UTC midnight", () => {
+    assert.equal(calendarDay("2026-07-13T00:15:00.000Z", "America/Chicago"), "2026-07-12");
+    assert.equal(localTimeOfDay("2026-07-13T00:15:00.000Z", "America/Chicago"), "19:15");
+  });
+
+  it("applies stable daily jitter and runs at most once per local day", () => {
+    const schedule = createWarmupSchedule("a1", "20:30", 8);
+    const time = effectiveWarmupTime(schedule, "2026-07-13");
+    assert.equal(effectiveWarmupTime(schedule, "2026-07-13"), time);
+    assert.equal(warmupScheduleIsDue(schedule, "2026-07-14T04:30:00.000Z", "America/Chicago"), true);
+    assert.equal(warmupScheduleIsDue(schedule, "2026-07-14T04:30:00.000Z", "America/Chicago", "2026-07-14T01:00:00.000Z"), false);
+  });
+
+  it("labels an unrun, passed schedule as due now", () => {
+    const account: SocialAccount = {
+      id: "a1", deviceId: "d1", platform: "youtube", handle: "@one",
+      stage: "fresh", trustScore: 0, searchTerms: [], createdAt: "t",
+    };
+    const schedule = createWarmupSchedule(account.id, "20:30", 0);
+    assert.equal(
+      nextWarmupSummary([schedule], [account], "2026-07-14T04:30:00.000Z", "America/Chicago")[0]?.day,
+      "due now",
+    );
   });
 });
 

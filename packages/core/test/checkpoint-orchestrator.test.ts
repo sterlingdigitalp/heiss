@@ -123,6 +123,23 @@ describe("farm orchestrator (shipped path)", () => {
     assert.ok(result.sessions[0]!.nextRetryAt);
   });
 
+  it("honors emergency stop and daily action caps before device actions", async () => {
+    const store = new JsonStore(storePath()); seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");
+    const driver = new RecordingDriver();
+    store.state.settings.emergencyStop = true;
+    const stopped = await new FarmOrchestrator(store, driver).runOnce({ runnerId: "r", timeOfDay: "20:30" });
+    assert.equal(stopped.sessions.length, 0);
+    assert.equal(driver.actions.length, 0);
+    store.state.settings.emergencyStop = false;
+    store.state.settings.accountDailyActionCap = 1;
+    store.state.activity.push({ id: "used", at: "2026-07-13T20:00:00.000Z", accountId: "acc-tt-fresh", kind: "action", message: "used" });
+    const capped = await new FarmOrchestrator(store, driver).runOnce({ runnerId: "r", timeOfDay: "20:30", now: "2026-07-13T21:00:00.000Z" });
+    assert.equal(capped.interrupted, true);
+    assert.equal(driver.actions.length, 0);
+    assert.match(capped.sessions[0]!.lastError!, /safety_cap/);
+  });
+
   it("keeps the most advanced checkpoint and does not start another session during backoff", async () => {
     const store = new JsonStore(storePath());
     seedDemoFarm(store);
@@ -202,7 +219,7 @@ describe("farm orchestrator (shipped path)", () => {
     assert.equal(result.sessions[0]!.status, "completed");
   });
 
-  it("blocks fresh from posting, posts matured with pre/post warmup, warms X/LinkedIn only", async () => {
+  it("blocks fresh from posting, posts matured with pre/post warmup, warms X/YouTube only", async () => {
     const store = new JsonStore(storePath());
     seedDemoFarm(store);
     const driver = new RecordingDriver();
@@ -258,9 +275,9 @@ describe("farm orchestrator (shipped path)", () => {
     assert.notEqual(xSession.kind, "post");
     assert.ok(!xSession.activityLog.some((l) => l.includes("post:publish")));
 
-    const liSession = result.sessions.find((s) => s.accountId === "acc-li-warm");
-    assert.ok(liSession);
-    assert.notEqual(liSession.kind, "post");
+    const ytSession = result.sessions.find((s) => s.accountId === "acc-yt-warm");
+    assert.ok(ytSession);
+    assert.notEqual(ytSession.kind, "post");
 
     const delivered = store.state.queue.find((q) =>
       q.postedAccountIds?.includes("acc-tt-mature"),

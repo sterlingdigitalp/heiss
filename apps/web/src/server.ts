@@ -155,7 +155,6 @@ function platformProfiles() {
     tiktok: { platform: "tiktok", bundleId: "com.zhiliaoapp.musically", revision: "2026.07.12-2", updatedAt, points: { home: { x: .10, y: .95 }, profile: { x: .91, y: .95 }, accountMenu: { x: .50, y: .08 }, like: { x: .90, y: .55 }, follow: { x: .88, y: .43 }, search: { x: .92, y: .08 }, create: { x: .50, y: .94 } } },
     instagram: { platform: "instagram", bundleId: "com.burbn.instagram", revision: "2026.07.12-2", updatedAt, points: { home: { x: .10, y: .95 }, profile: { x: .91, y: .95 }, accountMenu: { x: .50, y: .08 }, like: { x: .50, y: .48 }, follow: { x: .82, y: .16 }, search: { x: .70, y: .95 }, create: { x: .50, y: .08 } } },
     x: { platform: "x", bundleId: "com.atebits.Tweetie2", revision: "2026.07.12-1", updatedAt, points: { home: { x: .10, y: .95 }, profile: { x: .08, y: .08 }, accountMenu: { x: .50, y: .08 }, like: { x: .72, y: .72 }, follow: { x: .82, y: .16 }, search: { x: .30, y: .95 }, create: { x: .90, y: .88 } } },
-    linkedin: { platform: "linkedin", bundleId: "com.linkedin.LinkedIn", revision: "2026.07.12-1", updatedAt, points: { home: { x: .10, y: .95 }, profile: { x: .08, y: .08 }, accountMenu: { x: .50, y: .08 }, like: { x: .18, y: .72 }, follow: { x: .82, y: .16 }, search: { x: .50, y: .08 }, create: { x: .50, y: .95 } } },
     youtube: { platform: "youtube", bundleId: "com.google.ios.youtube", revision: "2026.07.12-1", updatedAt, points: { home: { x: .10, y: .95 }, profile: { x: .91, y: .95 }, accountMenu: { x: .50, y: .08 }, like: { x: .50, y: .70 }, follow: { x: .80, y: .20 }, search: { x: .88, y: .08 }, create: { x: .50, y: .95 } } },
   };
 }
@@ -224,7 +223,7 @@ export function createWebServer() {
         return;
       }
       if (url.pathname === "/llms.txt" && req.method === "GET") {
-        send(res, 200, `# Heiss\n\n> Heiss runs social accounts on autopilot from real iPhones you own.\n\n- TikTok and Instagram: phased warmup plus scheduled video/carousel posting.\n- X and LinkedIn: warmup only.\n- Real wired iPhones, signed XCTest gestures, no unofficial social APIs.\n- Local-first farm state with optional hosted Cloud Drop.\n\nDashboard: ${origin}/app\nGuides: ${origin}/blog.html\n`, "text/plain; charset=utf-8");
+        send(res, 200, `# Heiss\n\n> Heiss runs social accounts on autopilot from real iPhones you own.\n\n- TikTok and Instagram: phased warmup plus scheduled video/carousel posting.\n- X and YouTube: warmup only.\n- Real wired iPhones, signed XCTest gestures, no unofficial social APIs.\n- Local-first farm state with optional hosted Cloud Drop.\n\nDashboard: ${origin}/app\nGuides: ${origin}/blog.html\n`, "text/plain; charset=utf-8");
         return;
       }
 
@@ -286,7 +285,7 @@ export function createWebServer() {
         if (!user) { send(res, 401, { error: "Invalid license key" }); return; }
         const json = JSON.parse(await readBody(req)) as {
           devices?: Array<{ id: string; name: string; udid: string; online: boolean; createdAt: string }>;
-          accounts?: Array<{ id: string; deviceId: string; platform: "tiktok"|"instagram"|"x"|"linkedin"|"youtube"; handle: string; stage: "fresh"|"warmed_up"|"matured"|"kept_warm"|"posting"; trustScore: number; searchTerms: string[]; createdAt: string; lastWarmupAt?: string; lastPostAt?: string }>;
+          accounts?: Array<{ id: string; deviceId: string; platform: "tiktok"|"instagram"|"x"|"youtube"; handle: string; stage: "fresh"|"warmed_up"|"matured"|"kept_warm"|"posting"; trustScore: number; searchTerms: string[]; createdAt: string; lastWarmupAt?: string; lastPostAt?: string }>;
           slots?: Array<{ id: string; accountId: string; timeOfDay: string; enabled: boolean }>;
         };
         const incomingDevices = json.devices ?? [];

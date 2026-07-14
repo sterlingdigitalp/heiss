@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, rmSync 
 import { dirname } from "node:path";
 import type {
   ActivityEvent,
+  AccountGroup,
   ContentAsset,
   Device,
   FarmSession,
@@ -13,6 +14,8 @@ import type {
   Platform,
   ScheduleSlot,
   SocialAccount,
+  WarmupSchedule,
+  FarmSettings,
   User,
 } from "./types.js";
 import type { LockSnapshot } from "./locks.js";
@@ -26,9 +29,12 @@ export interface FarmState {
   uiProfiles: Partial<Record<Platform, PlatformUiProfile>>;
   devices: Device[];
   accounts: SocialAccount[];
+  accountGroups: AccountGroup[];
   contents: ContentAsset[];
   queue: QueueItem[];
   slots: ScheduleSlot[];
+  warmupSchedules: WarmupSchedule[];
+  settings: FarmSettings;
   sessions: FarmSession[];
   activity: ActivityEvent[];
   proxies: ProxyConfig[];
@@ -45,9 +51,19 @@ export function emptyState(): FarmState {
     uiProfiles: {},
     devices: [],
     accounts: [],
+    accountGroups: [],
     contents: [],
     queue: [],
     slots: [],
+    warmupSchedules: [],
+    settings: {
+      timeZone: "America/Chicago",
+      emergencyStop: false,
+      dailyActionCap: 400,
+      accountDailyActionCap: 25,
+      deviceStates: {},
+      notificationKeys: {},
+    },
     sessions: [],
     activity: [],
     proxies: [],
@@ -83,6 +99,54 @@ export class JsonStore {
     this.state.proxies ??= [];
     this.state.magicLinks ??= [];
     this.state.uiProfiles ??= {};
+    this.state.accountGroups ??= [];
+    this.state.warmupSchedules ??= [];
+    this.state.settings ??= emptyState().settings;
+    this.state.settings.timeZone ??= "America/Chicago";
+    this.state.settings.emergencyStop ??= false;
+    this.state.settings.dailyActionCap ??= 400;
+    this.state.settings.accountDailyActionCap ??= 25;
+    this.state.settings.deviceStates ??= {};
+    this.state.settings.notificationKeys ??= {};
+    // Existing flat farms with one matching handle on all four platforms can
+    // be migrated safely into a single account set without guessing identity.
+    if (this.state.accountGroups.length === 0) {
+      const byDeviceAndHandle = new Map<string, SocialAccount[]>();
+      for (const account of this.state.accounts) {
+        const key = `${account.deviceId}:${account.handle.replace(/^@/, "").toLowerCase()}`;
+        const group = byDeviceAndHandle.get(key) ?? [];
+        group.push(account); byDeviceAndHandle.set(key, group);
+      }
+      for (const accounts of byDeviceAndHandle.values()) {
+        if (new Set(accounts.map((account) => account.platform)).size !== 4) continue;
+        const group: AccountGroup = { id: cryptoRandom(), name: `Person ${this.state.accountGroups.length + 1}`, deviceId: accounts[0]!.deviceId, createdAt: accounts[0]!.createdAt };
+        this.state.accountGroups.push(group);
+        for (const account of accounts) account.groupId = group.id;
+      }
+    }
+    // Forward-fill independent evening warmup schedules for legacy accounts.
+    for (const account of this.state.accounts) {
+      if (this.state.warmupSchedules.some((schedule) => schedule.accountId === account.id)) continue;
+      const index = this.state.warmupSchedules.length;
+      const minutes = 20 * 60 + 30 + index * 20;
+      this.state.warmupSchedules.push({
+        id: cryptoRandom(), accountId: account.id,
+        timeOfDay: `${String(Math.floor(minutes / 60) % 24).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`,
+        jitterMinutes: 8, enabled: true,
+      });
+    }
+    // Reconcile legacy trust with distinct local days. This corrects farms that
+    // crossed UTC midnight while still on the same local evening.
+    for (const account of this.state.accounts) {
+      if (!account.warmupLocalDays && (account.stage === "fresh" || account.stage === "warmed_up")) {
+        const days = [...new Set(this.state.sessions
+          .filter((session) => session.accountId === account.id && session.status === "completed" && session.completedAt)
+          .map((session) => localDay(session.completedAt!, this.state.settings.timeZone)))].sort();
+        if (days.length === 0 && account.lastWarmupAt) days.push(localDay(account.lastWarmupAt, this.state.settings.timeZone));
+        account.warmupLocalDays = days;
+        account.trustScore = Math.min(100, days.length * 25);
+      }
+    }
     for (const user of this.state.users) {
       user.planId ??= "free";
       user.licenseKey ??= `HEISS-LOCAL-${user.id.slice(0, 8).toUpperCase()}`;
@@ -136,6 +200,12 @@ export class JsonStore {
     this.state.activity.push(full);
     return full;
   }
+}
+
+function localDay(iso: string, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(iso));
+  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? "00";
+  return `${value("year")}-${value("month")}-${value("day")}`;
 }
 
 export class StoreConflictError extends Error {

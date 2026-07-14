@@ -304,14 +304,21 @@ export async function downloadBuildInstallRunner(
     // Xcode's test manager can reject its own first install of a Personal Team
     // test host as untrusted. Preinstall the exact signed host built above.
     await installAppOnDevice(udid!, testRunnerPath!);
-    const automation = await launchAutomationRunner(udid!, automationSource);
-    await new Promise((resolve) => setTimeout(resolve, 4_000));
-    try {
-      process.kill(automation.pid, 0);
-    } catch {
-      throw new Error(`XCTest automation runner exited during startup. See ${automation.logPath}`);
+    let automation = await launchAutomationRunner(udid!, automationSource);
+    let automationState = await waitForAutomationRunnerReady(automation.label, automation.logPath);
+    if (automationState === "exited") {
+      // launchctl can return from removing the previous xcodebuild job before
+      // XCTest has fully released the device test session. One bounded retry
+      // avoids reporting a failed install for that normal teardown race.
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      automation = await launchAutomationRunner(udid!, automationSource);
+      automationState = await waitForAutomationRunnerReady(automation.label, automation.logPath);
     }
-    notes.push(`XCTest automation runner started (pid ${automation.pid}).`);
+    if (automationState !== "ready") {
+      const reason = automationState === "exited" ? "exited during startup" : "did not become ready within five minutes";
+      throw new Error(`XCTest automation runner ${reason}. See ${automation.logPath}`);
+    }
+    notes.push(`XCTest automation runner is ready (${automation.label}).`);
   } else {
     notes.push("Existing app used; rebuild normally to install the XCTest automation runner.");
   }
@@ -370,6 +377,30 @@ export async function downloadBuildInstallRunner(
   };
 }
 
+async function waitForAutomationRunnerReady(
+  label: string,
+  logPath: string,
+  timeoutMs = 300_000,
+): Promise<"ready" | "exited" | "timeout"> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(logPath)) {
+      const log = readFileSync(logPath, "utf8");
+      if (/HEISS_COMMAND_SERVER_READY/.test(log)) return "ready";
+    }
+    // launchd may restart xcodebuild under a new PID while the iPhone clears a
+    // transient "device busy" state. Follow the submitted job label instead
+    // of treating that expected PID replacement as a terminal exit.
+    try {
+      await execFileAsync("launchctl", ["print", `gui/${process.getuid?.() ?? 0}/${label}`], { timeout: 5_000 });
+    } catch {
+      return "exited";
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return "timeout";
+}
+
 /** Launch the long-running UI-test command server built by build-for-testing. */
 export async function launchAutomationRunner(
   udid: string,
@@ -382,6 +413,17 @@ export async function launchAutomationRunner(
   const label = `so.heiss.automation.${udid.replace(/[^a-zA-Z0-9.-]/g, "-")}`;
   try { await execFileAsync("launchctl", ["remove", label], { timeout: 10_000 }); }
   catch { /* no previous job */ }
+  // `launchctl remove` may return while the old xcodebuild is still tearing
+  // down. Do not submit or sample a PID under the same label until that job is
+  // actually gone, otherwise the new launch can be mistaken for the old PID.
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      await execFileAsync("launchctl", ["print", `gui/${process.getuid?.() ?? 0}/${label}`], { timeout: 5_000 });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } catch {
+      break;
+    }
+  }
   const args = [
       "-project", join(sourceDir, "HeissRunner.xcodeproj"),
       "-scheme", RUNNER_APP_NAME,

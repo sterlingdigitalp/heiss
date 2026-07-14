@@ -110,7 +110,7 @@ export function marketingHtml(): string {
       <p class="lead">
         Plug in iPhones and Heiss takes any account — even brand-new ones — from cold to consistently posting.
         Warms them up, keeps them healthy, and auto-posts to <strong>TikTok and Instagram</strong> on schedule.
-        X and LinkedIn stay warm.
+        X and YouTube stay warm.
       </p>
       <a class="btn" href="/app">Try Heiss free →</a>
       <a class="btn ghost" href="#how" style="margin-left:0.5rem">See how it works</a>
@@ -179,7 +179,7 @@ export function marketingHtml(): string {
           <div class="amt">$0</div>
           <ul>
             <li>Shadowban-safe warmups</li>
-            <li>TikTok, Instagram, X, LinkedIn</li>
+            <li>TikTok, Instagram, X, YouTube</li>
             <li>1 iPhone · 500 MB Cloud Drop</li>
           </ul>
           <a class="btn" href="/app">Get started →</a>

@@ -1,5 +1,7 @@
 import XCTest
 import Photos
+import UIKit
+import Vision
 import ObjectiveC.runtime
 
 /// TikTok's continuously animating feed may never report itself idle, which
@@ -47,6 +49,7 @@ final class HeissRunnerUITests: XCTestCase {
         for stale in (try? fm.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil)) ?? [] {
             try? fm.removeItem(at: stale)
         }
+        print("HEISS_COMMAND_SERVER_READY")
 
         // xcodebuild owns the runner process. It is intentionally long-lived so
         // the Mac can drive many actions without rebuilding between gestures.
@@ -104,7 +107,6 @@ final class HeissRunnerUITests: XCTestCase {
             "tiktok": "com.zhiliaoapp.musically",
             "instagram": "com.burbn.instagram",
             "x": "com.atebits.Tweetie2",
-            "linkedin": "com.linkedin.LinkedIn",
             "youtube": "com.google.ios.youtube"
         ][platform] ?? "com.zhiliaoapp.musically"
         let bundle = ((command["uiProfile"] as? [String: Any])?["bundleId"] as? String) ?? fallbackBundle
@@ -115,20 +117,77 @@ final class HeissRunnerUITests: XCTestCase {
         if platform == "tiktok" || platform == "youtube" {
             app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
         }
-        // TikTok can leave its accessibility process wedged after an
-        // interrupted video-feed gesture. Relaunch once per runner lifetime,
-        // before the account is verified and cached.
-        if (platform == "tiktok" || platform == "youtube"), activeHandles[platform] == nil, app.state != .notRunning {
+        // TikTok's search-result player and X's search keyboard both hide the
+        // normal Home/profile controls. TikTok's animated accessibility
+        // process can also wedge after a gesture. Relaunch either app to a
+        // known Home state before every independent command.
+        // YouTube only needs this reset before its first command.
+        if (platform == "tiktok" || platform == "x" || (platform == "youtube" && activeHandles[platform] == nil)), app.state != .notRunning {
             app.terminate()
             Thread.sleep(forTimeInterval: 0.8)
         }
         if app.state != .runningForeground { app.launch() }
+        if !app.wait(for: .runningForeground, timeout: 12) {
+            // Physical iOS occasionally returns to SpringBoard after XCTest's
+            // first launch request even though the app is installed and
+            // launchable. Activation is a safe bounded second attempt.
+            app.activate()
+        }
         guard app.wait(for: .runningForeground, timeout: 12) else {
             throw NSError(domain: "HeissRunner", code: 1, userInfo: [NSLocalizedDescriptionKey: "\(platform) did not reach foreground"])
+        }
+        if platform == "instagram" {
+            // Instagram can present this modal over the profile immediately
+            // after switching accounts. It obscures both the current handle
+            // and account switcher, so clear it before exact verification.
+            let notNow = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Not now")).firstMatch
+            if notNow.waitForExistence(timeout: 1), notNow.isHittable {
+                notNow.tap()
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+        }
+        if platform == "tiktok" {
+            // TikTok's first-run surfaces can wedge XCTest while it snapshots
+            // the animated accessibility hierarchy. Detect their rendered
+            // copy with Vision and tap stable coordinates through SpringBoard.
+            let surface = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            disableAutomaticInterruptionHandling(surface)
+            if try screenContainsTextUsingOCR("Choose your interests"),
+               try tapTextUsingOCR(surface: surface, expected: "Skip") {
+                Thread.sleep(forTimeInterval: 0.8)
+            }
+            for _ in 0..<2 {
+                if !(try screenContainsTextUsingOCR("Find contacts")) { break }
+                guard try tapTextUsingOCR(surface: surface, expected: "Don") else { break }
+                Thread.sleep(forTimeInterval: 0.8)
+            }
+            if try screenContainsTextUsingOCR("Find contacts") {
+                throw NSError(domain: "HeissRunner", code: 19, userInfo: [NSLocalizedDescriptionKey: "TikTok contacts prompt did not dismiss"])
+            }
+            for _ in 0..<3 {
+                if !(try screenContainsTextUsingOCR("Swipe up for more")) { break }
+                let start = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.82))
+                let end = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.10))
+                start.press(forDuration: 0.08, thenDragTo: end)
+                Thread.sleep(forTimeInterval: 1.0)
+            }
+            if try screenContainsTextUsingOCR("Swipe up for more") {
+                throw NSError(domain: "HeissRunner", code: 18, userInfo: [NSLocalizedDescriptionKey: "TikTok swipe tutorial did not dismiss after three gestures"])
+            }
         }
         let handle = command["handle"] as? String ?? ""
         if action != "post:verify_published" {
             try ensureAccount(app, platform: platform, handle: handle, command: command)
+            if app.state != .runningForeground {
+                app.activate()
+                guard app.wait(for: .runningForeground, timeout: 8) else {
+                    throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) lost foreground before \(action)"])
+                }
+                try ensureAccount(app, platform: platform, handle: handle, command: command)
+            }
+        }
+        if action == "verify:account" {
+            return ["ok": true, "executed": true, "detail": "xctest:\(platform):verified:\(handle)"]
         }
 
         let window: XCUIElement
@@ -336,8 +395,17 @@ final class HeissRunnerUITests: XCTestCase {
     }
 
     private func ensureAccount(_ app: XCUIApplication, platform: String, handle: String, command: [String: Any]) throws {
-        guard !handle.isEmpty, activeHandles[platform] != handle else { return }
+        guard !handle.isEmpty else { return }
         let normalized = handle.hasPrefix("@") ? String(handle.dropFirst()) : handle
+        let withAt = "@\(normalized)"
+        let normalizedWithMetadata = "\(normalized),"
+        let withAtAndMetadata = "\(withAt),"
+        let handlePredicate = NSPredicate(
+            format: "label ==[c] %@ OR label ==[c] %@ OR label BEGINSWITH[c] %@ OR label BEGINSWITH[c] %@ OR value ==[c] %@ OR value ==[c] %@ OR value BEGINSWITH[c] %@ OR value BEGINSWITH[c] %@ OR identifier ==[c] %@ OR identifier ==[c] %@",
+            normalized, withAt, normalizedWithMetadata, withAtAndMetadata,
+            normalized, withAt, normalizedWithMetadata, withAtAndMetadata,
+            normalized, withAt
+        )
         let window: XCUIElement
         if platform == "tiktok" || platform == "x" {
             let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
@@ -345,6 +413,58 @@ final class HeissRunnerUITests: XCTestCase {
             window = springboard
         } else {
             window = app.windows.firstMatch
+        }
+        // If a prior attempt left Instagram's switcher sheet open, use that
+        // exact state instead of mistaking a visible-but-unselected row for
+        // the active profile.
+        if platform == "instagram" {
+            let switcherMarker = app.descendants(matching: .any).matching(
+                NSPredicate(format: "label CONTAINS[c] %@", "Add Instagram account")
+            )
+            if switcherMarker.count > 0 {
+                try tapExactHandle(app, surface: window, predicate: handlePredicate, handle: handle, platform: platform)
+                Thread.sleep(forTimeInterval: 0.8)
+                guard instagramTitleMatches(app, normalized: normalized) else {
+                    throw NSError(domain: "HeissRunner", code: 15, userInfo: [NSLocalizedDescriptionKey: "Account switch did not verify exact handle \(handle) on \(platform)"])
+                }
+                activeHandles[platform] = handle
+                window.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
+                return
+            }
+        }
+        if platform == "x" {
+            // Inspect the stable navigation-drawer header to verify the
+            // current X account without touching feed content.
+            window.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
+            Thread.sleep(forTimeInterval: 0.8)
+            try openXDrawer(surface: window)
+            var inspectedAccounts = [try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | ")]
+            if try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.72) {
+                window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50)).tap()
+                activeHandles[platform] = handle
+                return
+            }
+            // The drawer's top row contains the other signed-in account
+            // avatars. Try only those bounded slots, reopening the drawer and
+            // verifying the exact header handle after each switch.
+            let accountSlots: [CGFloat] = [0.50, 0.62]
+            for (index, x) in accountSlots.enumerated() {
+                window.coordinate(withNormalizedOffset: CGVector(dx: x, dy: 0.075)).tap()
+                Thread.sleep(forTimeInterval: 1.0)
+                try openXDrawer(surface: window)
+                inspectedAccounts.append(try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | "))
+                if try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.72) {
+                    window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50)).tap()
+                    activeHandles[platform] = handle
+                    return
+                }
+                if index < accountSlots.count - 1 {
+                    window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50)).tap()
+                    Thread.sleep(forTimeInterval: 0.5)
+                }
+            }
+            let summary = inspectedAccounts.enumerated().map { "slot\($0.offset): \($0.element)" }.joined(separator: "; ")
+            throw NSError(domain: "HeissRunner", code: 15, userInfo: [NSLocalizedDescriptionKey: "X signed-in accounts did not verify exact handle \(handle). OCR headers: \(summary)"])
         }
         if platform == "tiktok" { dismissTikTokPasskey() }
         if platform == "x" {
@@ -367,25 +487,28 @@ final class HeissRunnerUITests: XCTestCase {
         let profileTab = app.buttons["profile-tab"]
         if platform == "instagram", profileTab.waitForExistence(timeout: 2), profileTab.isHittable { profileTab.tap() }
         else {
-            let fallback = platform == "x" || platform == "linkedin"
+            let fallback = platform == "x"
                 ? CGVector(dx: 0.08, dy: 0.08)
                 : CGVector(dx: 0.91, dy: 0.95)
             window.coordinate(withNormalizedOffset: point(command, "profile", fallback)).tap()
         }
         Thread.sleep(forTimeInterval: 1.0)
+        if platform == "tiktok", app.state != .runningForeground {
+            app.activate()
+            guard app.wait(for: .runningForeground, timeout: 8) else {
+                throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "TikTok lost foreground during account verification"])
+            }
+            window.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
+            Thread.sleep(forTimeInterval: 1.0)
+        }
         if platform == "tiktok" { dismissTikTokPasskey() }
-        let handlePredicate = NSPredicate(
-            format: "label CONTAINS[c] %@ OR value CONTAINS[c] %@ OR identifier CONTAINS[c] %@",
-            normalized, normalized, normalized
-        )
         if platform == "x" {
             let drawerHandle = app.descendants(matching: .any).matching(handlePredicate)
             if drawerHandle.count == 0 {
-                let profileButton = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Profile"))
-                let profileText = app.staticTexts.matching(NSPredicate(format: "label ==[c] %@", "Profile"))
-                if profileButton.count > 0, profileButton.firstMatch.isHittable { profileButton.firstMatch.tap() }
-                else if profileText.count > 0, profileText.firstMatch.isHittable { profileText.firstMatch.tap() }
-                else { window.coordinate(withNormalizedOffset: CGVector(dx: 0.22, dy: 0.23)).tap() }
+                // X's animated drawer can hold XCTest's element-tap
+                // quiescence wait for a full minute. The stable Profile row
+                // coordinate on SpringBoard delivers the same tap immediately.
+                window.coordinate(withNormalizedOffset: CGVector(dx: 0.22, dy: 0.23)).tap()
                 Thread.sleep(forTimeInterval: 1.0)
             }
         }
@@ -402,8 +525,18 @@ final class HeissRunnerUITests: XCTestCase {
         // TikTok has exposed the profile handle as a button/other element in
         // multiple UI revisions, so do not restrict account verification to
         // static text. The exact normalized handle is still required.
-        let current = app.descendants(matching: .any).matching(handlePredicate)
-        if current.firstMatch.waitForExistence(timeout: platform == "x" ? 10 : 1) {
+        let isCurrent: Bool
+        if platform == "instagram" {
+            isCurrent = instagramTitleMatches(app, normalized: normalized)
+        } else if platform == "tiktok" {
+            // TikTok can wedge XCTest while snapshotting its animated profile
+            // hierarchy. Vision reads the rendered username without asking the
+            // app (or Continuity) for an accessibility snapshot.
+            isCurrent = try screenContainsExactHandleUsingOCR(normalized: normalized)
+        } else {
+            isCurrent = app.descendants(matching: .any).matching(handlePredicate).firstMatch.waitForExistence(timeout: platform == "x" ? 10 : 1)
+        }
+        if isCurrent {
             activeHandles[platform] = handle
             window.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
             return
@@ -411,20 +544,164 @@ final class HeissRunnerUITests: XCTestCase {
 
         // Profile headers on TikTok/Instagram expose the current username and
         // open the native account switcher when tapped.
-        let accountMenu = app.buttons["user-switch-title-button"]
-        if accountMenu.waitForExistence(timeout: 2), accountMenu.isHittable { accountMenu.tap() }
-        else { window.coordinate(withNormalizedOffset: point(command, "accountMenu", .init(dx: 0.50, dy: 0.08))).tap() }
+        if platform == "tiktok" {
+            window.coordinate(withNormalizedOffset: point(command, "accountMenu", .init(dx: 0.57, dy: 0.27))).tap()
+        } else {
+            let accountMenu = app.buttons["user-switch-title-button"]
+            if accountMenu.waitForExistence(timeout: 2), accountMenu.isHittable { accountMenu.tap() }
+            else {
+            let fallback: CGVector
+            if platform == "youtube" { fallback = .init(dx: 0.20, dy: 0.06) }
+            else { fallback = .init(dx: 0.50, dy: 0.08) }
+            window.coordinate(withNormalizedOffset: point(command, "accountMenu", fallback)).tap()
+            }
+        }
         Thread.sleep(forTimeInterval: 0.8)
-        let targetText = app.staticTexts.matching(handlePredicate)
-        let targetButton = app.buttons.matching(handlePredicate)
-        if targetText.count > 0 { targetText.firstMatch.tap() }
-        else if targetButton.count > 0 { targetButton.firstMatch.tap() }
-        else {
-            throw NSError(domain: "HeissRunner", code: 5, userInfo: [NSLocalizedDescriptionKey: "Account \(handle) was not found in the \(platform) switcher"])
+        try tapExactHandle(app, surface: window, predicate: handlePredicate, handle: handle, platform: platform)
+        Thread.sleep(forTimeInterval: 0.8)
+        let verified: Bool
+        if platform == "instagram" {
+            verified = instagramTitleMatches(app, normalized: normalized)
+        } else if platform == "tiktok" {
+            verified = try waitForExactHandleUsingOCR(normalized: normalized, timeout: 8)
+        } else {
+            verified = app.descendants(matching: .any).matching(handlePredicate).firstMatch.waitForExistence(timeout: 5)
+        }
+        guard verified else {
+            throw NSError(domain: "HeissRunner", code: 15, userInfo: [NSLocalizedDescriptionKey: "Account switch did not verify exact handle \(handle) on \(platform)"])
         }
         activeHandles[platform] = handle
-        Thread.sleep(forTimeInterval: 0.8)
         window.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
+    }
+
+    private func tapExactHandle(_ app: XCUIApplication, surface: XCUIElement, predicate: NSPredicate, handle: String, platform: String) throws {
+        let normalized = handle.hasPrefix("@") ? String(handle.dropFirst()) : handle
+        if platform == "tiktok" {
+            if try tapExactHandleUsingOCR(surface: surface, normalized: normalized) { return }
+            throw NSError(domain: "HeissRunner", code: 5, userInfo: [NSLocalizedDescriptionKey: "Account \(handle) was not found in the \(platform) switcher"])
+        }
+        let target: XCUIElement?
+        if ["instagram", "tiktok", "x", "youtube"].contains(platform) {
+            let broad = NSPredicate(
+                format: "label CONTAINS[c] %@ OR value CONTAINS[c] %@ OR identifier CONTAINS[c] %@",
+                normalized, normalized, normalized
+            )
+            target = app.descendants(matching: .any).matching(broad).allElementsBoundByIndex.first {
+                elementContainsExactHandle($0, normalized: normalized)
+            }
+        } else {
+            let exact = app.descendants(matching: .any).matching(predicate).firstMatch
+            target = exact.waitForExistence(timeout: 3) ? exact : nil
+        }
+        if let target {
+            if target.isHittable { target.tap() }
+            else { target.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+            return
+        }
+        if try tapExactHandleUsingOCR(surface: surface, normalized: normalized) { return }
+        throw NSError(domain: "HeissRunner", code: 5, userInfo: [NSLocalizedDescriptionKey: "Account \(handle) was not found in the \(platform) switcher"])
+    }
+
+    private func instagramTitleMatches(_ app: XCUIApplication, normalized: String) -> Bool {
+        let title = app.buttons["user-switch-title-button"]
+        guard title.waitForExistence(timeout: 2) else { return false }
+        return elementContainsExactHandle(title, normalized: normalized)
+    }
+
+    private func elementContainsExactHandle(_ element: XCUIElement, normalized: String) -> Bool {
+        return [element.label, element.identifier, element.value as? String ?? ""].contains { raw in
+            textContainsExactHandle(raw, normalized: normalized)
+        }
+    }
+
+    private func textContainsExactHandle(_ raw: String, normalized: String) -> Bool {
+        let escaped = NSRegularExpression.escapedPattern(for: normalized.lowercased())
+        let pattern = "(^|[^a-z0-9._])@?\(escaped)($|[^a-z0-9._])"
+        return raw.lowercased().range(of: pattern, options: .regularExpression) != nil
+    }
+
+    private func tapExactHandleUsingOCR(surface: XCUIElement, normalized: String) throws -> Bool {
+        guard let match = try recognizedHandleObservation(normalized: normalized) else { return false }
+        let box = match.boundingBox
+        surface.coordinate(withNormalizedOffset: CGVector(dx: box.midX, dy: 1.0 - box.midY)).tap()
+        return true
+    }
+
+    private func screenContainsExactHandleUsingOCR(normalized: String, minimumVisionY: CGFloat = 0) throws -> Bool {
+        guard let match = try recognizedHandleObservation(normalized: normalized) else { return false }
+        return match.boundingBox.midY >= minimumVisionY
+    }
+
+    private func waitForExactHandleUsingOCR(normalized: String, timeout: TimeInterval) throws -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if try screenContainsExactHandleUsingOCR(normalized: normalized) { return true }
+            Thread.sleep(forTimeInterval: 0.5)
+        } while Date() < deadline
+        return false
+    }
+
+    private func openXDrawer(surface: XCUIElement) throws {
+        for _ in 0..<3 {
+            surface.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.06)).tap()
+            Thread.sleep(forTimeInterval: 1.0)
+            if try screenContainsTextUsingOCR("Profile", minimumVisionY: 0.55) { return }
+        }
+        throw NSError(domain: "HeissRunner", code: 16, userInfo: [NSLocalizedDescriptionKey: "X navigation drawer did not open"])
+    }
+
+    private func screenContainsTextUsingOCR(_ expected: String, minimumVisionY: CGFloat = 0) throws -> Bool {
+        guard let image = UIImage(data: XCUIScreen.main.screenshot().pngRepresentation)?.cgImage else { return false }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
+        return (request.results ?? []).contains { observation in
+            observation.boundingBox.midY >= minimumVisionY && observation.topCandidates(3).contains {
+                $0.string.range(of: expected, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            }
+        }
+    }
+
+    private func tapTextUsingOCR(surface: XCUIElement, expected: String) throws -> Bool {
+        guard let image = UIImage(data: XCUIScreen.main.screenshot().pngRepresentation)?.cgImage else { return false }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
+        guard let observation = (request.results ?? []).first(where: { observation in
+            observation.topCandidates(3).contains {
+                $0.string.range(of: expected, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            }
+        }) else { return false }
+        let box = observation.boundingBox
+        surface.coordinate(withNormalizedOffset: CGVector(dx: box.midX, dy: 1.0 - box.midY)).tap()
+        return true
+    }
+
+    private func recognizedTextStringsUsingOCR(minimumVisionY: CGFloat = 0) throws -> [String] {
+        guard let image = UIImage(data: XCUIScreen.main.screenshot().pngRepresentation)?.cgImage else { return [] }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
+        return (request.results ?? [])
+            .filter { $0.boundingBox.midY >= minimumVisionY }
+            .compactMap { $0.topCandidates(1).first?.string }
+            .prefix(12)
+            .map { $0 }
+    }
+
+    private func recognizedHandleObservation(normalized: String) throws -> VNRecognizedTextObservation? {
+        guard let image = UIImage(data: XCUIScreen.main.screenshot().pngRepresentation)?.cgImage else { return nil }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
+        let observations = request.results ?? []
+        return observations.first(where: { observation in
+            observation.topCandidates(3).contains { textContainsExactHandle($0.string, normalized: normalized) }
+        })
     }
 
     private func point(_ command: [String: Any], _ key: String, _ fallback: CGVector) -> CGVector {

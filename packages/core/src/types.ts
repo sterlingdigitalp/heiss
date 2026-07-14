@@ -1,12 +1,12 @@
 /** Shared domain types for Heiss (Warmr-style farm). */
 
-export type Platform = "tiktok" | "instagram" | "x" | "linkedin" | "youtube";
+export type Platform = "tiktok" | "instagram" | "x" | "youtube";
 
 /** Platforms that support scheduled auto-post (video/carousel). */
 export const POSTING_PLATFORMS: readonly Platform[] = ["tiktok", "instagram"] as const;
 
 /** Platforms that only warm (no auto-post). */
-export const WARM_ONLY_PLATFORMS: readonly Platform[] = ["x", "linkedin", "youtube"] as const;
+export const WARM_ONLY_PLATFORMS: readonly Platform[] = ["x", "youtube"] as const;
 
 export type AccountStage =
   | "fresh"
@@ -76,6 +76,8 @@ export interface SocialAccount {
   id: string;
   ownerId?: string;
   sourceId?: string;
+  /** Four-platform identity/account set this handle belongs to. */
+  groupId?: string;
   deviceId: string;
   platform: Platform;
   handle: string;
@@ -86,7 +88,16 @@ export interface SocialAccount {
   searchTerms: string[];
   createdAt: string;
   lastWarmupAt?: string;
+  /** Distinct local calendar days with a completed warmup. */
+  warmupLocalDays?: string[];
   lastPostAt?: string;
+}
+
+export interface AccountGroup {
+  id: string;
+  name: string;
+  deviceId: string;
+  createdAt: string;
 }
 
 export interface ContentAsset {
@@ -131,6 +142,27 @@ export interface ScheduleSlot {
   enabled: boolean;
 }
 
+export interface WarmupSchedule {
+  id: string;
+  accountId: string;
+  /** Preferred HH:mm in the configured farm timezone. */
+  timeOfDay: string;
+  /** Deterministic daily variation applied around timeOfDay. */
+  jitterMinutes: number;
+  enabled: boolean;
+}
+
+export interface FarmSettings {
+  timeZone: string;
+  emergencyStop: boolean;
+  dailyActionCap: number;
+  accountDailyActionCap: number;
+  /** Last observed state is persisted so disconnect alerts fire once per transition. */
+  deviceStates: Record<string, "online" | "offline">;
+  /** Notification fingerprints already delivered by the persistent controller. */
+  notificationKeys: Record<string, string>;
+}
+
 export interface ActivityEvent {
   id: string;
   at: string;
@@ -161,6 +193,8 @@ export interface FarmSession {
   queueItemId?: string;
   /** HH:mm schedule slot this post session was planned for (post sessions only). */
   slotTimeOfDay?: string;
+  /** Frozen at session creation so retries preserve the randomized sequence. */
+  plannedSteps?: string[];
   startedAt: string;
   updatedAt: string;
   completedAt?: string;
@@ -213,7 +247,7 @@ export const PLAN_TIERS: readonly PlanTier[] = [
     id: "free",
     name: "Free",
     maxDevices: 1,
-    maxAccounts: 8,
+    maxAccounts: 32,
     cloudDropGb: 0.5,
     priceMonthly: 0,
   },
@@ -221,7 +255,7 @@ export const PLAN_TIERS: readonly PlanTier[] = [
     id: "solo",
     name: "Solo",
     maxDevices: 1,
-    maxAccounts: 8,
+    maxAccounts: 32,
     cloudDropGb: 5,
     priceMonthly: 40,
   },
@@ -229,7 +263,7 @@ export const PLAN_TIERS: readonly PlanTier[] = [
     id: "rack",
     name: "Rack",
     maxDevices: 3,
-    maxAccounts: 24,
+    maxAccounts: 96,
     cloudDropGb: 20,
     priceMonthly: 80,
   },

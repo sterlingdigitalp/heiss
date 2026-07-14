@@ -41,6 +41,21 @@ export class RealIosDriver implements DeviceDriver {
         `RealIosDriver: device UDID ${udid} not found on USB. Plug in, unlock, Trust.`,
       );
     }
+    if (this.transport.runScriptAction) {
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          const ready = await this.transport.runScriptAction(udid, "ping");
+          if (ready.ok) { lastError = undefined; break; }
+        } catch (error) {
+          lastError = error;
+          await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
+        }
+      }
+      if (lastError) {
+        throw new Error(`RealIosDriver: runner readiness check failed for ${udid.slice(0, 8)}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+      }
+    }
     this.connected.set(deviceId, udid);
   }
 

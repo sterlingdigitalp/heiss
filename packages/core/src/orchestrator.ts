@@ -72,6 +72,10 @@ export interface RunOptions {
   accountId?: string;
   /** Clock override (ISO) for day-scoped slot fill; defaults to now. */
   now?: string;
+  /** Restrict newly planned warmups to scheduler-selected accounts. */
+  warmupAccountIds?: string[];
+  /** Run posting/recovery only. */
+  skipWarmups?: boolean;
 }
 
 export interface RunResult {
@@ -94,6 +98,11 @@ export class FarmOrchestrator {
     const sessions: FarmSession[] = [];
     let interrupted = false;
     const runNow = opts.now ?? new Date().toISOString();
+    const timeZone = this.store.state.settings.timeZone;
+    if (this.store.state.settings.emergencyStop) {
+      const message = "emergency_stop: controller is paused; no device actions were attempted";
+      return { sessions, activity: [message], interrupted: false };
+    }
 
     // A backoff-delayed checkpoint still owns the account logically even though
     // its device lock is released. Retain the checkpoint with the most progress
@@ -151,7 +160,7 @@ export class FarmOrchestrator {
     const filledThisTick = accountsFilledSlotOnDay(
       this.store.state.sessions,
       opts.timeOfDay,
-      calendarDay(runNow),
+      calendarDay(runNow, timeZone),
     );
 
     const needingPost = accountsNeedingSlotFill(
@@ -208,16 +217,22 @@ export class FarmOrchestrator {
     }
 
     // Warmups / keep-warm for remaining accounts
+    if (opts.skipWarmups) {
+      this.store.save();
+      return { sessions, activity, interrupted };
+    }
+    const scheduledAccounts = opts.warmupAccountIds ? new Set(opts.warmupAccountIds) : undefined;
     for (const account of this.store.state.accounts) {
       if (started >= max) break;
       if (opts.accountId && account.id !== opts.accountId) continue;
+      if (scheduledAccounts && !scheduledAccounts.has(account.id)) continue;
       if (accountsAwaitingRetry.has(account.id)) continue;
       if (this.store.locks.isDeviceLocked(account.deviceId)) continue;
       // Skip if already had a session this tick
       if (sessions.some((s) => s.accountId === account.id)) continue;
       // Warmup maturity progresses at most once per calendar day. Post sessions
       // still include their pre/post engagement wrapper at every configured slot.
-      if (account.lastWarmupAt && calendarDay(account.lastWarmupAt) === calendarDay(runNow)) {
+      if (account.lastWarmupAt && calendarDay(account.lastWarmupAt, timeZone) === calendarDay(runNow, timeZone)) {
         continue;
       }
 
@@ -270,11 +285,12 @@ export class FarmOrchestrator {
     this.store.state.queue[idx] = item;
 
     const session = this.createSession(account, "post", item.id, opts.timeOfDay);
+    session.plannedSteps = postCycleScript(account.searchTerms);
     this.store.locks.acquireDevice(account.deviceId, session.id);
     this.store.locks.acquireContent(item.id, session.id);
     this.store.save();
 
-    const script = postCycleScript(account.searchTerms);
+    const script = session.plannedSteps!;
     return this.executeSteps(session, account, script, opts, activity, item);
   }
 
@@ -285,9 +301,10 @@ export class FarmOrchestrator {
     activity: string[],
   ): Promise<{ session: FarmSession; interrupted: boolean }> {
     const session = this.createSession(account, kind);
+    session.plannedSteps = warmupOnlyScript(account.searchTerms, account.trustScore, session.id);
     this.store.locks.acquireDevice(account.deviceId, session.id);
     this.store.save();
-    const script = warmupOnlyScript(account.searchTerms, account.trustScore);
+    const script = session.plannedSteps!;
     return this.executeSteps(session, account, script, opts, activity);
   }
 
@@ -356,10 +373,14 @@ export class FarmOrchestrator {
     }
     this.store.save();
 
-    const script =
-      s.kind === "post"
-        ? postCycleScript(account.searchTerms)
-        : warmupOnlyScript(account.searchTerms, account.trustScore);
+    const script = s.plannedSteps ?? (s.kind === "post"
+      ? postCycleScript(account.searchTerms)
+      : warmupOnlyScript(account.searchTerms, account.trustScore, s.id));
+    if (!s.plannedSteps) {
+      s = { ...s, plannedSteps: script };
+      this.replaceSession(s);
+      this.store.save();
+    }
 
     let item: QueueItem | undefined;
     if (s.queueItemId) {
@@ -377,6 +398,21 @@ export class FarmOrchestrator {
     queueItem?: QueueItem,
   ): Promise<{ session: FarmSession; interrupted: boolean }> {
     const runNow = opts.now ?? new Date().toISOString();
+    const cap = this.safetyCapStatus(account.id, runNow);
+    if (cap.blocked) {
+      const message = `safety_cap: ${cap.reason}; session paused before device connection`;
+      const paused = checkpointSession({
+        ...session,
+        nextRetryAt: new Date(new Date(runNow).getTime() + 6 * 60 * 60 * 1000).toISOString(),
+        lastError: message,
+        updatedAt: runNow,
+      });
+      this.replaceSession(paused);
+      this.releaseLocks(paused);
+      this.store.pushActivity({ kind: "safety_cap", sessionId: paused.id, accountId: account.id, message });
+      this.store.save();
+      return { session: paused, interrupted: true };
+    }
     const device = this.store.state.devices.find((d) => d.id === account.deviceId);
     if (device) {
       await this.driver.connect(device.id, device.udid);
@@ -388,6 +424,22 @@ export class FarmOrchestrator {
     let interrupted = false;
 
     for (const step of steps) {
+      const stepCap = this.safetyCapStatus(account.id, runNow);
+      if (stepCap.blocked) {
+        const message = `safety_cap: ${stepCap.reason}; remaining actions deferred`;
+        s = checkpointSession({
+          ...s,
+          nextRetryAt: new Date(new Date(runNow).getTime() + 6 * 60 * 60 * 1000).toISOString(),
+          lastError: message,
+          updatedAt: runNow,
+        });
+        this.replaceSession(s);
+        this.releaseLocks(s);
+        this.store.pushActivity({ kind: "safety_cap", sessionId: s.id, accountId: account.id, message });
+        if (device) await this.driver.disconnect(device.id).catch(() => undefined);
+        this.store.save();
+        return { session: s, interrupted: true };
+      }
       // Fresh post gate even mid-script
       if (step.startsWith("post:") && !canPost(account) && s.kind === "post") {
         const msg = `blocked_post: ${account.handle} still not eligible`;
@@ -530,11 +582,11 @@ export class FarmOrchestrator {
 
     let updated = account;
     if (s.kind === "post" && s.checkpoint.posted) {
-      updated = markPosting(applyWarmupProgress(account, runNow), runNow);
+      updated = markPosting(applyWarmupProgress(account, runNow, calendarDay(runNow, this.store.state.settings.timeZone)), runNow);
     } else if (s.kind === "warmup") {
-      updated = applyWarmupProgress(account, runNow);
+      updated = applyWarmupProgress(account, runNow, calendarDay(runNow, this.store.state.settings.timeZone));
     } else {
-      updated = applyKeepWarm(account, runNow);
+      updated = applyKeepWarm(account, runNow, calendarDay(runNow, this.store.state.settings.timeZone));
     }
     const ai = this.store.state.accounts.findIndex((a) => a.id === account.id);
     this.store.state.accounts[ai] = updated;
@@ -560,6 +612,20 @@ export class FarmOrchestrator {
     }
   }
 
+  private safetyCapStatus(accountId: string, now: string): { blocked: boolean; reason: string } {
+    const settings = this.store.state.settings;
+    const day = calendarDay(now, settings.timeZone);
+    const today = this.store.state.activity.filter((event) => event.kind === "action" && calendarDay(event.at, settings.timeZone) === day);
+    const accountActions = today.filter((event) => event.accountId === accountId).length;
+    if (today.length >= settings.dailyActionCap) {
+      return { blocked: true, reason: `farm daily action cap ${settings.dailyActionCap} reached` };
+    }
+    if (accountActions >= settings.accountDailyActionCap) {
+      return { blocked: true, reason: `account daily action cap ${settings.accountDailyActionCap} reached` };
+    }
+    return { blocked: false, reason: "" };
+  }
+
   /** Plan helper used by CLI status. */
   planSummary(timeOfDay: string, now: string = new Date().toISOString()): {
     canPost: SocialAccount[];
@@ -571,7 +637,7 @@ export class FarmOrchestrator {
     const filledToday = accountsFilledSlotOnDay(
       this.store.state.sessions,
       timeOfDay,
-      calendarDay(now),
+      calendarDay(now, this.store.state.settings.timeZone),
     );
     return {
       canPost: this.store.state.accounts.filter((a) => canPost(a)),
@@ -631,7 +697,7 @@ export function seedDemoFarm(store: JsonStore, ownerId?: string): void {
   ensure("acc-tt-mature", "tiktok", "@mature_tt", "matured", 100);
   ensure("acc-ig-mature", "instagram", "@mature_ig", "matured", 100);
   ensure("acc-x-warm", "x", "@warm_x", "matured", 100);
-  ensure("acc-li-warm", "linkedin", "warm-li", "matured", 100);
+  ensure("acc-yt-warm", "youtube", "@warm_yt", "matured", 100);
 
   for (const baseId of ["acc-tt-mature", "acc-ig-mature"]) {
     const accId = `${baseId}${suffix}`;

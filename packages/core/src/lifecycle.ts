@@ -29,7 +29,7 @@ export function canPost(account: Pick<SocialAccount, "stage" | "platform">): boo
   return stageIndex(account.stage) >= stageIndex("matured");
 }
 
-/** X, LinkedIn, and YouTube are warm-only. */
+/** X and YouTube are warm-only. */
 export function isWarmOnlyPlatform(platform: Platform): boolean {
   return WARM_ONLY_PLATFORMS.includes(platform);
 }
@@ -54,11 +54,10 @@ export function defaultWarmupActions(searchTerms: string[] = []): WarmupAction[]
 export function applyWarmupProgress(
   account: SocialAccount,
   now: string = new Date().toISOString(),
+  localDay: string = now.slice(0, 10),
 ): SocialAccount {
-  const trustScore = Math.min(
-    MATURITY_TRUST_THRESHOLD,
-    account.trustScore + TRUST_PER_WARMUP,
-  );
+  const warmupLocalDays = [...new Set([...(account.warmupLocalDays ?? []), localDay])].sort();
+  const trustScore = Math.min(MATURITY_TRUST_THRESHOLD, warmupLocalDays.length * TRUST_PER_WARMUP);
   let stage = account.stage;
 
   if (stage === "fresh") {
@@ -79,6 +78,7 @@ export function applyWarmupProgress(
     trustScore,
     stage,
     lastWarmupAt: now,
+    warmupLocalDays,
   };
 }
 
@@ -106,6 +106,7 @@ export function markPosting(
 export function applyKeepWarm(
   account: SocialAccount,
   now: string = new Date().toISOString(),
+  localDay: string = now.slice(0, 10),
 ): SocialAccount {
   if (stageIndex(account.stage) < stageIndex("matured")) {
     throw new Error(`Account ${account.id} is not matured; cannot keep-warm`);
@@ -116,6 +117,7 @@ export function applyKeepWarm(
     ...account,
     stage: nextStage,
     lastWarmupAt: now,
+    warmupLocalDays: [...new Set([...(account.warmupLocalDays ?? []), localDay])].sort(),
     trustScore: Math.min(MATURITY_TRUST_THRESHOLD, account.trustScore + Math.floor(TRUST_PER_WARMUP / 2)),
   };
 }
@@ -130,7 +132,7 @@ export function postCycleScript(searchTerms: string[]): string[] {
   return [...warmup, ...post, ...after];
 }
 
-export function warmupOnlyScript(searchTerms: string[], trustScore = 0): string[] {
+export function warmupOnlyScript(searchTerms: string[], trustScore = 0, seed = randomSeed()): string[] {
   const phase = Math.min(3, Math.floor(Math.max(0, trustScore) / TRUST_PER_WARMUP));
   const plans = [
     { scroll: 8, like: 0, follow: 0, search: 2 },
@@ -146,5 +148,21 @@ export function warmupOnlyScript(searchTerms: string[], trustScore = 0): string[
   if (searchTerms.length > 0) {
     actions.push(...Array.from({ length: plan.search }, () => "search" as const));
   }
-  return actions.map((action) => `warmup:${action}`);
+  return seededShuffle(actions, seed).map((action) => `warmup:${action}`);
+}
+
+function seededShuffle<T>(values: T[], seed: string): T[] {
+  const result = [...values];
+  let state = 2166136261;
+  for (const char of seed) state = Math.imul(state ^ char.charCodeAt(0), 16777619) >>> 0;
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    const target = state % (index + 1);
+    [result[index], result[target]] = [result[target]!, result[index]!];
+  }
+  return result;
+}
+
+function randomSeed(): string {
+  return `${Date.now()}-${Math.random()}`;
 }

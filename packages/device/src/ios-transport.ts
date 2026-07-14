@@ -229,6 +229,23 @@ export class RealUsbTransport implements IosTransport {
     localPath: string,
     remotePath: string,
   ): Promise<void> {
+    return this.copyWithTimeout("to", udid, localPath, remotePath);
+  }
+
+  private copyFromDevice(
+    udid: string,
+    remotePath: string,
+    localPath: string,
+  ): Promise<void> {
+    return this.copyWithTimeout("from", udid, remotePath, localPath);
+  }
+
+  private copyWithTimeout(
+    direction: "to" | "from",
+    udid: string,
+    source: string,
+    destination: string,
+  ): Promise<void> {
     return new Promise((resolve, reject) => {
       // devicectl device copy to
       const child = spawn(
@@ -237,7 +254,7 @@ export class RealUsbTransport implements IosTransport {
           "devicectl",
           "device",
           "copy",
-          "to",
+          direction,
           "--device",
           udid,
           "--domain-type",
@@ -245,56 +262,31 @@ export class RealUsbTransport implements IosTransport {
           "--domain-identifier",
           this.bundleId,
           "--source",
-          localPath,
+          source,
           "--destination",
-          remotePath,
+          destination,
         ],
         { stdio: ["ignore", "pipe", "pipe"] },
       );
       let stderr = "";
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        error ? reject(error) : resolve();
+      };
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish(new Error(`copy ${direction} device timed out after ${this.commandTimeoutMs}ms`));
+      }, this.commandTimeoutMs);
       child.stderr.on("data", (d) => {
         stderr += String(d);
       });
+      child.on("error", (error) => finish(error));
       child.on("close", (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`copy to device failed: ${stderr}`));
-      });
-    });
-  }
-
-  private copyFromDevice(
-    udid: string,
-    remotePath: string,
-    localPath: string,
-  ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const child = spawn(
-        "xcrun",
-        [
-          "devicectl",
-          "device",
-          "copy",
-          "from",
-          "--device",
-          udid,
-          "--domain-type",
-          "appDataContainer",
-          "--domain-identifier",
-          this.bundleId,
-          "--source",
-          remotePath,
-          "--destination",
-          localPath,
-        ],
-        { stdio: ["ignore", "pipe", "pipe"] },
-      );
-      let stderr = "";
-      child.stderr.on("data", (d) => {
-        stderr += String(d);
-      });
-      child.on("close", (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`copy from device failed: ${stderr}`));
+        if (code === 0) finish();
+        else finish(new Error(`copy ${direction} device failed: ${stderr || `exit ${code}`}`));
       });
     });
   }

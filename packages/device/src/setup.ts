@@ -138,7 +138,7 @@ export async function getSetupStatus(opts?: {
     done: Boolean(opts?.hasRegisteredDevice),
     humanOnly: false,
     detail: opts?.hasRegisteredDevice
-      ? "Device in ~/.heiss/farm.json"
+      ? "Device in ~/.heiss/live/farm.json"
       : "Run: heiss-farm devices sync",
   });
 
