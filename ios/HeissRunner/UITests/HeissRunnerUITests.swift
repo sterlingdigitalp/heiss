@@ -159,10 +159,7 @@ final class HeissRunnerUITests: XCTestCase {
             // copy with Vision and tap stable coordinates through SpringBoard.
             let surface = XCUIApplication(bundleIdentifier: "com.apple.springboard")
             disableAutomaticInterruptionHandling(surface)
-            if try screenContainsTextUsingOCR("Choose your interests"),
-               try tapTextUsingOCR(surface: surface, expected: "Skip") {
-                Thread.sleep(forTimeInterval: 0.8)
-            }
+            try dismissTikTokInterestsPrompt(surface: surface)
             try dismissTikTokContactsPrompt(surface: surface)
             for _ in 0..<3 {
                 if !(try screenContainsTextUsingOCR("Swipe up for more")) { break }
@@ -439,6 +436,22 @@ final class HeissRunnerUITests: XCTestCase {
         }
     }
 
+    private func dismissTikTokInterestsPrompt(surface: XCUIElement) throws {
+        // Like the contacts upsell, TikTok can defer this onboarding screen
+        // until a later relaunch. Guard the stable Skip coordinate with the
+        // distinctive rendered heading so feed content can never be tapped.
+        for _ in 0..<2 {
+            guard try screenContainsTextUsingOCR("Choose your interests") else { return }
+            if !(try tapTextUsingOCR(surface: surface, expected: "Skip")) {
+                surface.coordinate(withNormalizedOffset: CGVector(dx: 0.29, dy: 0.94)).tap()
+            }
+            Thread.sleep(forTimeInterval: 0.8)
+        }
+        if try screenContainsTextUsingOCR("Choose your interests") {
+            throw NSError(domain: "HeissRunner", code: 21, userInfo: [NSLocalizedDescriptionKey: "TikTok interests prompt did not dismiss"])
+        }
+    }
+
     private func ensureAccount(_ app: XCUIApplication, platform: String, handle: String, command: [String: Any]) throws {
         guard !handle.isEmpty else { return }
         let normalized = handle.hasPrefix("@") ? String(handle.dropFirst()) : handle
@@ -521,6 +534,7 @@ final class HeissRunnerUITests: XCTestCase {
         }
         if platform == "tiktok" {
             dismissTikTokPasskey()
+            try dismissTikTokInterestsPrompt(surface: window)
             try dismissTikTokContactsPrompt(surface: window)
         }
         if platform == "x" {
@@ -559,6 +573,7 @@ final class HeissRunnerUITests: XCTestCase {
         }
         if platform == "tiktok" {
             dismissTikTokPasskey()
+            try dismissTikTokInterestsPrompt(surface: window)
             try dismissTikTokContactsPrompt(surface: window)
         }
         if platform == "x" {

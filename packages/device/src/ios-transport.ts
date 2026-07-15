@@ -164,16 +164,26 @@ export class RealUsbTransport implements IosTransport {
     const remoteInbox = `Documents/inbox/${id}.json`;
     try {
       await this.copyToDevice(udid, localIn, remoteInbox);
-    } catch (e) {
-      // Fallback: launch runner and use process launch with environment — still real device
-      await this.ensureRunnerLaunched(udid);
+    } catch {
+      // CoreDevice can briefly hold the XCTest app-data container while the
+      // freshly launched test host attaches. Retry the same idempotent file
+      // copy before deciding the runner is dead; relaunching a healthy host on
+      // one transient timeout creates an avoidable automation-mode race.
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
       try {
         await this.copyToDevice(udid, localIn, remoteInbox);
-      } catch (retryError) {
-        rmSync(work, { recursive: true, force: true });
-        throw new Error(
-          `Unable to deliver ${String(cmd.action)} to HeissRunner on ${udid.slice(0, 8)}: ${retryError instanceof Error ? retryError.message : String(retryError)}`,
-        );
+      } catch {
+        // Fallback: only now relaunch the XCTest command server, then make one
+        // final delivery attempt over the real-device file channel.
+        await this.ensureRunnerLaunched(udid);
+        try {
+          await this.copyToDevice(udid, localIn, remoteInbox);
+        } catch (retryError) {
+          rmSync(work, { recursive: true, force: true });
+          throw new Error(
+            `Unable to deliver ${String(cmd.action)} to HeissRunner on ${udid.slice(0, 8)}: ${retryError instanceof Error ? retryError.message : String(retryError)}`,
+          );
+        }
       }
     }
 
