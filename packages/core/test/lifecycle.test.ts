@@ -97,4 +97,12 @@ describe("account lifecycle", () => {
     assert.equal(first.filter((step) => step === "warmup:scroll").length, 12);
     assert.ok(first.some((step, index) => step !== "warmup:scroll" && index < first.length - 2));
   });
+
+  it("omits likes and follows when human engagement confirmation is required", () => {
+    const warmup = warmupOnlyScript(["saas"], 75, "human-gated", false);
+    assert.equal(warmup.some((step) => /like|follow/.test(step)), false);
+    const post = postCycleScript(["saas"], false);
+    assert.equal(post.some((step) => step.includes(":like")), false);
+    assert.ok(post.includes("post:publish"), "posting remains governed by posting eligibility and slots");
+  });
 });

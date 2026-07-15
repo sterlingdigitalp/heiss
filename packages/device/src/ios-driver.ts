@@ -1,4 +1,4 @@
-import type { DeviceDriver } from "@heiss/core";
+import type { DeviceActionContext, DeviceDriver, DeviceSessionResult, FailureKind } from "@heiss/core";
 import { RealUsbTransport } from "./ios-transport.js";
 
 /**
@@ -14,8 +14,27 @@ export interface IosTransport {
   runScriptAction?(
     udid: string,
     action: string,
-    context?: Record<string, unknown>,
+    context?: DeviceActionContext,
   ): Promise<{ ok: true; detail: string }>;
+  runScriptSession?(
+    udid: string,
+    sessionId: string,
+    plannedSteps: string[],
+    startIndex: number,
+    context: DeviceActionContext,
+  ): Promise<DeviceSessionResult>;
+}
+
+export class DeviceSessionError extends Error {
+  constructor(
+    message: string,
+    readonly failureKind: FailureKind,
+    readonly completedSteps = 0,
+    readonly screenshot?: string,
+  ) {
+    super(message);
+    this.name = "DeviceSessionError";
+  }
 }
 
 export class RealIosDriver implements DeviceDriver {
@@ -67,7 +86,7 @@ export class RealIosDriver implements DeviceDriver {
     deviceId: string,
     _accountId: string,
     action: string,
-    context?: Record<string, unknown>,
+    context?: DeviceActionContext,
   ): Promise<{ ok: true; detail: string }> {
     const udid = this.connected.get(deviceId);
     if (!udid) {
@@ -93,6 +112,36 @@ export class RealIosDriver implements DeviceDriver {
     throw new Error(
       `RealIosDriver: transport cannot perform ${action}. Install HeissRunner on the device.`,
     );
+  }
+
+  async runSession(
+    deviceId: string,
+    _accountId: string,
+    sessionId: string,
+    plannedSteps: string[],
+    startIndex: number,
+    context: DeviceActionContext,
+  ): Promise<DeviceSessionResult> {
+    const udid = this.connected.get(deviceId);
+    if (!udid) throw new Error(`RealIosDriver: device ${deviceId} not connected`);
+    if (this.transport.runScriptSession) {
+      return this.transport.runScriptSession(udid, sessionId, plannedSteps, startIndex, context);
+    }
+    let completedSteps = startIndex;
+    const stepDetails: string[] = [];
+    for (let index = startIndex; index < plannedSteps.length; index += 1) {
+      const step = plannedSteps[index]!;
+      const result = await this.runAction(deviceId, _accountId, step, context);
+      stepDetails[index] = result.detail;
+      completedSteps = index + 1;
+    }
+    return {
+      ok: true,
+      detail: `legacy-session:${context.platform}:${completedSteps}/${plannedSteps.length}`,
+      completedSteps,
+      stepDetails,
+      heartbeatAt: new Date().toISOString(),
+    };
   }
 
   capabilities(): {

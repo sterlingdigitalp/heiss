@@ -61,6 +61,9 @@ export function emptyState(): FarmState {
       emergencyStop: false,
       dailyActionCap: 400,
       accountDailyActionCap: 25,
+      platformOrder: ["x", "tiktok", "instagram", "youtube"],
+      platformScheduleVersion: 1,
+      requireHumanEngagement: true,
       deviceStates: {},
       notificationKeys: {},
     },
@@ -106,6 +109,9 @@ export class JsonStore {
     this.state.settings.emergencyStop ??= false;
     this.state.settings.dailyActionCap ??= 400;
     this.state.settings.accountDailyActionCap ??= 25;
+    this.state.settings.platformOrder ??= ["x", "tiktok", "instagram", "youtube"];
+    this.state.settings.platformScheduleVersion ??= 0;
+    this.state.settings.requireHumanEngagement ??= true;
     this.state.settings.deviceStates ??= {};
     this.state.settings.notificationKeys ??= {};
     // Existing flat farms with one matching handle on all four platforms can
@@ -135,9 +141,33 @@ export class JsonStore {
         jitterMinutes: 8, enabled: true,
       });
     }
+    // Migrate legacy alternating-person schedules once. Contiguous platform
+    // windows keep each app open while all of its accounts are processed.
+    if (this.state.settings.platformScheduleVersion < 1) {
+      const accountById = new Map(this.state.accounts.map((account) => [account.id, account]));
+      const order = this.state.settings.platformOrder;
+      this.state.warmupSchedules.sort((left, right) => {
+        const a = accountById.get(left.accountId);
+        const b = accountById.get(right.accountId);
+        const aRank = a ? order.indexOf(a.platform) : order.length;
+        const bRank = b ? order.indexOf(b.platform) : order.length;
+        return (aRank < 0 ? order.length : aRank) - (bRank < 0 ? order.length : bRank)
+          || (a?.groupId ?? "").localeCompare(b?.groupId ?? "")
+          || left.accountId.localeCompare(right.accountId);
+      });
+      for (const [index, schedule] of this.state.warmupSchedules.entries()) {
+        const minutes = 20 * 60 + index * 15;
+        schedule.timeOfDay = `${String(Math.floor(minutes / 60) % 24).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+        schedule.jitterMinutes = Math.min(schedule.jitterMinutes, 5);
+      }
+      this.state.settings.platformScheduleVersion = 1;
+    }
     // Reconcile legacy trust with distinct local days. This corrects farms that
     // crossed UTC midnight while still on the same local evening.
     for (const account of this.state.accounts) {
+      // Existing farms predate the explicit manual-onboarding gate and have
+      // already been curated by their owner. New accounts start pending.
+      account.preflightStatus ??= "ready";
       if (!account.warmupLocalDays && (account.stage === "fresh" || account.stage === "warmed_up")) {
         const days = [...new Set(this.state.sessions
           .filter((session) => session.accountId === account.id && session.status === "completed" && session.completedAt)

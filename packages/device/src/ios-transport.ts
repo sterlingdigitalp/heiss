@@ -15,7 +15,8 @@ import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
-import type { IosTransport } from "./ios-driver.js";
+import { DeviceSessionError, type IosTransport } from "./ios-driver.js";
+import type { DeviceActionContext, DeviceSessionResult, FailureKind } from "@heiss/core";
 import { listUsbIphones, type UsbIphone } from "./usb.js";
 import {
   downloadBuildInstallRunner,
@@ -32,6 +33,8 @@ export interface RealUsbTransportOptions {
   /** App group container path pattern — uses AFC/devicectl copy when available */
   bundleId?: string;
   commandTimeoutMs?: number;
+  /** Receives durable on-device journal updates while a batch is running. */
+  onProgress?: (progress: Record<string, unknown>) => void;
 }
 
 /**
@@ -41,11 +44,13 @@ export class RealUsbTransport implements IosTransport {
   readonly kind = "usb" as const;
   private bundleId: string;
   private commandTimeoutMs: number;
+  private onProgress?: (progress: Record<string, unknown>) => void;
   private lastDevices: UsbIphone[] = [];
 
   constructor(opts: RealUsbTransportOptions = {}) {
     this.bundleId = opts.bundleId ?? `${RUNNER_BUNDLE_ID}.xctrunner`;
     this.commandTimeoutMs = opts.commandTimeoutMs ?? 45_000;
+    this.onProgress = opts.onProgress;
   }
 
   async listDevices(): Promise<{ udid: string; name: string }[]> {
@@ -108,9 +113,9 @@ export class RealUsbTransport implements IosTransport {
   async runScriptAction(
     udid: string,
     action: string,
-    context: Record<string, unknown> = {},
+    context?: DeviceActionContext,
   ): Promise<{ ok: true; detail: string }> {
-    const result = await this.sendCommand(udid, { action, ...context });
+    const result = await this.sendCommand(udid, { action, ...(context ?? {}) });
     if (result.ok !== true || result.executed !== true) {
       let screenshotNote = "";
       if (typeof result.screenshot === "string") {
@@ -129,6 +134,52 @@ export class RealUsbTransport implements IosTransport {
     return {
       ok: true,
       detail: String(result.detail ?? `ios:${action}@${udid.slice(0, 8)}`),
+    };
+  }
+
+  async runScriptSession(
+    udid: string,
+    sessionId: string,
+    plannedSteps: string[],
+    startIndex: number,
+    context: DeviceActionContext,
+  ): Promise<DeviceSessionResult> {
+    const result = await this.sendCommand(udid, {
+      action: "warmup:session",
+      sessionId,
+      plannedSteps,
+      startIndex,
+      ...context,
+    });
+    const completedSteps = Number(result.completedSteps ?? startIndex);
+    if (result.ok !== true || result.executed !== true) {
+      let screenshotPath: string | undefined;
+      if (typeof result.screenshot === "string") {
+        const failures = join(homedir(), ".heiss", "failures");
+        mkdirSync(failures, { recursive: true });
+        const local = join(failures, `${udid.slice(0, 8)}-${basename(result.screenshot)}`);
+        try {
+          await this.copyFromDevice(udid, `Documents/screenshots/${result.screenshot}`, local);
+          screenshotPath = local;
+        } catch { /* the device result still retains its screenshot name */ }
+      }
+      const kind = normalizeFailureKind(result.failureKind);
+      throw new DeviceSessionError(
+        `${String(result.detail ?? "on-device session failed")}${screenshotPath ? `. Screenshot saved to ${screenshotPath}.` : ""}`,
+        kind,
+        completedSteps,
+        screenshotPath,
+      );
+    }
+    return {
+      ok: true,
+      detail: String(result.detail ?? `ios:session@${udid.slice(0, 8)}`),
+      completedSteps,
+      stepDetails: Array.isArray(result.stepDetails)
+        ? result.stepDetails.map((value) => String(value))
+        : undefined,
+      heartbeatAt: typeof result.heartbeatAt === "string" ? result.heartbeatAt : undefined,
+      journal: typeof result.journal === "string" ? result.journal : undefined,
     };
   }
 
@@ -189,13 +240,33 @@ export class RealUsbTransport implements IosTransport {
 
     // Poll outbox
     const action = String(cmd.action);
-    const actionTimeout = action.startsWith("post:") || action.startsWith("warmup:")
-      ? Math.max(this.commandTimeoutMs, 120_000)
-      : this.commandTimeoutMs;
+    const actionTimeout = action === "warmup:session"
+      ? Math.max(this.commandTimeoutMs, 15 * 60_000)
+      : action.startsWith("post:") || action.startsWith("warmup:")
+        ? Math.max(this.commandTimeoutMs, 120_000)
+        : this.commandTimeoutMs;
     const deadline = Date.now() + actionTimeout;
     const remoteOut = `Documents/outbox/${id}.json`;
     const localOut = join(work, `out-${id}.json`);
+    const sessionId = typeof cmd.sessionId === "string" ? cmd.sessionId : undefined;
+    const safeSessionId = sessionId?.replace(/[^A-Za-z0-9._-]/g, "-");
+    const remoteJournal = safeSessionId ? `Documents/journals/${safeSessionId}.json` : undefined;
+    const localJournal = safeSessionId ? join(work, `journal-${safeSessionId}.json`) : undefined;
+    let lastJournalStep = -1;
+    let nextJournalPoll = 0;
     while (Date.now() < deadline) {
+      if (remoteJournal && localJournal && this.onProgress && Date.now() >= nextJournalPoll) {
+        nextJournalPoll = Date.now() + 5_000;
+        try {
+          await this.copyFromDevice(udid, remoteJournal, localJournal);
+          const progress = JSON.parse(readFileSync(localJournal, "utf8")) as Record<string, unknown>;
+          const completed = Number(progress.completedSteps ?? -1);
+          if (completed !== lastJournalStep) {
+            lastJournalStep = completed;
+            this.onProgress({ ...progress, udid, receivedAt: new Date().toISOString() });
+          }
+        } catch { /* journal is created only after account verification */ }
+      }
       try {
         await this.copyFromDevice(udid, remoteOut, localOut);
         if (existsSync(localOut)) {
@@ -300,8 +371,15 @@ export class RealUsbTransport implements IosTransport {
 }
 
 /** Factory used by farm CLI and Heiss.app — always real USB, never simulator. */
-export function createProductionTransport(): RealUsbTransport {
-  return new RealUsbTransport();
+export function createProductionTransport(opts: RealUsbTransportOptions = {}): RealUsbTransport {
+  return new RealUsbTransport(opts);
 }
 
 export { installAppOnDevice };
+
+function normalizeFailureKind(value: unknown): FailureKind {
+  return typeof value === "string" && [
+    "transport", "runner", "unknown_ui", "account_mismatch",
+    "app_navigation", "safety_policy", "action",
+  ].includes(value) ? value as FailureKind : "action";
+}

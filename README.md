@@ -1,6 +1,6 @@
 # Heiss
 
-Warmr-style iPhone farm controller: **real USB iPhones only** (no simulator). Warm accounts, Cloud Drop content, auto-post TikTok/Instagram on schedule. X and LinkedIn stay warm-only.
+Warmr-style iPhone farm controller: **real USB iPhones only** (no simulator). Warm accounts, Cloud Drop content, auto-post TikTok/Instagram on schedule. X and YouTube stay warm-only.
 
 ## Packages
 
@@ -33,9 +33,11 @@ npm run farm -- setup status
 npm run farm -- setup all --team YOUR_TEAM_ID
 # Trust developer cert on phone: Settings → General → VPN & Device Management
 
-# 4) Log into TikTok/Instagram on the phone, then:
+# 4) Log in and finish each platform's onboarding manually, then:
 npm run farm -- devices sync
 npm run farm -- add-account <deviceId> tiktok @you
+npm run farm -- account preflight <accountId> ready
+npm run farm -- preflight canary --accounts <accountId>
 npm run farm -- start-warmups --time 09:00
 
 # Cloud Drop
@@ -65,6 +67,9 @@ npm run app
 | `signing show \| set` | Xcode team or ASC API key path |
 | `devices list \| sync` | USB iPhones via `devicectl` |
 | `add-account` | Register social account after you log in on phone |
+| `account preflight` | Mark manual onboarding ready/pending/attention |
+| `preflight health` | Check USB, trust, command channel, and runner; run the recovery ladder |
+| `preflight canary` | Harmless exact-handle verification without engagement |
 | `start-warmups` / `run` | Farm tick on **real** devices only |
 | `drop` | Queue content for Cloud Drop |
 
@@ -83,6 +88,12 @@ Each tick the daemon:
   no longer required — keep the iPhone plugged in and unlocked-able.
 - runs due posting slots, scheduled warmups, and checkpointed session retries
   with per-device locks, safety caps, and exponential backoff.
+- groups work by platform, sends each account's full frozen warmup plan to the
+  phone once, and journals every completed gesture on-device. Transport loss
+  resumes from that journal instead of replaying the session.
+- omits likes and follows by default. An account mismatch or unknown overlay
+  pauses only that account, preserves a screenshot/checkpoint, and identifies
+  the person/platform that needs manual cleanup.
 
 ## Env
 

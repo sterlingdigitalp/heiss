@@ -46,6 +46,28 @@ describe("RealIosDriver (physical path only)", () => {
     const r = await ios.runAction("d1", "a1", "warmup:scroll");
     assert.equal(r.ok, true);
   });
+
+  it("delegates a frozen session once and returns the on-device checkpoint", async () => {
+    let batchCalls = 0;
+    const ios = new RealIosDriver({
+      async listDevices() { return [{ udid: "REAL-UDID", name: "Phone" }]; },
+      async runScriptAction() { return { ok: true, detail: "ping" }; },
+      async runScriptSession(_udid, sessionId, steps, startIndex, context) {
+        batchCalls += 1;
+        assert.equal(sessionId, "session-1");
+        assert.equal(startIndex, 2);
+        assert.equal(context.handle, "@person");
+        return { ok: true, detail: "batch", completedSteps: steps.length, journal: "session-1.json" };
+      },
+    });
+    await ios.connect("d1", "REAL-UDID");
+    const result = await ios.runSession("d1", "a1", "session-1", ["warmup:scroll", "warmup:search", "warmup:scroll"], 2, {
+      platform: "tiktok", handle: "@person", searchTerms: ["housing"],
+    });
+    assert.equal(batchCalls, 1);
+    assert.equal(result.completedSteps, 3);
+    assert.equal(result.journal, "session-1.json");
+  });
 });
 
 describe("USB device list parsing", () => {

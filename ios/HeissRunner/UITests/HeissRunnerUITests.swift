@@ -26,6 +26,12 @@ private func disableAutomaticInterruptionHandling(_ app: XCUIApplication) {
     app.setValue(true, forKey: "doesNotHandleUIInterruptions")
 }
 
+private enum PlatformScreenState: String {
+    case home, profile, accountSwitcher = "account_switcher", search
+    case onboardingOverlay = "onboarding_overlay"
+    case unknown
+}
+
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
 final class HeissRunnerUITests: XCTestCase {
@@ -107,6 +113,9 @@ final class HeissRunnerUITests: XCTestCase {
                 options: .atomic
             )
             return ["ok": true, "executed": true, "detail": "screenshot captured", "screenshot": name]
+        }
+        if action == "warmup:session" {
+            return try performWarmupSession(command)
         }
         let platform = command["platform"] as? String ?? "tiktok"
         let fallbackBundle = [
@@ -351,6 +360,305 @@ final class HeissRunnerUITests: XCTestCase {
         return ["ok": true, "executed": true, "detail": "xctest:\(platform):\(action)"]
     }
 
+    /// Execute a frozen warmup plan with one app launch and one exact account
+    /// verification. Progress is journaled after every gesture so a lost Mac
+    /// acknowledgement cannot replay actions on retry.
+    private func performWarmupSession(_ command: [String: Any]) throws -> [String: Any] {
+        let platform = command["platform"] as? String ?? "tiktok"
+        let handle = command["handle"] as? String ?? ""
+        let sessionId = command["sessionId"] as? String ?? UUID().uuidString
+        let plannedSteps = command["plannedSteps"] as? [String] ?? []
+        let requestedStart = command["startIndex"] as? Int ?? 0
+        guard !plannedSteps.isEmpty else {
+            throw NSError(domain: "HeissRunner", code: 22, userInfo: [NSLocalizedDescriptionKey: "Batched warmup session has no planned steps"])
+        }
+
+        let journalURL = sessionJournalURL(sessionId)
+        let prior = readSessionJournal(journalURL)
+        let priorCompleted = prior?["completedSteps"] as? Int ?? 0
+        var completed = min(plannedSteps.count, max(requestedStart, priorCompleted))
+        var stepDetails = prior?["stepDetails"] as? [String] ?? Array(repeating: "", count: plannedSteps.count)
+        if stepDetails.count < plannedSteps.count {
+            stepDetails.append(contentsOf: Array(repeating: "", count: plannedSteps.count - stepDetails.count))
+        }
+        if completed >= plannedSteps.count {
+            return [
+                "ok": true, "executed": true,
+                "detail": "xctest:\(platform):session:recovered:\(completed)/\(plannedSteps.count)",
+                "completedSteps": completed, "stepDetails": stepDetails,
+                "heartbeatAt": isoTimestamp(), "journal": journalURL.lastPathComponent,
+            ]
+        }
+
+        let fallbackBundle = [
+            "tiktok": "com.zhiliaoapp.musically",
+            "instagram": "com.burbn.instagram",
+            "x": "com.atebits.Tweetie2",
+            "youtube": "com.google.ios.youtube"
+        ][platform] ?? "com.zhiliaoapp.musically"
+        let bundle = ((command["uiProfile"] as? [String: Any])?["bundleId"] as? String) ?? fallbackBundle
+        let app = XCUIApplication(bundleIdentifier: bundle)
+        if platform == "tiktok" || platform == "x" { disableAutomaticInterruptionHandling(app) }
+        if platform == "tiktok" || platform == "youtube" {
+            app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
+        }
+        // Platform-major scheduling deliberately leaves the current app open.
+        // Launch only when needed; never terminate between accounts or steps.
+        if app.state != .runningForeground { app.launch() }
+        if !app.wait(for: .runningForeground, timeout: 12) { app.activate() }
+        guard app.wait(for: .runningForeground, timeout: 12) else {
+            throw NSError(domain: "HeissRunner", code: 1, userInfo: [NSLocalizedDescriptionKey: "\(platform) did not reach foreground"])
+        }
+
+        do {
+            try sweepKnownOverlays(app: app, platform: platform)
+            try assertNoBlockingOverlay(app: app, platform: platform)
+            try ensureAccount(app, platform: platform, handle: handle, command: command)
+            guard app.state == .runningForeground else {
+                throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) lost foreground before batched session"])
+            }
+            let window: XCUIElement
+            if platform == "tiktok" || platform == "x" {
+                let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+                disableAutomaticInterruptionHandling(springboard)
+                window = springboard
+            } else {
+                window = app.windows.firstMatch
+            }
+            writeSessionJournal(
+                journalURL, sessionId: sessionId, platform: platform, handle: handle,
+                status: "running", completedSteps: completed, plannedSteps: plannedSteps,
+                stepDetails: stepDetails, error: nil
+            )
+            while completed < plannedSteps.count {
+                try sweepKnownOverlays(app: app, platform: platform)
+                try assertNoBlockingOverlay(app: app, platform: platform)
+                guard app.state == .runningForeground else {
+                    throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) lost foreground at step \(completed + 1)"])
+                }
+                let step = plannedSteps[completed]
+                try performWarmupStep(step, app: app, window: window, platform: platform, command: command)
+                stepDetails[completed] = "xctest:\(platform):\(step)"
+                completed += 1
+                writeSessionJournal(
+                    journalURL, sessionId: sessionId, platform: platform, handle: handle,
+                    status: completed == plannedSteps.count ? "completed" : "running",
+                    completedSteps: completed, plannedSteps: plannedSteps,
+                    stepDetails: stepDetails, error: nil
+                )
+                Thread.sleep(forTimeInterval: Double.random(in: 0.65...1.8))
+            }
+            // Leave the platform in a predictable state for the next account.
+            window.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
+            return [
+                "ok": true, "executed": true,
+                "detail": "xctest:\(platform):session:\(completed)/\(plannedSteps.count)",
+                "completedSteps": completed, "stepDetails": stepDetails,
+                "heartbeatAt": isoTimestamp(), "journal": journalURL.lastPathComponent,
+            ]
+        } catch {
+            let screenshots = documents().appendingPathComponent("screenshots", isDirectory: true)
+            try? fm.createDirectory(at: screenshots, withIntermediateDirectories: true)
+            let name = "failure-\(UUID().uuidString).png"
+            try? XCUIScreen.main.screenshot().pngRepresentation.write(to: screenshots.appendingPathComponent(name))
+            let kind = failureKind(error)
+            writeSessionJournal(
+                journalURL, sessionId: sessionId, platform: platform, handle: handle,
+                status: "checkpointed", completedSteps: completed, plannedSteps: plannedSteps,
+                stepDetails: stepDetails, error: error.localizedDescription
+            )
+            return [
+                "ok": false, "executed": false,
+                "detail": "\(error.localizedDescription) (screenshot: \(name))",
+                "failureKind": kind, "completedSteps": completed,
+                "stepDetails": stepDetails, "heartbeatAt": isoTimestamp(),
+                "journal": journalURL.lastPathComponent, "screenshot": name,
+            ]
+        }
+    }
+
+    private func performWarmupStep(
+        _ action: String,
+        app: XCUIApplication,
+        window: XCUIElement,
+        platform: String,
+        command: [String: Any]
+    ) throws {
+        if action.contains("scroll") {
+            let start = window.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.78))
+            let end = window.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.28))
+            start.press(forDuration: 0.08, thenDragTo: end)
+            return
+        }
+        if action.contains("like") {
+            window.coordinate(withNormalizedOffset: point(command, "like", .init(dx: 0.90, dy: 0.55))).tap()
+            return
+        }
+        if action.contains("follow") {
+            window.coordinate(withNormalizedOffset: point(command, "follow", .init(dx: 0.88, dy: 0.43))).tap()
+            return
+        }
+        guard action.contains("search") else {
+            throw NSError(domain: "HeissRunner", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unsupported batched action \(action)"])
+        }
+
+        if platform == "instagram" {
+            let explore = app.buttons["explore-tab"]
+            if explore.waitForExistence(timeout: 3), explore.isHittable { explore.tap() }
+            else { window.coordinate(withNormalizedOffset: point(command, "search", .init(dx: 0.70, dy: 0.95))).tap() }
+        } else if platform == "tiktok" {
+            if app.searchFields.firstMatch.exists {
+                window.coordinate(withNormalizedOffset: CGVector(dx: 0.42, dy: 0.06)).tap()
+            } else {
+                window.coordinate(withNormalizedOffset: point(command, "search", .init(dx: 0.92, dy: 0.08))).tap()
+            }
+        } else {
+            if platform == "youtube" {
+                let deadline = Date().addingTimeInterval(15)
+                var ready = false
+                while Date() < deadline {
+                    ready = try screenContainsTextUsingOCR("Home") || screenContainsTextUsingOCR("Shorts")
+                    if ready { break }
+                    try sweepKnownOverlays(app: app, platform: platform)
+                    Thread.sleep(forTimeInterval: 0.5)
+                }
+                guard ready else {
+                    throw NSError(domain: "HeissRunner", code: 21, userInfo: [NSLocalizedDescriptionKey: "YouTube navigation did not finish loading before search"])
+                }
+            }
+            let searchButtons = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search"))
+            if searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
+            else {
+                let fallback = platform == "x"
+                    ? CGVector(dx: 0.30, dy: 0.95)
+                    : platform == "youtube" ? CGVector(dx: 0.79, dy: 0.065) : CGVector(dx: 0.50, dy: 0.94)
+                window.coordinate(withNormalizedOffset: point(command, "search", fallback)).tap()
+            }
+        }
+        Thread.sleep(forTimeInterval: 0.8)
+        let fields = app.searchFields.count > 0 ? app.searchFields : app.textFields
+        let terms = command["searchTerms"] as? [String] ?? []
+        guard fields.count > 0, let term = terms.randomElement() else {
+            throw NSError(domain: "HeissRunner", code: 12, userInfo: [NSLocalizedDescriptionKey: "Search field was not found after opening platform search"])
+        }
+        let field = fields.firstMatch
+        if platform == "tiktok" { window.coordinate(withNormalizedOffset: CGVector(dx: 0.42, dy: 0.06)).tap() }
+        else if field.isHittable { field.tap() }
+        else { field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+        let keyboardApp: XCUIApplication
+        if platform == "tiktok" {
+            keyboardApp = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            disableAutomaticInterruptionHandling(keyboardApp)
+        } else { keyboardApp = app }
+        guard app.keyboards.firstMatch.waitForExistence(timeout: 3) else {
+            throw NSError(domain: "HeissRunner", code: 11, userInfo: [NSLocalizedDescriptionKey: "Search field did not receive keyboard focus"])
+        }
+        if platform == "tiktok" {
+            keyboardApp.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.88)).press(forDuration: 1.2)
+            try typeUsingKeyboardCoordinates(keyboardApp, text: term)
+            keyboardApp.coordinate(withNormalizedOffset: CGVector(dx: 0.87, dy: 0.96)).tap()
+        } else {
+            try typeUsingVisibleKeyboard(keyboardApp, text: term)
+            let submit = keyboardApp.keys.matching(
+                NSPredicate(format: "label ==[c] %@ OR label ==[c] %@ OR label ==[c] %@", "Search", "Return", "Go")
+            ).firstMatch
+            if submit.waitForExistence(timeout: 2), submit.isHittable { submit.tap() }
+        }
+    }
+
+    private func sweepKnownOverlays(app: XCUIApplication, platform: String) throws {
+        if platform == "instagram" { dismissInstagramSetupPrompt(app) }
+        if platform == "tiktok" {
+            let surface = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            disableAutomaticInterruptionHandling(surface)
+            dismissTikTokPasskey()
+            try dismissTikTokInterestsPrompt(surface: surface)
+            try dismissTikTokContactsPrompt(surface: surface)
+            try dismissTikTokSwipeTutorial(surface: surface)
+        }
+        if platform == "youtube" { try dismissYouTubeDefaultAccountPrompt(app) }
+    }
+
+    private func detectPlatformState(app: XCUIApplication, platform: String) throws -> PlatformScreenState {
+        let onboardingTerms = ["Choose your interests", "Sync contacts", "Swipe up", "Default Account", "Save your login"]
+        for term in onboardingTerms {
+            if try screenContainsTextUsingOCR(term) { return .onboardingOverlay }
+        }
+        if app.keyboards.firstMatch.exists { return .search }
+        if try screenContainsTextUsingOCR("Search", minimumVisionY: 0.72, maximumVisionY: 0.96) { return .search }
+        let switcherTerms = ["Add Instagram account", "Manage accounts", "Switch account", "Add account"]
+        for term in switcherTerms {
+            if try screenContainsTextUsingOCR(term) { return .accountSwitcher }
+        }
+        if try screenContainsTextUsingOCR("Profile", minimumVisionY: 0.55, maximumVisionY: 0.95) { return .profile }
+        if try screenContainsTextUsingOCR("Home", maximumVisionY: 0.30) { return .home }
+        return .unknown
+    }
+
+    private func assertNoBlockingOverlay(app: XCUIApplication, platform: String) throws {
+        if try detectPlatformState(app: app, platform: platform) == .onboardingOverlay {
+            throw NSError(domain: "HeissRunner", code: 24, userInfo: [NSLocalizedDescriptionKey: "Onboarding overlay remains after bounded cleanup"])
+        }
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        disableAutomaticInterruptionHandling(springboard)
+        if app.alerts.count > 0 || springboard.alerts.count > 0 {
+            throw NSError(domain: "HeissRunner", code: 24, userInfo: [NSLocalizedDescriptionKey: "Unexpected popup or permission alert is blocking (platform)"])
+        }
+    }
+
+    private func sessionJournalURL(_ sessionId: String) -> URL {
+        let journals = documents().appendingPathComponent("journals", isDirectory: true)
+        try? fm.createDirectory(at: journals, withIntermediateDirectories: true)
+        let safe = sessionId.replacingOccurrences(of: "[^A-Za-z0-9._-]", with: "-", options: .regularExpression)
+        return journals.appendingPathComponent("\(safe).json")
+    }
+
+    private func readSessionJournal(_ url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    private func writeSessionJournal(
+        _ url: URL,
+        sessionId: String,
+        platform: String,
+        handle: String,
+        status: String,
+        completedSteps: Int,
+        plannedSteps: [String],
+        stepDetails: [String],
+        error: String?
+    ) {
+        var journal: [String: Any] = [
+            "sessionId": sessionId, "platform": platform, "handle": handle,
+            "status": status, "completedSteps": completedSteps,
+            "plannedSteps": plannedSteps, "stepDetails": stepDetails,
+            "updatedAt": isoTimestamp(),
+        ]
+        if let error { journal["error"] = error }
+        if let data = try? JSONSerialization.data(withJSONObject: journal) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    private func isoTimestamp() -> String {
+        ISO8601DateFormatter().string(from: Date())
+    }
+
+    private func failureKind(_ error: Error) -> String {
+        let text = error.localizedDescription.lowercased()
+        if text.contains("account") && (text.contains("not found") || text.contains("verify") || text.contains("exact handle")) {
+            return "account_mismatch"
+        }
+        if text.contains("prompt") || text.contains("onboarding") || text.contains("tutorial") || text.contains("overlay") {
+            return "unknown_ui"
+        }
+        if text.contains("foreground") || text.contains("navigation") || text.contains("search field") || text.contains("keyboard") {
+            return "app_navigation"
+        }
+        return "action"
+    }
+
     private func documents() -> URL {
         fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
@@ -503,7 +811,7 @@ final class HeissRunnerUITests: XCTestCase {
                 NSPredicate(format: "label CONTAINS[c] %@", "Add Instagram account")
             )
             if switcherMarker.count > 0 {
-                try tapExactHandle(app, surface: window, predicate: handlePredicate, handle: handle, platform: platform)
+                try tapExactHandle(app, surface: window, predicate: handlePredicate, handle: handle, platform: platform, command: command)
                 Thread.sleep(forTimeInterval: 0.8)
                 guard instagramTitleMatches(app, normalized: normalized) else {
                     throw NSError(domain: "HeissRunner", code: 15, userInfo: [NSLocalizedDescriptionKey: "Account switch did not verify exact handle \(handle) on \(platform)"])
@@ -657,7 +965,7 @@ final class HeissRunnerUITests: XCTestCase {
             // TikTok can wedge XCTest while snapshotting its animated profile
             // hierarchy. Vision reads the rendered username without asking the
             // app (or Continuity) for an accessibility snapshot.
-            isCurrent = try screenContainsExactHandleUsingOCR(normalized: normalized)
+            isCurrent = try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.58, maximumVisionY: 0.92)
             if !isCurrent {
                 // A freshly loaded feed can ignore the first tab gesture while
                 // its player becomes interactive. Retry the actual compact-
@@ -667,7 +975,7 @@ final class HeissRunnerUITests: XCTestCase {
                 try dismissTikTokInterestsPrompt(surface: window)
                 try dismissTikTokContactsPrompt(surface: window)
                 try dismissTikTokSwipeTutorial(surface: window)
-                isCurrent = try screenContainsExactHandleUsingOCR(normalized: normalized)
+                isCurrent = try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.58, maximumVisionY: 0.92)
             }
         } else {
             isCurrent = app.descendants(matching: .any).matching(handlePredicate).firstMatch.waitForExistence(timeout: platform == "x" ? 10 : 1)
@@ -685,7 +993,7 @@ final class HeissRunnerUITests: XCTestCase {
             try dismissTikTokInterestsPrompt(surface: window)
             try dismissTikTokContactsPrompt(surface: window)
             try dismissTikTokSwipeTutorial(surface: window)
-            if try waitForExactHandleUsingOCR(normalized: normalized, timeout: 3) {
+            if try waitForExactHandleUsingOCR(normalized: normalized, timeout: 3, minimumVisionY: 0.58, maximumVisionY: 0.92) {
                 activeHandles[platform] = handle
                 window.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
                 return
@@ -710,7 +1018,7 @@ final class HeissRunnerUITests: XCTestCase {
             }
         }
         Thread.sleep(forTimeInterval: 0.8)
-        try tapExactHandle(app, surface: window, predicate: handlePredicate, handle: handle, platform: platform)
+        try tapExactHandle(app, surface: window, predicate: handlePredicate, handle: handle, platform: platform, command: command)
         Thread.sleep(forTimeInterval: 0.8)
         if platform == "tiktok" {
             try dismissTikTokInterestsPrompt(surface: window)
@@ -721,7 +1029,7 @@ final class HeissRunnerUITests: XCTestCase {
         if platform == "instagram" {
             verified = instagramTitleMatches(app, normalized: normalized)
         } else if platform == "tiktok" {
-            verified = try waitForExactHandleUsingOCR(normalized: normalized, timeout: 8)
+            verified = try waitForExactHandleUsingOCR(normalized: normalized, timeout: 8, minimumVisionY: 0.58, maximumVisionY: 0.92)
         } else {
             verified = app.descendants(matching: .any).matching(handlePredicate).firstMatch.waitForExistence(timeout: 5)
         }
@@ -732,10 +1040,20 @@ final class HeissRunnerUITests: XCTestCase {
         window.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
     }
 
-    private func tapExactHandle(_ app: XCUIApplication, surface: XCUIElement, predicate: NSPredicate, handle: String, platform: String) throws {
+    private func tapExactHandle(
+        _ app: XCUIApplication,
+        surface: XCUIElement,
+        predicate: NSPredicate,
+        handle: String,
+        platform: String,
+        command: [String: Any]
+    ) throws {
         let normalized = handle.hasPrefix("@") ? String(handle.dropFirst()) : handle
         if platform == "tiktok" {
             if try tapExactHandleUsingOCR(surface: surface, normalized: normalized) { return }
+            for hint in accountPickerHints(command) {
+                if try tapTextUsingOCR(surface: surface, expected: hint) { return }
+            }
             throw NSError(domain: "HeissRunner", code: 5, userInfo: [NSLocalizedDescriptionKey: "Account \(handle) was not found in the \(platform) switcher"])
         }
         let target: XCUIElement?
@@ -757,7 +1075,17 @@ final class HeissRunnerUITests: XCTestCase {
             return
         }
         if try tapExactHandleUsingOCR(surface: surface, normalized: normalized) { return }
+        for hint in accountPickerHints(command) {
+            if try tapTextUsingOCR(surface: surface, expected: hint) { return }
+        }
         throw NSError(domain: "HeissRunner", code: 5, userInfo: [NSLocalizedDescriptionKey: "Account \(handle) was not found in the \(platform) switcher"])
+    }
+
+    private func accountPickerHints(_ command: [String: Any]) -> [String] {
+        return ["switcherHint", "displayName", "loginEmail"].compactMap { key in
+            guard let value = command[key] as? String, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return value
+        }
     }
 
     private func ensureYouTubeAccount(
@@ -781,7 +1109,7 @@ final class HeissRunnerUITests: XCTestCase {
             surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
             Thread.sleep(forTimeInterval: 0.8)
         }
-        if try screenContainsExactHandleUsingOCR(normalized: normalized) {
+        if try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.50, maximumVisionY: 0.94) {
             activeHandles["youtube"] = handle
             surface.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
             return
@@ -801,8 +1129,10 @@ final class HeissRunnerUITests: XCTestCase {
         }
         Thread.sleep(forTimeInterval: 1.0)
         var selected = try tapExactHandleUsingOCR(surface: surface, normalized: normalized)
-        if !selected, let switcherHint = command["switcherHint"] as? String, !switcherHint.isEmpty {
-            selected = try tapTextUsingOCR(surface: surface, expected: switcherHint)
+        if !selected {
+            for hint in accountPickerHints(command) where !selected {
+                selected = try tapTextUsingOCR(surface: surface, expected: hint)
+            }
         }
         guard selected else {
             throw NSError(domain: "HeissRunner", code: 5, userInfo: [NSLocalizedDescriptionKey: "Account \(handle) was not found in the youtube switcher"])
@@ -811,7 +1141,7 @@ final class HeissRunnerUITests: XCTestCase {
 
         surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
         Thread.sleep(forTimeInterval: 1.0)
-        if !(try screenContainsExactHandleUsingOCR(normalized: normalized)) {
+        if !(try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.50, maximumVisionY: 0.94)) {
             let channel = app.descendants(matching: .any).matching(
                 NSPredicate(format: "label CONTAINS[c] %@ OR label CONTAINS[c] %@", "View channel", "Your channel")
             ).firstMatch
@@ -820,7 +1150,7 @@ final class HeissRunnerUITests: XCTestCase {
                 Thread.sleep(forTimeInterval: 1.0)
             }
         }
-        guard try screenContainsExactHandleUsingOCR(normalized: normalized) else {
+        guard try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.50, maximumVisionY: 0.94) else {
             throw NSError(domain: "HeissRunner", code: 15, userInfo: [NSLocalizedDescriptionKey: "Account switch did not verify exact handle \(handle) on youtube"])
         }
         activeHandles["youtube"] = handle
@@ -911,21 +1241,40 @@ final class HeissRunnerUITests: XCTestCase {
     }
 
     private func tapExactHandleUsingOCR(surface: XCUIElement, normalized: String) throws -> Bool {
-        guard let match = try recognizedHandleObservation(normalized: normalized) else { return false }
+        // Account rows live between the status bar and bottom navigation.
+        // Cropping prevents a matching handle in the underlying feed from
+        // being mistaken for the switcher row.
+        guard let match = try recognizedHandleObservation(normalized: normalized, minimumVisionY: 0.08, maximumVisionY: 0.95) else { return false }
         let box = match.boundingBox
         surface.coordinate(withNormalizedOffset: CGVector(dx: box.midX, dy: 1.0 - box.midY)).tap()
         return true
     }
 
-    private func screenContainsExactHandleUsingOCR(normalized: String, minimumVisionY: CGFloat = 0) throws -> Bool {
-        guard let match = try recognizedHandleObservation(normalized: normalized) else { return false }
-        return match.boundingBox.midY >= minimumVisionY
+    private func screenContainsExactHandleUsingOCR(
+        normalized: String,
+        minimumVisionY: CGFloat = 0,
+        maximumVisionY: CGFloat = 1
+    ) throws -> Bool {
+        return try recognizedHandleObservation(
+            normalized: normalized,
+            minimumVisionY: minimumVisionY,
+            maximumVisionY: maximumVisionY
+        ) != nil
     }
 
-    private func waitForExactHandleUsingOCR(normalized: String, timeout: TimeInterval) throws -> Bool {
+    private func waitForExactHandleUsingOCR(
+        normalized: String,
+        timeout: TimeInterval,
+        minimumVisionY: CGFloat = 0,
+        maximumVisionY: CGFloat = 1
+    ) throws -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
-            if try screenContainsExactHandleUsingOCR(normalized: normalized) { return true }
+            if try screenContainsExactHandleUsingOCR(
+                normalized: normalized,
+                minimumVisionY: minimumVisionY,
+                maximumVisionY: maximumVisionY
+            ) { return true }
             Thread.sleep(forTimeInterval: 0.5)
         } while Date() < deadline
         return false
@@ -940,14 +1289,19 @@ final class HeissRunnerUITests: XCTestCase {
         throw NSError(domain: "HeissRunner", code: 16, userInfo: [NSLocalizedDescriptionKey: "X navigation drawer did not open"])
     }
 
-    private func screenContainsTextUsingOCR(_ expected: String, minimumVisionY: CGFloat = 0) throws -> Bool {
+    private func screenContainsTextUsingOCR(
+        _ expected: String,
+        minimumVisionY: CGFloat = 0,
+        maximumVisionY: CGFloat = 1
+    ) throws -> Bool {
         guard let image = UIImage(data: XCUIScreen.main.screenshot().pngRepresentation)?.cgImage else { return false }
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
         try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
         return (request.results ?? []).contains { observation in
-            observation.boundingBox.midY >= minimumVisionY && observation.topCandidates(3).contains {
+            observation.boundingBox.midY >= minimumVisionY &&
+            observation.boundingBox.midY <= maximumVisionY && observation.topCandidates(3).contains {
                 $0.string.range(of: expected, options: [.caseInsensitive, .diacriticInsensitive]) != nil
             }
         }
@@ -982,7 +1336,11 @@ final class HeissRunnerUITests: XCTestCase {
             .map { $0 }
     }
 
-    private func recognizedHandleObservation(normalized: String) throws -> VNRecognizedTextObservation? {
+    private func recognizedHandleObservation(
+        normalized: String,
+        minimumVisionY: CGFloat = 0,
+        maximumVisionY: CGFloat = 1
+    ) throws -> VNRecognizedTextObservation? {
         guard let image = UIImage(data: XCUIScreen.main.screenshot().pngRepresentation)?.cgImage else { return nil }
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
@@ -990,6 +1348,8 @@ final class HeissRunnerUITests: XCTestCase {
         try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
         let observations = request.results ?? []
         return observations.first(where: { observation in
+            observation.boundingBox.midY >= minimumVisionY &&
+            observation.boundingBox.midY <= maximumVisionY &&
             observation.topCandidates(3).contains { textContainsExactHandle($0.string, normalized: normalized) }
         })
     }

@@ -17,6 +17,8 @@ import {
   remainingSteps,
   postCycleScript,
   type DeviceDriver,
+  type DeviceActionContext,
+  type DeviceSessionResult,
   type FarmSession,
 } from "../src/index.js";
 
@@ -32,6 +34,31 @@ class RecordingDriver implements DeviceDriver {
   ): Promise<{ ok: true; detail: string }> {
     this.actions.push(action);
     return { ok: true, detail: `sim:${action}` };
+  }
+}
+
+class BatchDriver extends RecordingDriver {
+  readonly kind = "ios" as const;
+  sessions: Array<{ accountId: string; steps: string[]; startIndex: number; context: DeviceActionContext }> = [];
+  sessionFailure?: Error & { completedSteps?: number; failureKind?: string };
+  async runSession(
+    _deviceId: string,
+    accountId: string,
+    _sessionId: string,
+    plannedSteps: string[],
+    startIndex: number,
+    context: DeviceActionContext,
+  ): Promise<DeviceSessionResult> {
+    this.sessions.push({ accountId, steps: plannedSteps, startIndex, context });
+    if (this.sessionFailure) throw this.sessionFailure;
+    return {
+      ok: true,
+      detail: "device batch complete",
+      completedSteps: plannedSteps.length,
+      stepDetails: plannedSteps.map((step) => `batch:${step}`),
+      heartbeatAt: "2026-07-12T14:01:00.000Z",
+      journal: "session.json",
+    };
   }
 }
 
@@ -119,7 +146,8 @@ describe("farm orchestrator (shipped path)", () => {
     assert.equal(result.sessions[0]!.status, "checkpointed");
     assert.deepEqual(store.locks.snapshot().devices, {});
     assert.match(result.sessions[0]!.activityLog[0]!, /action_failed/);
-    assert.equal(result.sessions[0]!.retryCount, 1);
+    assert.equal(result.sessions[0]!.retryCount, undefined);
+    assert.equal(result.sessions[0]!.transportRetryCount, 1);
     assert.ok(result.sessions[0]!.nextRetryAt);
   });
 
@@ -139,7 +167,8 @@ describe("farm orchestrator (shipped path)", () => {
     assert.equal(result.sessions[0]!.status, "checkpointed");
     assert.deepEqual(store.locks.snapshot().devices, {});
     assert.match(result.sessions[0]!.lastError!, /connect_failed/);
-    assert.equal(result.sessions[0]!.retryCount, 1);
+    assert.equal(result.sessions[0]!.retryCount, undefined);
+    assert.equal(result.sessions[0]!.transportRetryCount, 1);
     assert.ok(result.sessions[0]!.nextRetryAt);
     // The persisted session must be checkpointed too, not stranded as running.
     const reloaded = new JsonStore(store.path);
@@ -162,6 +191,60 @@ describe("farm orchestrator (shipped path)", () => {
     assert.equal(capped.interrupted, true);
     assert.equal(driver.actions.length, 0);
     assert.match(capped.sessions[0]!.lastError!, /safety_cap/);
+  });
+
+  it("sends a complete warmup session to the device and journals all progress", async () => {
+    const store = new JsonStore(storePath()); seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((account) => account.id === "acc-tt-fresh");
+    store.state.slots = [];
+    const driver = new BatchDriver();
+    const result = await new FarmOrchestrator(store, driver).runOnce({
+      runnerId: "r", timeOfDay: "20:00", now: "2026-07-12T14:00:00.000Z",
+    });
+    assert.equal(driver.sessions.length, 1);
+    assert.equal(driver.actions.length, 0, "batched sessions must not cross USB once per gesture");
+    assert.equal(result.sessions[0]!.status, "completed");
+    assert.equal(result.sessions[0]!.checkpoint.stepIndex, driver.sessions[0]!.steps.length);
+    assert.equal(result.sessions[0]!.heartbeatAt, "2026-07-12T14:01:00.000Z");
+    assert.ok(store.state.activity.some((event) => event.kind === "session_heartbeat"));
+  });
+
+  it("retains partial on-device progress and pauses account mismatch for attention", async () => {
+    const store = new JsonStore(storePath()); seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((account) => account.id === "acc-tt-fresh");
+    store.state.slots = [];
+    const driver = new BatchDriver();
+    driver.sessionFailure = Object.assign(new Error("exact handle did not verify"), {
+      completedSteps: 4, failureKind: "account_mismatch",
+    });
+    const first = await new FarmOrchestrator(store, driver).runOnce({
+      runnerId: "r", timeOfDay: "20:00", now: "2026-07-12T14:00:00.000Z",
+    });
+    assert.equal(first.sessions[0]!.checkpoint.stepIndex, 4);
+    assert.equal(first.sessions[0]!.failureKind, "account_mismatch");
+    assert.equal(first.sessions[0]!.requiresAttention, true);
+    assert.equal(first.sessions[0]!.nextRetryAt, undefined);
+
+    const automatic = await new FarmOrchestrator(store, new BatchDriver()).runOnce({
+      runnerId: "r", timeOfDay: "20:00", now: "2026-07-12T15:00:00.000Z",
+    });
+    assert.equal(automatic.sessions.length, 0, "attention checkpoints must not retry autonomously");
+  });
+
+  it("processes due accounts platform-major and excludes pending onboarding", async () => {
+    const store = new JsonStore(storePath()); seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((account) => ["acc-x-warm", "acc-tt-fresh", "acc-ig-mature", "acc-yt-warm"].includes(account.id));
+    store.state.slots = [];
+    for (const account of store.state.accounts) {
+      account.lastWarmupAt = undefined;
+      account.preflightStatus = account.platform === "instagram" ? "pending" : "ready";
+    }
+    const driver = new BatchDriver();
+    await new FarmOrchestrator(store, driver).runOnce({
+      runnerId: "r", timeOfDay: "20:00", now: "2026-07-12T14:00:00.000Z",
+    });
+    assert.deepEqual(driver.sessions.map((session) => session.context.platform), ["x", "tiktok", "youtube"]);
+    assert.ok(store.state.activity.some((event) => event.kind === "preflight_required" && event.accountId === "acc-ig-mature"));
   });
 
   it("keeps the most advanced checkpoint and does not start another session during backoff", async () => {

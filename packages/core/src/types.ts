@@ -17,6 +17,17 @@ export type AccountStage =
 
 export type WarmupAction = "scroll" | "like" | "follow" | "search";
 
+export type AccountPreflightStatus = "pending" | "ready" | "attention";
+
+export type FailureKind =
+  | "transport"
+  | "runner"
+  | "unknown_ui"
+  | "account_mismatch"
+  | "app_navigation"
+  | "safety_policy"
+  | "action";
+
 export type ContentKind = "video" | "carousel";
 
 export interface PlatformUiProfile {
@@ -81,8 +92,19 @@ export interface SocialAccount {
   deviceId: string;
   platform: Platform;
   handle: string;
+  /** Human-facing label shown by an in-app account picker. */
+  displayName?: string;
+  /** Login identity used only to locate an account row, never as final verification. */
+  loginEmail?: string;
   /** Optional on-device picker label when the platform does not show the public handle. */
   switcherHint?: string;
+  /** Stable visual hint for future picker matching; exact handle still gates activity. */
+  avatarFingerprint?: string;
+  /** Manual onboarding/readiness gate controlled by the account owner. */
+  preflightStatus?: AccountPreflightStatus;
+  preflightCompletedAt?: string;
+  preflightAppVersion?: string;
+  preflightNote?: string;
   stage: AccountStage;
   /** Warmup progress toward maturity (0–100). */
   trustScore: number;
@@ -159,6 +181,12 @@ export interface FarmSettings {
   emergencyStop: boolean;
   dailyActionCap: number;
   accountDailyActionCap: number;
+  /** Accounts are processed platform-major to avoid needless app cycling. */
+  platformOrder: Platform[];
+  /** One-time migration marker for platform-major default warmup times. */
+  platformScheduleVersion: number;
+  /** Likes/follows and other engagement are omitted unless a human enables them. */
+  requireHumanEngagement: boolean;
   /** Last observed state is persisted so disconnect alerts fire once per transition. */
   deviceStates: Record<string, "online" | "offline">;
   /** Notification fingerprints already delivered by the persistent controller. */
@@ -203,8 +231,15 @@ export interface FarmSession {
   checkpoint: SessionCheckpoint;
   activityLog: string[];
   retryCount?: number;
+  /** Infrastructure retries never inflate the social-session backoff. */
+  transportRetryCount?: number;
   nextRetryAt?: string;
   lastError?: string;
+  failureKind?: FailureKind;
+  /** Excludes the checkpoint from autonomous retries until a human resumes it. */
+  requiresAttention?: boolean;
+  /** Last heartbeat/progress timestamp received from the on-device journal. */
+  heartbeatAt?: string;
 }
 
 export interface User {
