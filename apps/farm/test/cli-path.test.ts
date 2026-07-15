@@ -22,6 +22,7 @@ describe("farm CLI real-only path", () => {
   it("finds vendored runner sources when npm starts inside apps/farm", () => {
     const root = fileURLToPath(new URL("../../../", import.meta.url));
     assert.equal(findProjectRoot(join(root, "apps", "farm")), root.replace(/\/$/, ""));
+    assert.equal(findProjectRoot("/"), root.replace(/\/$/, ""), "launchd cwd must fall back to the CLI module");
   });
 
   it("exposes setup status, devices list, signing show (no seed simulator)", () => {

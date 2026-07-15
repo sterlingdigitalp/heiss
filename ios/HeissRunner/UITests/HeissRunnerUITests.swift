@@ -147,11 +147,7 @@ final class HeissRunnerUITests: XCTestCase {
             // Instagram can present this modal over the profile immediately
             // after switching accounts. It obscures both the current handle
             // and account switcher, so clear it before exact verification.
-            let notNow = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Not now")).firstMatch
-            if notNow.waitForExistence(timeout: 1), notNow.isHittable {
-                notNow.tap()
-                Thread.sleep(forTimeInterval: 0.5)
-            }
+            dismissInstagramSetupPrompt(app)
         }
         if platform == "tiktok" {
             // TikTok's first-run surfaces can wedge XCTest while it snapshots
@@ -161,16 +157,7 @@ final class HeissRunnerUITests: XCTestCase {
             disableAutomaticInterruptionHandling(surface)
             try dismissTikTokInterestsPrompt(surface: surface)
             try dismissTikTokContactsPrompt(surface: surface)
-            for _ in 0..<3 {
-                if !(try screenContainsTextUsingOCR("Swipe up for more")) { break }
-                let start = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.82))
-                let end = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.10))
-                start.press(forDuration: 0.08, thenDragTo: end)
-                Thread.sleep(forTimeInterval: 1.0)
-            }
-            if try screenContainsTextUsingOCR("Swipe up for more") {
-                throw NSError(domain: "HeissRunner", code: 18, userInfo: [NSLocalizedDescriptionKey: "TikTok swipe tutorial did not dismiss after three gestures"])
-            }
+            try dismissTikTokSwipeTutorial(surface: surface)
         }
         if platform == "youtube" { try dismissYouTubeDefaultAccountPrompt(app) }
         if platform == "youtube",
@@ -418,6 +405,17 @@ final class HeissRunnerUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.8)
     }
 
+    private func dismissInstagramSetupPrompt(_ app: XCUIApplication) {
+        // Instagram may defer “Finish setting up your profile” until Profile
+        // is opened, so this must run both after launch and after navigation.
+        // The exact Not now label keeps the dismissal fail-closed.
+        let notNow = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Not now")).firstMatch
+        if notNow.waitForExistence(timeout: 1), notNow.isHittable {
+            notNow.tap()
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+    }
+
     private func dismissTikTokContactsPrompt(surface: XCUIElement) throws {
         // TikTok may delay this app-owned upsell until after the Profile tab is
         // opened. XCTest cannot reliably see it through TikTok's animated
@@ -449,6 +447,27 @@ final class HeissRunnerUITests: XCTestCase {
         }
         if try screenContainsTextUsingOCR("Choose your interests") {
             throw NSError(domain: "HeissRunner", code: 21, userInfo: [NSLocalizedDescriptionKey: "TikTok interests prompt did not dismiss"])
+        }
+    }
+
+    private func dismissTikTokSwipeTutorial(surface: XCUIElement) throws {
+        for _ in 0..<3 {
+            let app = XCUIApplication(bundleIdentifier: "com.zhiliaoapp.musically")
+            let accessible = app.descendants(matching: .any).matching(
+                NSPredicate(format: "label CONTAINS[c] %@ OR value CONTAINS[c] %@", "Swipe up", "Swipe up")
+            ).count > 0
+            if !(try screenContainsTextUsingOCR("Swipe up")) && !accessible { return }
+            let start = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.82))
+            let end = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.10))
+            start.press(forDuration: 0.08, thenDragTo: end)
+            Thread.sleep(forTimeInterval: 1.0)
+        }
+        let app = XCUIApplication(bundleIdentifier: "com.zhiliaoapp.musically")
+        let accessible = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS[c] %@ OR value CONTAINS[c] %@", "Swipe up", "Swipe up")
+        ).count > 0
+        if try screenContainsTextUsingOCR("Swipe up") || accessible {
+            throw NSError(domain: "HeissRunner", code: 18, userInfo: [NSLocalizedDescriptionKey: "TikTok swipe tutorial did not dismiss after three gestures"])
         }
     }
 
@@ -536,6 +555,7 @@ final class HeissRunnerUITests: XCTestCase {
             dismissTikTokPasskey()
             try dismissTikTokInterestsPrompt(surface: window)
             try dismissTikTokContactsPrompt(surface: window)
+            try dismissTikTokSwipeTutorial(surface: window)
         }
         if platform == "x" {
             let premium = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Subscribe"))
@@ -555,6 +575,20 @@ final class HeissRunnerUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.8)
         }
         let profileTab = app.buttons["profile-tab"]
+        if platform == "instagram" {
+            // A follow/like may leave Instagram inside a post-detail view
+            // where the bottom navigation (and therefore Profile) is hidden.
+            // Walk back only while Profile is absent, then use the stable tab.
+            for _ in 0..<3 {
+                if profileTab.waitForExistence(timeout: 0.5), profileTab.isHittable { break }
+                let back = app.buttons.matching(
+                    NSPredicate(format: "label ==[c] %@ OR identifier ==[c] %@", "Back", "back")
+                ).firstMatch
+                if back.waitForExistence(timeout: 0.5), back.isHittable { back.tap() }
+                else { window.coordinate(withNormalizedOffset: CGVector(dx: 0.09, dy: 0.07)).tap() }
+                Thread.sleep(forTimeInterval: 0.6)
+            }
+        }
         if platform == "instagram", profileTab.waitForExistence(timeout: 2), profileTab.isHittable { profileTab.tap() }
         else {
             let fallback = platform == "x"
@@ -563,6 +597,7 @@ final class HeissRunnerUITests: XCTestCase {
             window.coordinate(withNormalizedOffset: point(command, "profile", fallback)).tap()
         }
         Thread.sleep(forTimeInterval: 1.0)
+        if platform == "instagram" { dismissInstagramSetupPrompt(app) }
         if platform == "tiktok", app.state != .runningForeground {
             app.activate()
             guard app.wait(for: .runningForeground, timeout: 8) else {
@@ -575,6 +610,7 @@ final class HeissRunnerUITests: XCTestCase {
             dismissTikTokPasskey()
             try dismissTikTokInterestsPrompt(surface: window)
             try dismissTikTokContactsPrompt(surface: window)
+            try dismissTikTokSwipeTutorial(surface: window)
         }
         if platform == "x" {
             let drawerHandle = app.descendants(matching: .any).matching(handlePredicate)
@@ -599,7 +635,7 @@ final class HeissRunnerUITests: XCTestCase {
         // TikTok has exposed the profile handle as a button/other element in
         // multiple UI revisions, so do not restrict account verification to
         // static text. The exact normalized handle is still required.
-        let isCurrent: Bool
+        var isCurrent: Bool
         if platform == "instagram" {
             isCurrent = instagramTitleMatches(app, normalized: normalized)
         } else if platform == "tiktok" {
@@ -607,6 +643,17 @@ final class HeissRunnerUITests: XCTestCase {
             // hierarchy. Vision reads the rendered username without asking the
             // app (or Continuity) for an accessibility snapshot.
             isCurrent = try screenContainsExactHandleUsingOCR(normalized: normalized)
+            if !isCurrent {
+                // A freshly loaded feed can ignore the first tab gesture while
+                // its player becomes interactive. Retry the actual compact-
+                // iPhone Profile center once, then re-check the rendered handle.
+                window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.965)).tap()
+                Thread.sleep(forTimeInterval: 1.2)
+                try dismissTikTokInterestsPrompt(surface: window)
+                try dismissTikTokContactsPrompt(surface: window)
+                try dismissTikTokSwipeTutorial(surface: window)
+                isCurrent = try screenContainsExactHandleUsingOCR(normalized: normalized)
+            }
         } else {
             isCurrent = app.descendants(matching: .any).matching(handlePredicate).firstMatch.waitForExistence(timeout: platform == "x" ? 10 : 1)
         }
@@ -614,6 +661,20 @@ final class HeissRunnerUITests: XCTestCase {
             activeHandles[platform] = handle
             window.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
             return
+        }
+
+        if platform == "tiktok" {
+            // Account-specific onboarding can appear only after TikTok has
+            // finished switching profiles. Clear it once more before treating
+            // the obscured handle as an account mismatch.
+            try dismissTikTokInterestsPrompt(surface: window)
+            try dismissTikTokContactsPrompt(surface: window)
+            try dismissTikTokSwipeTutorial(surface: window)
+            if try waitForExactHandleUsingOCR(normalized: normalized, timeout: 3) {
+                activeHandles[platform] = handle
+                window.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
+                return
+            }
         }
 
         // Profile headers on TikTok/Instagram expose the current username and
@@ -633,6 +694,11 @@ final class HeissRunnerUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.8)
         try tapExactHandle(app, surface: window, predicate: handlePredicate, handle: handle, platform: platform)
         Thread.sleep(forTimeInterval: 0.8)
+        if platform == "tiktok" {
+            try dismissTikTokInterestsPrompt(surface: window)
+            try dismissTikTokContactsPrompt(surface: window)
+            try dismissTikTokSwipeTutorial(surface: window)
+        }
         let verified: Bool
         if platform == "instagram" {
             verified = instagramTitleMatches(app, normalized: normalized)
