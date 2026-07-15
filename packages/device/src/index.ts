@@ -1,4 +1,4 @@
-export { RealIosDriver, type IosTransport } from "./ios-driver.js";
+export { RealIosDriver, DeviceSessionError, type IosTransport } from "./ios-driver.js";
 export {
   listUsbIphones,
   pollUntilReady,
@@ -41,11 +41,14 @@ export {
 export {
   checkAutomationRunner,
   ensureAutomationRunner,
+  superviseDeviceHealth,
   hasAutomationBuildProducts,
   planRunnerRepair,
   type AutomationHealth,
   type RunnerRepairAction,
   type RunnerRepairResult,
+  type DeviceSupervisorAction,
+  type DeviceSupervisorResult,
 } from "./runner-health.js";
 export {
   RealUsbTransport,

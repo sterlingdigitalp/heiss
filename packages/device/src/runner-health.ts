@@ -8,6 +8,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { RealUsbTransport } from "./ios-transport.js";
+import { listUsbIphones } from "./usb.js";
 import {
   automationRunnerLabel,
   downloadBuildInstallRunner,
@@ -34,6 +35,20 @@ export type RunnerRepairAction = "none" | "relaunch" | "reinstall";
 export interface RunnerRepairResult {
   ok: boolean;
   action: RunnerRepairAction;
+  detail: string;
+}
+
+export type DeviceSupervisorAction = RunnerRepairAction | "coredevice_restart" | "unlock_required" | "offline";
+
+export interface DeviceSupervisorResult {
+  ok: boolean;
+  action: DeviceSupervisorAction;
+  checks: {
+    usb: boolean;
+    paired: boolean;
+    commandChannel: boolean;
+    runnerHeartbeat: boolean;
+  };
   detail: string;
 }
 
@@ -132,4 +147,74 @@ export async function ensureAutomationRunner(
     waitForDevice: false,
   });
   return { ok: true, action, detail: `rebuilt and reinstalled runner (${install.installedAt})` };
+}
+
+/**
+ * Full pre-session ladder: USB/pairing → command-channel heartbeat → runner
+ * repair → bounded CoreDevice restart. Lock/passcode failures stop before
+ * service restarts and produce a precise user action.
+ */
+export async function superviseDeviceHealth(
+  udid: string,
+  opts: { repoRoot?: string; pingTimeoutMs?: number; readyTimeoutMs?: number } = {},
+): Promise<DeviceSupervisorResult> {
+  const devices = await listUsbIphones().catch(() => []);
+  const device = devices.find((candidate) => candidate.udid === udid);
+  const baseChecks = {
+    usb: Boolean(device?.available),
+    paired: Boolean(device?.paired),
+    commandChannel: false,
+    runnerHeartbeat: false,
+  };
+  if (!device?.available) {
+    return {
+      ok: false, action: "offline", checks: baseChecks,
+      detail: device ? `${device.name} is paired but not available over USB` : `iPhone ${udid.slice(0, 8)} is not on USB`,
+    };
+  }
+
+  const before = await checkAutomationRunner(udid, opts);
+  if (before.healthy) {
+    return {
+      ok: true, action: "none",
+      checks: { ...baseChecks, commandChannel: before.pingOk, runnerHeartbeat: before.healthy },
+      detail: `USB, app-container command channel, and runner heartbeat are healthy (${before.detail})`,
+    };
+  }
+  if (/locked|passcode|unlock|developer mode/i.test(before.detail)) {
+    return {
+      ok: false, action: "unlock_required", checks: baseChecks,
+      detail: `Unlock ${device.name} and leave it connected: ${before.detail}`,
+    };
+  }
+
+  const repair = await ensureAutomationRunner(udid, opts);
+  if (repair.ok) {
+    const afterRepair = await checkAutomationRunner(udid, opts);
+    if (afterRepair.healthy) {
+      return {
+        ok: true, action: repair.action,
+        checks: { ...baseChecks, commandChannel: true, runnerHeartbeat: true },
+        detail: repair.detail,
+      };
+    }
+  }
+
+  try {
+    await execFileAsync("pkill", ["-u", String(process.getuid?.() ?? 0), "-x", "CoreDeviceService"], { timeout: 5_000 });
+  } catch { /* service may have already exited */ }
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  const finalRepair = await ensureAutomationRunner(udid, opts).catch((error) => ({
+    ok: false, action: "relaunch" as const,
+    detail: error instanceof Error ? error.message : String(error),
+  }));
+  const final = await checkAutomationRunner(udid, opts);
+  return {
+    ok: final.healthy,
+    action: "coredevice_restart",
+    checks: { ...baseChecks, commandChannel: final.pingOk, runnerHeartbeat: final.healthy },
+    detail: final.healthy
+      ? `CoreDevice and runner recovered (${finalRepair.detail})`
+      : `CoreDevice restart exhausted; user intervention required: ${final.detail}`,
+  };
 }

@@ -22,6 +22,7 @@ describe("farm CLI real-only path", () => {
   it("finds vendored runner sources when npm starts inside apps/farm", () => {
     const root = fileURLToPath(new URL("../../../", import.meta.url));
     assert.equal(findProjectRoot(join(root, "apps", "farm")), root.replace(/\/$/, ""));
+    assert.equal(findProjectRoot("/"), root.replace(/\/$/, ""), "launchd cwd must fall back to the CLI module");
   });
 
   it("exposes setup status, devices list, signing show (no seed simulator)", () => {
@@ -94,6 +95,7 @@ describe("farm CLI real-only path", () => {
     assert.equal(body.accounts.length, 4);
     assert.ok(body.accounts.every((account: { groupId: string }) => account.groupId === body.group.id));
     assert.ok(body.accounts.every((account: { searchTerms: string[] }) => account.searchTerms.join("|") === "humanoid robots|robotics"));
+    assert.ok(body.accounts.every((account: { preflightStatus: string }) => account.preflightStatus === "pending"));
     const terms = run(["account-set", "terms", body.group.id, "automation, embodied AI"], dataDir);
     assert.equal(terms.status, 0, terms.stderr);
     const handle = run(["account", "handle", body.accounts[2].id, "@XCase"], dataDir);
@@ -103,6 +105,12 @@ describe("farm CLI real-only path", () => {
     assert.equal(saved.state.accounts.find((account) => account.id === body.accounts[2].id)?.handle, "@XCase");
     assert.equal(saved.state.warmupSchedules.length, 4);
     assert.deepEqual(saved.state.warmupSchedules.map((schedule) => schedule.timeOfDay), ["20:00", "20:15", "20:30", "20:45"]);
+    assert.deepEqual(saved.state.warmupSchedules.map((schedule) => saved.state.accounts.find((account) => account.id === schedule.accountId)?.platform), ["x", "tiktok", "instagram", "youtube"]);
+    assert.ok(saved.state.warmupSchedules.every((schedule) => schedule.jitterMinutes <= 5));
+
+    const ready = run(["account", "preflight", body.accounts[0].id, "ready"], dataDir);
+    assert.equal(ready.status, 0, ready.stderr);
+    assert.equal(JSON.parse(ready.stdout).account.preflightStatus, "ready");
 
     const disable = run(["warmup-schedule", "disable", body.accounts[3].id], dataDir);
     assert.equal(disable.status, 0, disable.stderr);

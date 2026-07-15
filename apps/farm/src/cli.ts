@@ -36,6 +36,7 @@ import {
   downloadBuildInstallRunner,
   checkAutomationRunner,
   ensureAutomationRunner,
+  superviseDeviceHealth,
   stopAutomationRunner,
   planSigning,
   saveSigningConfig,
@@ -82,6 +83,10 @@ Farm:
   heiss-farm account-set terms <groupId> "term,term"
   heiss-farm account handle <accountId> @handle
   heiss-farm account switcher <accountId> "picker label"
+  heiss-farm account identity <accountId> [--display-name NAME] [--email EMAIL] [--switcher LABEL] [--avatar HASH]
+  heiss-farm account preflight <accountId> <pending|ready|attention> [--app-version VERSION] [--note NOTE]
+  heiss-farm preflight canary [--accounts ID,ID]
+  heiss-farm preflight health [--udid UDID]
   heiss-farm remove-account <accountId>
   heiss-farm add-slot <accountId> <HH:mm>
   heiss-farm remove-slot <slotId>
@@ -217,7 +222,11 @@ async function pushCloudCompletions(store: JsonStore, licenseOverride?: string) 
 
 /** Production driver only — real USB transport, never simulator. */
 function makeDriver(): RealIosDriver {
-  return new RealIosDriver(createProductionTransport());
+  return new RealIosDriver(createProductionTransport({
+    onProgress(progress) {
+      console.log(JSON.stringify({ at: new Date().toISOString(), sessionProgress: progress }));
+    },
+  }));
 }
 
 function print(obj: unknown): void {
@@ -288,10 +297,23 @@ function rebalanceWarmupSchedules(store: JsonStore): void {
   if (store.state.warmupSchedules.length > 16) {
     throw new Error("One iPhone supports at most 16 scheduled handles in the four-platform account-set layout");
   }
+  const order = store.state.settings.platformOrder;
+  const accountById = new Map(store.state.accounts.map((account) => [account.id, account]));
+  store.state.warmupSchedules.sort((left, right) => {
+    const leftAccount = accountById.get(left.accountId);
+    const rightAccount = accountById.get(right.accountId);
+    const leftRank = leftAccount ? order.indexOf(leftAccount.platform) : order.length;
+    const rightRank = rightAccount ? order.indexOf(rightAccount.platform) : order.length;
+    return (leftRank < 0 ? order.length : leftRank) - (rightRank < 0 ? order.length : rightRank)
+      || (leftAccount?.groupId ?? "").localeCompare(rightAccount?.groupId ?? "")
+      || left.accountId.localeCompare(right.accountId);
+  });
   for (const [index, schedule] of store.state.warmupSchedules.entries()) {
     const minutes = 20 * 60 + index * 15;
     schedule.timeOfDay = `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+    schedule.jitterMinutes = Math.min(schedule.jitterMinutes, 5);
   }
+  store.state.settings.platformScheduleVersion = 1;
 }
 
 async function main(): Promise<void> {
@@ -691,7 +713,7 @@ async function main(): Promise<void> {
       const last = runnerRepairAttempts.get(device.udid) ?? 0;
       if (Date.now() - last < 10 * 60 * 1000) return;
       try {
-        const repair = await ensureAutomationRunner(device.udid, { repoRoot: findProjectRoot() });
+        const repair = await superviseDeviceHealth(device.udid, { repoRoot: findProjectRoot() });
         if (repair.action === "none") return;
         runnerRepairAttempts.set(device.udid, Date.now());
         notifyDesktop(
@@ -791,7 +813,17 @@ async function main(): Promise<void> {
           const cloud = await pushCloudCompletions(store).catch((error) => ({ warning: String(error), pushed: 0 }));
           const completed = result.sessions.filter((session) => session.status === "completed").length;
           if (completed > 0) notifyDesktop("Heiss session complete", `${completed} scheduled session${completed === 1 ? "" : "s"} completed.`);
-          if (result.interrupted) notifyDesktop("Heiss needs attention", "A session paused safely and will retry after its backoff window.");
+          if (result.interrupted) {
+            const paused = result.sessions.find((session) => session.status === "checkpointed");
+            const account = paused ? store.state.accounts.find((candidate) => candidate.id === paused.accountId) : undefined;
+            const group = account?.groupId ? store.state.accountGroups.find((candidate) => candidate.id === account.groupId) : undefined;
+            notifyDesktop(
+              paused?.requiresAttention ? `Heiss paused ${account?.platform ?? "account"}` : "Heiss session checkpointed",
+              paused?.requiresAttention
+                ? `${group?.name ?? account?.handle ?? "Account"} (${account?.handle ?? "unknown"}): ${paused.lastError ?? "manual cleanup required"}`
+                : `${account?.handle ?? "A session"} will retry after its recovery window: ${paused?.lastError ?? "temporary failure"}`,
+            );
+          }
           console.log(JSON.stringify({
             at: nowIso, timeOfDay, timeZone: store.state.settings.timeZone,
             sessions: result.sessions.length,
@@ -972,6 +1004,58 @@ async function main(): Promise<void> {
     store.save(); print({ ok: true, account }); return;
   }
 
+  if (cmd === "account" && args[1] === "identity") {
+    const store = openStore(args);
+    const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
+    if (!account) throw new Error("Usage: account identity <accountId> [--display-name NAME] [--email EMAIL] [--switcher LABEL] [--avatar HASH]");
+    account.displayName = getArg(args, "--display-name")?.trim() || account.displayName;
+    account.loginEmail = getArg(args, "--email")?.trim() || account.loginEmail;
+    account.switcherHint = getArg(args, "--switcher")?.trim() || account.switcherHint;
+    account.avatarFingerprint = getArg(args, "--avatar")?.trim() || account.avatarFingerprint;
+    store.save(); print({ ok: true, account }); return;
+  }
+
+  if (cmd === "account" && args[1] === "preflight") {
+    const store = openStore(args);
+    const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
+    const status = args[3];
+    if (!account || !["pending", "ready", "attention"].includes(status ?? "")) {
+      throw new Error("Usage: account preflight <accountId> <pending|ready|attention> [--app-version VERSION] [--note NOTE]");
+    }
+    account.preflightStatus = status as "pending" | "ready" | "attention";
+    account.preflightCompletedAt = status === "ready" ? new Date().toISOString() : undefined;
+    account.preflightAppVersion = getArg(args, "--app-version")?.trim() || account.preflightAppVersion;
+    account.preflightNote = getArg(args, "--note")?.trim() || (status === "ready" ? undefined : account.preflightNote);
+    if (status === "ready") {
+      for (const session of store.state.sessions.filter((candidate) => candidate.accountId === account.id && candidate.status === "checkpointed" && candidate.requiresAttention)) {
+        session.requiresAttention = false;
+        session.nextRetryAt = new Date().toISOString();
+      }
+    }
+    store.save(); print({ ok: true, account }); return;
+  }
+
+  if (cmd === "preflight" && args[1] === "canary") {
+    const store = openStore(args);
+    const ids = (getArg(args, "--accounts") ?? "").split(",").map((id) => id.trim()).filter(Boolean);
+    const results = await new FarmOrchestrator(store, new RealIosDriver()).verifyPreflight(ids.length ? ids : undefined);
+    print({ ok: results.every((result) => result.ok), results }); return;
+  }
+
+  if (cmd === "preflight" && args[1] === "health") {
+    const store = openStore(args);
+    const requested = getArg(args, "--udid");
+    const devices = requested
+      ? store.state.devices.filter((device) => device.udid === requested || device.id === requested)
+      : store.state.devices;
+    if (devices.length === 0) throw new Error("No matching registered device");
+    const results = [];
+    for (const device of devices) {
+      results.push({ deviceId: device.id, name: device.name, ...(await superviseDeviceHealth(device.udid, { repoRoot: findProjectRoot() })) });
+    }
+    print({ ok: results.every((result) => result.ok), results }); return;
+  }
+
   if (cmd === "account-set" && args[1] === "terms") {
     const store = openStore(args);
     const group = store.state.accountGroups.find((candidate) => candidate.id === args[2]);
@@ -1006,6 +1090,7 @@ async function main(): Promise<void> {
     const created = platforms.map((platform) => ({
       id: randomUUID(), groupId: group.id, deviceId: device.id, platform, handle: handles[platform]!,
       stage: "fresh" as const, trustScore: 0, warmupLocalDays: [],
+      preflightStatus: "pending" as const,
       searchTerms: parseSearchTerms(getArg(args, "--terms")), createdAt: new Date().toISOString(),
     }));
     store.state.accountGroups.push(group);
@@ -1053,6 +1138,7 @@ async function main(): Promise<void> {
       handle,
       stage,
       trustScore: stage === "fresh" ? 0 : 100,
+      preflightStatus: "pending" as const,
       searchTerms: parseSearchTerms(getArg(args, "--terms")),
       createdAt: new Date().toISOString(),
     };

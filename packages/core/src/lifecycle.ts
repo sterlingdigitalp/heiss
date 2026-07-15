@@ -123,16 +123,21 @@ export function applyKeepWarm(
 }
 
 /** Every post cycle is wrapped with pre-post and post-post warmup. */
-export function postCycleScript(searchTerms: string[]): string[] {
-  const warmup = ["scroll", "scroll", "like", ...(searchTerms.length ? ["search"] : [])]
+export function postCycleScript(searchTerms: string[], engagementAllowed = true): string[] {
+  const warmup = ["scroll", "scroll", ...(engagementAllowed ? ["like"] : []), ...(searchTerms.length ? ["search"] : [])]
     .map((a) => `pre_warmup:${a}`);
   const post = ["post:upload", "post:caption", "post:music_optional", "post:publish"];
-  const after = ["scroll", "scroll", "like", ...(searchTerms.length ? ["search"] : [])]
+  const after = ["scroll", "scroll", ...(engagementAllowed ? ["like"] : []), ...(searchTerms.length ? ["search"] : [])]
     .map((a) => `post_warmup:${a}`);
   return [...warmup, ...post, ...after];
 }
 
-export function warmupOnlyScript(searchTerms: string[], trustScore = 0, seed = randomSeed()): string[] {
+export function warmupOnlyScript(
+  searchTerms: string[],
+  trustScore = 0,
+  seed = randomSeed(),
+  engagementAllowed = true,
+): string[] {
   const phase = Math.min(3, Math.floor(Math.max(0, trustScore) / TRUST_PER_WARMUP));
   const plans = [
     { scroll: 8, like: 0, follow: 0, search: 2 },
@@ -143,8 +148,10 @@ export function warmupOnlyScript(searchTerms: string[], trustScore = 0, seed = r
   const plan = plans[phase]!;
   const actions: WarmupAction[] = [];
   actions.push(...Array.from({ length: plan.scroll }, () => "scroll" as const));
-  actions.push(...Array.from({ length: plan.like }, () => "like" as const));
-  actions.push(...Array.from({ length: plan.follow }, () => "follow" as const));
+  if (engagementAllowed) {
+    actions.push(...Array.from({ length: plan.like }, () => "like" as const));
+    actions.push(...Array.from({ length: plan.follow }, () => "follow" as const));
+  }
   if (searchTerms.length > 0) {
     actions.push(...Array.from({ length: plan.search }, () => "search" as const));
   }
