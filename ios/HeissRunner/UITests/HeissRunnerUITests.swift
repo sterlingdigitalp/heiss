@@ -544,6 +544,21 @@ final class HeissRunnerUITests: XCTestCase {
                     Thread.sleep(forTimeInterval: 0.5)
                 }
             }
+            // With four or more signed-in accounts, X collapses additional
+            // identities behind the overflow button at the right of the
+            // avatar row. Search that account list by exact rendered handle.
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.74, dy: 0.075)).tap()
+            Thread.sleep(forTimeInterval: 1.0)
+            if try tapExactHandleUsingOCR(surface: window, normalized: normalized) {
+                Thread.sleep(forTimeInterval: 1.2)
+                try openXDrawer(surface: window)
+                inspectedAccounts.append(try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | "))
+                if try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.72) {
+                    window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50)).tap()
+                    activeHandles[platform] = handle
+                    return
+                }
+            }
             let summary = inspectedAccounts.enumerated().map { "slot\($0.offset): \($0.element)" }.joined(separator: "; ")
             throw NSError(domain: "HeissRunner", code: 15, userInfo: [NSLocalizedDescriptionKey: "X signed-in accounts did not verify exact handle \(handle). OCR headers: \(summary)"])
         }
@@ -680,7 +695,10 @@ final class HeissRunnerUITests: XCTestCase {
         // Profile headers on TikTok/Instagram expose the current username and
         // open the native account switcher when tapped.
         if platform == "tiktok" {
-            window.coordinate(withNormalizedOffset: point(command, "accountMenu", .init(dx: 0.57, dy: 0.27))).tap()
+            // Compact TikTok puts the chevron beside the display name. The
+            // handle one row below copies the username instead of opening the
+            // switcher, so keep this fallback centered on the chevron itself.
+            window.coordinate(withNormalizedOffset: point(command, "accountMenu", .init(dx: 0.63, dy: 0.238))).tap()
         } else {
             let accountMenu = app.buttons["user-switch-title-button"]
             if accountMenu.waitForExistence(timeout: 2), accountMenu.isHittable { accountMenu.tap() }
@@ -819,8 +837,28 @@ final class HeissRunnerUITests: XCTestCase {
         // successful Done tap. The per-account "Remove from this device" rows
         // exist only on the manager screen itself.
         if try screenContainsTextUsingOCR("Remove from this device") {
-            if !(try tapTextUsingOCR(surface: surface, expected: "Done")) {
-                surface.coordinate(withNormalizedOffset: CGVector(dx: 0.89, dy: 0.075)).tap()
+            // This full-screen manager belongs to YouTube, not SpringBoard.
+            // Prefer its native button before falling back to OCR/coordinates
+            // on the system surface (which cannot always deliver this tap).
+            let managerDone = app.buttons.matching(
+                NSPredicate(format: "label ==[c] %@", "Done")
+            ).firstMatch
+            if managerDone.waitForExistence(timeout: 1), managerDone.isHittable {
+                managerDone.tap()
+                Thread.sleep(forTimeInterval: 0.4)
+            }
+            // Some Google account-manager builds expose Done as hittable but
+            // silently ignore XCUIElement.tap(). Re-check the manager state
+            // and deliver an application-coordinate press when necessary.
+            if try screenContainsTextUsingOCR("Remove from this device") {
+                _ = try tapTextUsingOCR(surface: app, expected: "Done")
+                Thread.sleep(forTimeInterval: 0.4)
+            }
+            if try screenContainsTextUsingOCR("Remove from this device") {
+                // The OCR observation is rendered by YouTube even when its
+                // accessibility tree omits the control. Deliver the fallback
+                // through YouTube's own application surface.
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.89, dy: 0.075)).press(forDuration: 0.08)
             }
             let deadline = Date().addingTimeInterval(5)
             while Date() < deadline, try screenContainsTextUsingOCR("Remove from this device") {
