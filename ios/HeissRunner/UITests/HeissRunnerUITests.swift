@@ -163,14 +163,7 @@ final class HeissRunnerUITests: XCTestCase {
                try tapTextUsingOCR(surface: surface, expected: "Skip") {
                 Thread.sleep(forTimeInterval: 0.8)
             }
-            for _ in 0..<2 {
-                if !(try screenContainsTextUsingOCR("Find contacts")) { break }
-                guard try tapTextUsingOCR(surface: surface, expected: "Don") else { break }
-                Thread.sleep(forTimeInterval: 0.8)
-            }
-            if try screenContainsTextUsingOCR("Find contacts") {
-                throw NSError(domain: "HeissRunner", code: 19, userInfo: [NSLocalizedDescriptionKey: "TikTok contacts prompt did not dismiss"])
-            }
+            try dismissTikTokContactsPrompt(surface: surface)
             for _ in 0..<3 {
                 if !(try screenContainsTextUsingOCR("Swipe up for more")) { break }
                 let start = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.82))
@@ -428,6 +421,24 @@ final class HeissRunnerUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.8)
     }
 
+    private func dismissTikTokContactsPrompt(surface: XCUIElement) throws {
+        // TikTok may delay this app-owned upsell until after the Profile tab is
+        // opened. XCTest cannot reliably see it through TikTok's animated
+        // accessibility tree, so use rendered text as the guard and a stable
+        // button coordinate as the fallback. Never tap the coordinate unless
+        // the distinctive prompt copy is visible.
+        for _ in 0..<2 {
+            guard try screenContainsTextUsingOCR("Find contacts") else { return }
+            if !(try tapTextUsingOCR(surface: surface, expected: "Don")) {
+                surface.coordinate(withNormalizedOffset: CGVector(dx: 0.31, dy: 0.74)).tap()
+            }
+            Thread.sleep(forTimeInterval: 0.8)
+        }
+        if try screenContainsTextUsingOCR("Find contacts") {
+            throw NSError(domain: "HeissRunner", code: 19, userInfo: [NSLocalizedDescriptionKey: "TikTok contacts prompt did not dismiss"])
+        }
+    }
+
     private func ensureAccount(_ app: XCUIApplication, platform: String, handle: String, command: [String: Any]) throws {
         guard !handle.isEmpty else { return }
         let normalized = handle.hasPrefix("@") ? String(handle.dropFirst()) : handle
@@ -508,7 +519,10 @@ final class HeissRunnerUITests: XCTestCase {
             try ensureYouTubeAccount(app, surface: window, handle: handle, normalized: normalized, command: command)
             return
         }
-        if platform == "tiktok" { dismissTikTokPasskey() }
+        if platform == "tiktok" {
+            dismissTikTokPasskey()
+            try dismissTikTokContactsPrompt(surface: window)
+        }
         if platform == "x" {
             let premium = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Subscribe"))
             if premium.count > 0 {
@@ -543,7 +557,10 @@ final class HeissRunnerUITests: XCTestCase {
             window.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
             Thread.sleep(forTimeInterval: 1.0)
         }
-        if platform == "tiktok" { dismissTikTokPasskey() }
+        if platform == "tiktok" {
+            dismissTikTokPasskey()
+            try dismissTikTokContactsPrompt(surface: window)
+        }
         if platform == "x" {
             let drawerHandle = app.descendants(matching: .any).matching(handlePredicate)
             if drawerHandle.count == 0 {
