@@ -294,23 +294,28 @@ function runnerExpiryWarning(now: Date): { key: string; body: string } | null {
 }
 
 function rebalanceWarmupSchedules(store: JsonStore): void {
-  if (store.state.warmupSchedules.length > 16) {
-    throw new Error("One iPhone supports at most 16 scheduled handles in the four-platform account-set layout");
-  }
   const order = store.state.settings.platformOrder;
   const accountById = new Map(store.state.accounts.map((account) => [account.id, account]));
+  const deviceRank = new Map(store.state.devices.map((device, index) => [device.id, index]));
   store.state.warmupSchedules.sort((left, right) => {
     const leftAccount = accountById.get(left.accountId);
     const rightAccount = accountById.get(right.accountId);
+    const deviceDifference = (deviceRank.get(leftAccount?.deviceId ?? "") ?? Number.MAX_SAFE_INTEGER)
+      - (deviceRank.get(rightAccount?.deviceId ?? "") ?? Number.MAX_SAFE_INTEGER);
     const leftRank = leftAccount ? order.indexOf(leftAccount.platform) : order.length;
     const rightRank = rightAccount ? order.indexOf(rightAccount.platform) : order.length;
-    return (leftRank < 0 ? order.length : leftRank) - (rightRank < 0 ? order.length : rightRank)
+    return deviceDifference
+      || (leftRank < 0 ? order.length : leftRank) - (rightRank < 0 ? order.length : rightRank)
       || (leftAccount?.groupId ?? "").localeCompare(rightAccount?.groupId ?? "")
       || left.accountId.localeCompare(right.accountId);
   });
-  for (const [index, schedule] of store.state.warmupSchedules.entries()) {
+  const deviceScheduleIndexes = new Map<string, number>();
+  for (const schedule of store.state.warmupSchedules) {
+    const deviceId = accountById.get(schedule.accountId)?.deviceId ?? "unassigned";
+    const index = deviceScheduleIndexes.get(deviceId) ?? 0;
+    deviceScheduleIndexes.set(deviceId, index + 1);
     const minutes = 20 * 60 + index * 15;
-    schedule.timeOfDay = `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+    schedule.timeOfDay = `${String(Math.floor(minutes / 60) % 24).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
     schedule.jitterMinutes = Math.min(schedule.jitterMinutes, 5);
   }
   store.state.settings.platformScheduleVersion = 1;

@@ -122,4 +122,32 @@ describe("farm CLI real-only path", () => {
     assert.equal(enable.status, 0, enable.stderr);
     assert.equal(JSON.parse(enable.stdout).schedule.enabled, true);
   });
+
+  it("allows a fifth four-platform person on one iPhone", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "heiss-farm-five-"));
+    const store = new JsonStore(join(dataDir, "farm.json"));
+    store.state.devices.push({ id: "d1", name: "iPhone", udid: "REAL", online: false, createdAt: new Date().toISOString() });
+    store.save();
+
+    for (let person = 1; person <= 5; person += 1) {
+      const result = run([
+        "add-account-set", "d1", `Person ${person}`,
+        "--instagram", `@ig${person}`, "--tiktok", `@tt${person}`,
+        "--x", `@x${person}`, "--youtube", `@yt${person}`,
+        "--terms", `topic ${person}`,
+      ], dataDir);
+      assert.equal(result.status, 0, `person ${person}: ${result.stderr}`);
+    }
+
+    const saved = new JsonStore(join(dataDir, "farm.json"));
+    assert.equal(saved.state.accountGroups.length, 5);
+    assert.equal(saved.state.accounts.length, 20);
+    assert.equal(saved.state.warmupSchedules.length, 20);
+    assert.deepEqual(
+      ["x", "tiktok", "instagram", "youtube"].map((platform) =>
+        saved.state.accounts.filter((account) => account.platform === platform).length),
+      [5, 5, 5, 5],
+    );
+    assert.ok(saved.state.warmupSchedules.every((schedule) => /^([01]\d|2[0-3]):[0-5]\d$/.test(schedule.timeOfDay)));
+  });
 });
