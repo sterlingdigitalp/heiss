@@ -152,6 +152,12 @@ final class HeissRunnerUITests: XCTestCase {
         guard app.wait(for: .runningForeground, timeout: 12) else {
             throw NSError(domain: "HeissRunner", code: 1, userInfo: [NSLocalizedDescriptionKey: "\(platform) did not reach foreground"])
         }
+        // A limited-Photos alert belongs to the app that requested it, but iOS
+        // can leave it above whichever app XCTest launches next. Clear the
+        // safe, non-expanding choice before attributing alerts to this app.
+        let systemUI = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        disableAutomaticInterruptionHandling(systemUI)
+        _ = try dismissStaleLimitedPhotosSystemPrompt(surface: systemUI.windows.firstMatch)
         if platform == "instagram" {
             // Instagram can present this modal over the profile immediately
             // after switching accounts. It obscures both the current handle
@@ -162,8 +168,10 @@ final class HeissRunnerUITests: XCTestCase {
             // TikTok's first-run surfaces can wedge XCTest while it snapshots
             // the animated accessibility hierarchy. Detect their rendered
             // copy with Vision and tap stable coordinates through SpringBoard.
-            let surface = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-            disableAutomaticInterruptionHandling(surface)
+            let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            disableAutomaticInterruptionHandling(springboard)
+            let surface = springboard.windows.firstMatch
+            try dismissTikTokPhotoStoryPrompt(app: app, surface: surface)
             try dismissTikTokInterestsPrompt(surface: surface)
             try dismissTikTokContactsPrompt(surface: surface)
             try dismissTikTokSwipeTutorial(surface: surface)
@@ -194,7 +202,7 @@ final class HeissRunnerUITests: XCTestCase {
         if platform == "tiktok" || platform == "x" {
             let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
             disableAutomaticInterruptionHandling(springboard)
-            window = springboard
+            window = platform == "tiktok" ? springboard.windows.firstMatch : springboard
         } else {
             window = app.windows.firstMatch
         }
@@ -224,16 +232,11 @@ final class HeissRunnerUITests: XCTestCase {
                 if explore.waitForExistence(timeout: 3), explore.isHittable { explore.tap() }
                 else { window.coordinate(withNormalizedOffset: point(command, "search", .init(dx: 0.70, dy: 0.95))).tap() }
             } else if platform == "tiktok" {
-                let existingSearch = app.searchFields.firstMatch
-                if existingSearch.exists {
-                    // Results pages retain the search field but move the
-                    // top-right coordinate to an overflow menu.
-                    window.coordinate(withNormalizedOffset: CGVector(dx: 0.42, dy: 0.06)).tap()
-                } else {
-                    // Avoid resolving TikTok's Search button through the
-                    // animated feed hierarchy; it is top-right on Home.
-                    window.coordinate(withNormalizedOffset: point(command, "search", .init(dx: 0.92, dy: 0.08))).tap()
-                }
+                // Reset to Home so the search button has one stable meaning;
+                // querying the animated results hierarchy can wedge XCTest.
+                window.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.965))).tap()
+                Thread.sleep(forTimeInterval: 0.8)
+                window.coordinate(withNormalizedOffset: point(command, "search", .init(dx: 0.92, dy: 0.08))).tap()
             } else {
                 if platform == "youtube" {
                     if !waitForSearchField(app, timeout: 0.2) {
@@ -269,41 +272,32 @@ final class HeissRunnerUITests: XCTestCase {
                 }
             }
             Thread.sleep(forTimeInterval: 0.8)
-            let fields = app.searchFields.count > 0 ? app.searchFields : app.textFields
             let terms = command["searchTerms"] as? [String] ?? []
-            if fields.count > 0, let term = terms.randomElement() {
+            if platform == "tiktok" {
+                guard let term = terms.randomElement() else {
+                    throw NSError(domain: "HeissRunner", code: 12, userInfo: [NSLocalizedDescriptionKey: "No search term is configured"])
+                }
+                try performTikTokSearchTyping(surface: window, term: term)
+            } else {
+                let fields = app.searchFields.count > 0 ? app.searchFields : app.textFields
+                guard fields.count > 0, let term = terms.randomElement() else {
+                    throw NSError(domain: "HeissRunner", code: 12, userInfo: [NSLocalizedDescriptionKey: "Search field was not found after opening platform search"])
+                }
                 let field = fields.firstMatch
                 if platform == "youtube" { clearYouTubeSearchField(app: app, surface: window, field: field) }
-                if platform == "tiktok" {
-                    window.coordinate(withNormalizedOffset: CGVector(dx: 0.42, dy: 0.06)).tap()
-                } else if field.isHittable { field.tap() }
+                if field.isHittable { field.tap() }
                 else { field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
-                let keyboardApp: XCUIApplication
-                if platform == "tiktok" {
-                    keyboardApp = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-                    disableAutomaticInterruptionHandling(keyboardApp)
-                } else {
-                    keyboardApp = app
-                }
                 guard app.keyboards.firstMatch.waitForExistence(timeout: 3) else {
                     throw NSError(domain: "HeissRunner", code: 11, userInfo: [NSLocalizedDescriptionKey: "Search field did not receive keyboard focus"])
                 }
-                if platform == "tiktok" {
-                    keyboardApp.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.88)).press(forDuration: 1.2)
-                    try typeUsingKeyboardCoordinates(keyboardApp, text: term)
-                    keyboardApp.coordinate(withNormalizedOffset: CGVector(dx: 0.87, dy: 0.96)).tap()
-                } else {
-                    try typeUsingVisibleKeyboard(keyboardApp, text: term)
-                    let submit = keyboardApp.keys.matching(
-                        NSPredicate(format: "label ==[c] %@ OR label ==[c] %@ OR label ==[c] %@", "Search", "Return", "Go")
-                    ).firstMatch
-                    if submit.waitForExistence(timeout: 2), submit.isHittable { submit.tap() }
-                    else if platform == "youtube" {
-                        window.coordinate(withNormalizedOffset: CGVector(dx: 0.87, dy: 0.96)).tap()
-                    }
+                try typeUsingVisibleKeyboard(app, text: term)
+                let submit = app.keys.matching(
+                    NSPredicate(format: "label ==[c] %@ OR label ==[c] %@ OR label ==[c] %@", "Search", "Return", "Go")
+                ).firstMatch
+                if submit.waitForExistence(timeout: 2), submit.isHittable { submit.tap() }
+                else if platform == "youtube" {
+                    window.coordinate(withNormalizedOffset: CGVector(dx: 0.87, dy: 0.96)).tap()
                 }
-            } else {
-                throw NSError(domain: "HeissRunner", code: 12, userInfo: [NSLocalizedDescriptionKey: "Search field was not found after opening (platform) search"])
             }
         } else if action == "post:upload" {
             let staged = command["stagedMediaNames"] as? [String] ?? []
@@ -426,7 +420,7 @@ final class HeissRunnerUITests: XCTestCase {
             if platform == "tiktok" || platform == "x" {
                 let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
                 disableAutomaticInterruptionHandling(springboard)
-                window = springboard
+                window = platform == "tiktok" ? springboard.windows.firstMatch : springboard
             } else {
                 window = app.windows.firstMatch
             }
@@ -569,11 +563,9 @@ final class HeissRunnerUITests: XCTestCase {
             if explore.waitForExistence(timeout: 3), explore.isHittable { explore.tap() }
             else { window.coordinate(withNormalizedOffset: point(command, "search", .init(dx: 0.70, dy: 0.95))).tap() }
         } else if platform == "tiktok" {
-            if app.searchFields.firstMatch.exists {
-                window.coordinate(withNormalizedOffset: CGVector(dx: 0.42, dy: 0.06)).tap()
-            } else {
-                window.coordinate(withNormalizedOffset: point(command, "search", .init(dx: 0.92, dy: 0.08))).tap()
-            }
+            window.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.965))).tap()
+            Thread.sleep(forTimeInterval: 0.8)
+            window.coordinate(withNormalizedOffset: point(command, "search", .init(dx: 0.92, dy: 0.08))).tap()
         } else {
             if platform == "youtube" {
                 if !waitForSearchField(app, timeout: 0.2) {
@@ -602,45 +594,45 @@ final class HeissRunnerUITests: XCTestCase {
             }
         }
         Thread.sleep(forTimeInterval: 0.8)
-        let fields = app.searchFields.count > 0 ? app.searchFields : app.textFields
         let terms = command["searchTerms"] as? [String] ?? []
+        if platform == "tiktok" {
+            guard let term = terms.randomElement() else {
+                throw NSError(domain: "HeissRunner", code: 12, userInfo: [NSLocalizedDescriptionKey: "No search term is configured"])
+            }
+            try performTikTokSearchTyping(surface: window, term: term)
+            return
+        }
+        let fields = app.searchFields.count > 0 ? app.searchFields : app.textFields
         guard fields.count > 0, let term = terms.randomElement() else {
             throw NSError(domain: "HeissRunner", code: 12, userInfo: [NSLocalizedDescriptionKey: "Search field was not found after opening platform search"])
         }
         let field = fields.firstMatch
         if platform == "youtube" { clearYouTubeSearchField(app: app, surface: window, field: field) }
-        if platform == "tiktok" { window.coordinate(withNormalizedOffset: CGVector(dx: 0.42, dy: 0.06)).tap() }
-        else if field.isHittable { field.tap() }
+        if field.isHittable { field.tap() }
         else { field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
-        let keyboardApp: XCUIApplication
-        if platform == "tiktok" {
-            keyboardApp = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-            disableAutomaticInterruptionHandling(keyboardApp)
-        } else { keyboardApp = app }
         guard app.keyboards.firstMatch.waitForExistence(timeout: 3) else {
             throw NSError(domain: "HeissRunner", code: 11, userInfo: [NSLocalizedDescriptionKey: "Search field did not receive keyboard focus"])
         }
-        if platform == "tiktok" {
-            keyboardApp.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.88)).press(forDuration: 1.2)
-            try typeUsingKeyboardCoordinates(keyboardApp, text: term)
-            keyboardApp.coordinate(withNormalizedOffset: CGVector(dx: 0.87, dy: 0.96)).tap()
-        } else {
-            try typeUsingVisibleKeyboard(keyboardApp, text: term)
-            let submit = keyboardApp.keys.matching(
-                NSPredicate(format: "label ==[c] %@ OR label ==[c] %@ OR label ==[c] %@", "Search", "Return", "Go")
-            ).firstMatch
-            if submit.waitForExistence(timeout: 2), submit.isHittable { submit.tap() }
-            else if platform == "youtube" {
-                window.coordinate(withNormalizedOffset: CGVector(dx: 0.87, dy: 0.96)).tap()
-            }
+        try typeUsingVisibleKeyboard(app, text: term)
+        let submit = app.keys.matching(
+            NSPredicate(format: "label ==[c] %@ OR label ==[c] %@ OR label ==[c] %@", "Search", "Return", "Go")
+        ).firstMatch
+        if submit.waitForExistence(timeout: 2), submit.isHittable { submit.tap() }
+        else if platform == "youtube" {
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.87, dy: 0.96)).tap()
         }
     }
 
     private func sweepKnownOverlays(app: XCUIApplication, platform: String) throws {
+        let systemUI = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        disableAutomaticInterruptionHandling(systemUI)
+        _ = try dismissStaleLimitedPhotosSystemPrompt(surface: systemUI.windows.firstMatch)
         if platform == "instagram" { dismissInstagramSetupPrompt(app) }
         if platform == "tiktok" {
-            let surface = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-            disableAutomaticInterruptionHandling(surface)
+            let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            disableAutomaticInterruptionHandling(springboard)
+            let surface = springboard.windows.firstMatch
+            try dismissTikTokPhotoStoryPrompt(app: app, surface: surface)
             dismissTikTokPasskey()
             try dismissTikTokInterestsPrompt(surface: surface)
             try dismissTikTokContactsPrompt(surface: surface)
@@ -654,7 +646,7 @@ final class HeissRunnerUITests: XCTestCase {
         for term in onboardingTerms {
             if try screenContainsTextUsingOCR(term) { return .onboardingOverlay }
         }
-        if app.keyboards.firstMatch.exists { return .search }
+        if platform != "tiktok", app.keyboards.firstMatch.exists { return .search }
         if try screenContainsTextUsingOCR("Search", minimumVisionY: 0.72, maximumVisionY: 0.96) { return .search }
         let switcherTerms = ["Add Instagram account", "Manage accounts", "Switch account", "Add account"]
         for term in switcherTerms {
@@ -671,7 +663,8 @@ final class HeissRunnerUITests: XCTestCase {
         }
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         disableAutomaticInterruptionHandling(springboard)
-        if app.alerts.count > 0 || springboard.alerts.count > 0 {
+        let appAlertVisible = platform == "tiktok" ? false : app.alerts.count > 0
+        if appAlertVisible || springboard.alerts.count > 0 {
             throw NSError(domain: "HeissRunner", code: 24, userInfo: [NSLocalizedDescriptionKey: "Unexpected popup or permission alert is blocking (platform)"])
         }
     }
@@ -771,6 +764,25 @@ final class HeissRunnerUITests: XCTestCase {
         }
     }
 
+    private func performTikTokSearchTyping(surface: XCUIElement, term: String) throws {
+        // Search is open at this point. Focus its stable header field, clear
+        // any retained query, and type entirely through SpringBoard-delivered
+        // keyboard coordinates so TikTok's accessibility tree is never read.
+        surface.coordinate(withNormalizedOffset: CGVector(dx: 0.42, dy: 0.06)).tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        surface.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.88)).press(forDuration: 1.2)
+        try typeUsingKeyboardCoordinates(surface, text: term)
+        surface.coordinate(withNormalizedOffset: CGVector(dx: 0.87, dy: 0.96)).tap()
+    }
+
+    private func openTikTokProfile(surface: XCUIElement) throws {
+        // Use the center of the rendered Profile icon, above the compact
+        // device's bottom safe-area label. A short press is more reliable than
+        // a label-edge tap while TikTok's feed player is animating.
+        surface.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.95)).press(forDuration: 0.08)
+        Thread.sleep(forTimeInterval: 2.0)
+    }
+
     private func dismissTikTokPasskey() {
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let prompt = springboard.buttons.matching(
@@ -781,6 +793,104 @@ final class HeissRunnerUITests: XCTestCase {
         if close.count > 0, close.firstMatch.isHittable { close.firstMatch.tap() }
         else { springboard.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.445)).tap() }
         Thread.sleep(forTimeInterval: 0.8)
+    }
+
+    @discardableResult
+    private func dismissStaleLimitedPhotosSystemPrompt(surface: XCUIElement) throws -> Bool {
+        let keep = surface.buttons.matching(
+            NSPredicate(format: "label ==[c] %@", "Keep Current Selection")
+        ).firstMatch
+        let rendered = try screenContainsTextUsingOCR("Would Like to Access Your Photos")
+        guard keep.exists || rendered else { return false }
+        if keep.waitForExistence(timeout: 1), keep.isHittable { keep.tap() }
+        else { surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.643)).tap() }
+        Thread.sleep(forTimeInterval: 0.8)
+        return true
+    }
+
+    private func dismissTikTokPhotoStoryPrompt(app: XCUIApplication, surface: XCUIElement) throws {
+        let keepPredicate = NSPredicate(format: "label ==[c] %@", "Keep Current Selection")
+        let systemKeep = surface.buttons.matching(keepPredicate).firstMatch
+        let photoPromptRendered = try screenContainsTextUsingOCR("Would Like to Access Your Photos")
+        // Never query TikTok's own accessibility tree here. Its animated
+        // Story surface can make a single `exists` lookup block for a minute.
+        // System alerts remain visible through SpringBoard; app-owned state is
+        // guarded exclusively by OCR below.
+        let photoPromptVisible = systemKeep.exists || photoPromptRendered
+        if photoPromptVisible {
+            if systemKeep.waitForExistence(timeout: 1), systemKeep.isHittable { systemKeep.tap() }
+            else { surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.643)).tap() }
+            Thread.sleep(forTimeInterval: 0.8)
+        }
+
+        let limitationBanner = try screenContainsTextUsingOCR("To access all photos")
+            || screenContainsTextUsingOCR("change your settings")
+        if limitationBanner {
+            // This app-owned banner overlays the bottom tabs; dismiss its own
+            // top-right glyph before attempting Profile/Home navigation.
+            surface.coordinate(withNormalizedOffset: CGVector(dx: 0.904, dy: 0.847)).tap()
+            Thread.sleep(forTimeInterval: 0.6)
+        }
+
+        var storyRendered = try screenContainsTextUsingOCR("Add to Story")
+        guard photoPromptVisible || storyRendered else { return }
+        // The Photos-limitation banner also has a close glyph, so a generic
+        // Close query is ambiguous here. The guarded top-left target belongs
+        // specifically to the Story composer and cancels without publishing.
+        for _ in 0..<3 where storyRendered {
+            surface.coordinate(withNormalizedOffset: CGVector(dx: 0.073, dy: 0.063)).press(forDuration: 0.08)
+            Thread.sleep(forTimeInterval: 2.0)
+            storyRendered = try screenContainsTextUsingOCR("Add to Story")
+        }
+        if storyRendered {
+            throw NSError(domain: "HeissRunner", code: 24, userInfo: [NSLocalizedDescriptionKey: "TikTok Add to Story could not be cancelled after retaining current Photos access"])
+        }
+        // TikTok can leave a black, foreground-but-noninteractive transition
+        // after dismissing Story. Relaunch to the known Home state before
+        // account verification; launch arguments already disable restoration.
+        app.terminate()
+        Thread.sleep(forTimeInterval: 0.8)
+        app.launch()
+        guard app.wait(for: .runningForeground, timeout: 12) else {
+            throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "TikTok did not return to foreground after Story cancellation"])
+        }
+        // State restoration can present the limited-Photos sheet several
+        // seconds after the app reports foreground. Drive the rendered state
+        // machine until Home is actually visible; never let a transient black
+        // screen fall through to account-mismatch handling.
+        let returnedSystemKeep = surface.buttons.matching(keepPredicate).firstMatch
+        let homeEligibleAt = Date().addingTimeInterval(20)
+        let settleDeadline = Date().addingTimeInterval(35)
+        while Date() < settleDeadline {
+            let returnedPromptRendered = try screenContainsTextUsingOCR("Would Like to Access Your Photos")
+            if returnedSystemKeep.exists || returnedPromptRendered {
+                if returnedSystemKeep.exists, returnedSystemKeep.isHittable { returnedSystemKeep.tap() }
+                else { surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.643)).tap() }
+                Thread.sleep(forTimeInterval: 1.0)
+                continue
+            }
+            let returnedLimitation = try screenContainsTextUsingOCR("To access all photos")
+                || screenContainsTextUsingOCR("change your settings")
+            if returnedLimitation {
+                surface.coordinate(withNormalizedOffset: CGVector(dx: 0.904, dy: 0.847)).tap()
+                Thread.sleep(forTimeInterval: 0.8)
+                continue
+            }
+            if try screenContainsTextUsingOCR("Add to Story") {
+                surface.coordinate(withNormalizedOffset: CGVector(dx: 0.073, dy: 0.063)).press(forDuration: 0.08)
+                Thread.sleep(forTimeInterval: 2.0)
+                continue
+            }
+            let homeRendered = try screenContainsTextUsingOCR("For You", minimumVisionY: 0.82)
+                || screenContainsTextUsingOCR("Following", minimumVisionY: 0.82)
+            if homeRendered, Date() >= homeEligibleAt {
+                surface.coordinate(withNormalizedOffset: CGVector(dx: 0.10, dy: 0.95)).tap()
+                Thread.sleep(forTimeInterval: 1.0)
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.75)
+        }
+        throw NSError(domain: "HeissRunner", code: 24, userInfo: [NSLocalizedDescriptionKey: "TikTok did not settle on Home after bounded Story cleanup"])
     }
 
     private func dismissInstagramSetupPrompt(_ app: XCUIApplication) {
@@ -830,21 +940,16 @@ final class HeissRunnerUITests: XCTestCase {
 
     private func dismissTikTokSwipeTutorial(surface: XCUIElement) throws {
         for _ in 0..<3 {
-            let app = XCUIApplication(bundleIdentifier: "com.zhiliaoapp.musically")
-            let accessible = app.descendants(matching: .any).matching(
-                NSPredicate(format: "label CONTAINS[c] %@ OR value CONTAINS[c] %@", "Swipe up", "Swipe up")
-            ).count > 0
-            if !(try screenContainsTextUsingOCR("Swipe up")) && !accessible { return }
+            // The rendered tutorial copy is a sufficient guard. Do not query
+            // TikTok's animated accessibility hierarchy: that can block for
+            // roughly a minute even when the tutorial is absent.
+            if !(try screenContainsTextUsingOCR("Swipe up")) { return }
             let start = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.82))
             let end = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.10))
             start.press(forDuration: 0.08, thenDragTo: end)
             Thread.sleep(forTimeInterval: 1.0)
         }
-        let app = XCUIApplication(bundleIdentifier: "com.zhiliaoapp.musically")
-        let accessible = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label CONTAINS[c] %@ OR value CONTAINS[c] %@", "Swipe up", "Swipe up")
-        ).count > 0
-        if try screenContainsTextUsingOCR("Swipe up") || accessible {
+        if try screenContainsTextUsingOCR("Swipe up") {
             throw NSError(domain: "HeissRunner", code: 18, userInfo: [NSLocalizedDescriptionKey: "TikTok swipe tutorial did not dismiss after three gestures"])
         }
     }
@@ -865,7 +970,7 @@ final class HeissRunnerUITests: XCTestCase {
         if platform == "tiktok" || platform == "x" {
             let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
             disableAutomaticInterruptionHandling(springboard)
-            window = springboard
+            window = platform == "tiktok" ? springboard.windows.firstMatch : springboard
         } else {
             window = app.windows.firstMatch
         }
@@ -983,6 +1088,7 @@ final class HeissRunnerUITests: XCTestCase {
             }
         }
         if platform == "instagram", profileTab.waitForExistence(timeout: 2), profileTab.isHittable { profileTab.tap() }
+        else if platform == "tiktok" { try openTikTokProfile(surface: window) }
         else {
             let fallback = platform == "x"
                 ? CGVector(dx: 0.08, dy: 0.08)
@@ -996,8 +1102,7 @@ final class HeissRunnerUITests: XCTestCase {
             guard app.wait(for: .runningForeground, timeout: 8) else {
                 throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "TikTok lost foreground during account verification"])
             }
-            window.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
-            Thread.sleep(forTimeInterval: 1.0)
+            try openTikTokProfile(surface: window)
         }
         if platform == "tiktok" {
             dismissTikTokPasskey()
@@ -1040,8 +1145,7 @@ final class HeissRunnerUITests: XCTestCase {
                 // A freshly loaded feed can ignore the first tab gesture while
                 // its player becomes interactive. Retry the actual compact-
                 // iPhone Profile center once, then re-check the rendered handle.
-                window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.965)).tap()
-                Thread.sleep(forTimeInterval: 1.2)
+                try openTikTokProfile(surface: window)
                 try dismissTikTokInterestsPrompt(surface: window)
                 try dismissTikTokContactsPrompt(surface: window)
                 try dismissTikTokSwipeTutorial(surface: window)
@@ -1176,13 +1280,130 @@ final class HeissRunnerUITests: XCTestCase {
         try dismissYouTubeManageAccounts(app)
         try dismissYouTubeAccountSwitcher(app)
         surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
-        Thread.sleep(forTimeInterval: 0.8)
-        if try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.50, maximumVisionY: 0.94) {
+        Thread.sleep(forTimeInterval: 1.2)
+        if try waitForExactHandleUsingOCR(normalized: normalized, timeout: 3, minimumVisionY: 0.50, maximumVisionY: 0.94) {
             activeHandles["youtube"] = handle
             surface.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
             return
         }
 
+        var switcherReady = try openYouTubeAccountSwitcher(
+            app: app, surface: surface, command: command, timeout: 12
+        )
+        if !switcherReady {
+            // A reboot helping this screen is evidence that YouTube can retain
+            // a blank account surface. Bound recovery to one app relaunch,
+            // then require the switcher to render before identity scanning.
+            app.terminate()
+            Thread.sleep(forTimeInterval: 0.8)
+            app.launch()
+            guard app.wait(for: .runningForeground, timeout: 12) else {
+                throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "YouTube did not return to foreground while recovering its account switcher"])
+            }
+            surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
+            Thread.sleep(forTimeInterval: 1.5)
+            switcherReady = try openYouTubeAccountSwitcher(
+                app: app, surface: surface, command: command, timeout: 12
+            )
+        }
+        guard switcherReady else {
+            throw NSError(domain: "HeissRunner", code: 21, userInfo: [NSLocalizedDescriptionKey: "YouTube account switcher did not finish loading after bounded relaunch recovery"])
+        }
+
+        var selection = try selectYouTubeAccount(
+            surface: surface,
+            normalized: normalized,
+            hints: accountPickerHints(command),
+            maxViewports: 3
+        )
+        if !selection.selected,
+           try screenContainsTextUsingOCR("Use YouTube signed out"),
+           try tapTextUsingOCR(surface: surface, expected: "Use YouTube signed out") {
+            // On compact iPhones, YouTube's expanded six-action footer can
+            // permanently cover the final account rows at the scroll limit.
+            // Signed-out mode collapses that footer to two harmless actions;
+            // reopen the switcher and make the real, verified selection.
+            Thread.sleep(forTimeInterval: 1.2)
+            let reopened = try openYouTubeAccountSwitcher(
+                app: app, surface: surface, command: command, timeout: 8
+            )
+            if reopened {
+                let retry = try selectYouTubeAccount(
+                    surface: surface,
+                    normalized: normalized,
+                    hints: accountPickerHints(command),
+                    maxViewports: 4
+                )
+                selection = (
+                    selected: retry.selected,
+                    inspected: selection.inspected + ["signed-out footer reset"] + retry.inspected
+                )
+            }
+        }
+        let selected = selection.selected
+        guard selected else {
+            let inspected = selection.inspected.enumerated()
+                .map { "view\($0.offset + 1): \($0.element)" }
+                .joined(separator: "; ")
+            throw NSError(domain: "HeissRunner", code: 5, userInfo: [NSLocalizedDescriptionKey: "Account \(handle) was not found after scrolling the youtube switcher. OCR: \(inspected)"])
+        }
+        Thread.sleep(forTimeInterval: 1.8)
+        // YouTube sometimes leaves the sheet open after selecting the already-
+        // active channel. Close it explicitly; exact verification below still
+        // decides whether the selection was safe and correct.
+        try dismissYouTubeAccountSwitcher(app)
+
+        // Offscreen Google-identity changes can leave YouTube on a black
+        // channel-loading skeleton for several seconds. Give the selected
+        // channel time to render before issuing another navigation tap.
+        var verified = try waitForExactHandleUsingOCR(
+            normalized: normalized, timeout: 12, minimumVisionY: 0.50, maximumVisionY: 0.94
+        )
+        if !verified {
+            // A relaunch preserves the chosen account but clears YouTube's
+            // wedged transition surface. Bound this recovery to one attempt.
+            app.terminate()
+            Thread.sleep(forTimeInterval: 0.8)
+            app.launch()
+            guard app.wait(for: .runningForeground, timeout: 12) else {
+                throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "YouTube did not return after account-transition recovery"])
+            }
+        }
+        surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
+        Thread.sleep(forTimeInterval: 1.5)
+        if !verified {
+            verified = try waitForExactHandleUsingOCR(
+                normalized: normalized, timeout: 8, minimumVisionY: 0.50, maximumVisionY: 0.94
+            )
+        }
+        if !verified {
+            let channel = app.descendants(matching: .any).matching(
+                NSPredicate(format: "label CONTAINS[c] %@ OR label CONTAINS[c] %@", "View channel", "Your channel")
+            ).firstMatch
+            if channel.waitForExistence(timeout: 2), channel.isHittable {
+                channel.tap()
+                Thread.sleep(forTimeInterval: 1.5)
+                verified = try waitForExactHandleUsingOCR(
+                    normalized: normalized, timeout: 8, minimumVisionY: 0.50, maximumVisionY: 0.94
+                )
+            }
+        }
+        guard verified else {
+            let inspected = selection.inspected.enumerated()
+                .map { "view\($0.offset + 1): \($0.element)" }
+                .joined(separator: "; ")
+            throw NSError(domain: "HeissRunner", code: 15, userInfo: [NSLocalizedDescriptionKey: "YouTube selected a row but did not verify exact handle \(handle). OCR switcher views: \(inspected)"])
+        }
+        activeHandles["youtube"] = handle
+        surface.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
+    }
+
+    private func openYouTubeAccountSwitcher(
+        app: XCUIApplication,
+        surface: XCUIElement,
+        command: [String: Any],
+        timeout: TimeInterval
+    ) throws -> Bool {
         let switchAccount = app.descendants(matching: .any).matching(
             NSPredicate(
                 format: "label ==[c] %@ OR label CONTAINS[c] %@ OR identifier CONTAINS[c] %@",
@@ -1192,42 +1413,75 @@ final class HeissRunnerUITests: XCTestCase {
         if switchAccount.waitForExistence(timeout: 2), switchAccount.isHittable {
             switchAccount.tap()
         } else {
-            // Stable account-header position in the You tab (avatar/name/chevron).
             surface.coordinate(withNormalizedOffset: point(command, "accountMenu", .init(dx: 0.30, dy: 0.12))).tap()
         }
-        Thread.sleep(forTimeInterval: 1.0)
-        var selected = try tapExactHandleUsingOCR(surface: surface, normalized: normalized)
-        if !selected {
-            for hint in accountPickerHints(command) where !selected {
-                selected = try tapTextUsingOCR(surface: surface, expected: hint)
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if try screenContainsTextUsingOCR("Other accounts")
+                || screenContainsTextUsingOCR("Manage accounts on this device") {
+                return true
             }
-        }
-        guard selected else {
-            throw NSError(domain: "HeissRunner", code: 5, userInfo: [NSLocalizedDescriptionKey: "Account \(handle) was not found in the youtube switcher"])
-        }
-        Thread.sleep(forTimeInterval: 1.2)
+            Thread.sleep(forTimeInterval: 0.5)
+        } while Date() < deadline
+        return false
+    }
 
-        surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
-        Thread.sleep(forTimeInterval: 1.0)
-        if !(try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.50, maximumVisionY: 0.94)) {
-            let channel = app.descendants(matching: .any).matching(
-                NSPredicate(format: "label CONTAINS[c] %@ OR label CONTAINS[c] %@", "View channel", "Your channel")
-            ).firstMatch
-            if channel.waitForExistence(timeout: 2), channel.isHittable {
-                channel.tap()
+    private func selectYouTubeAccount(
+        surface: XCUIElement,
+        normalized: String,
+        hints: [String],
+        maxViewports: Int
+    ) throws -> (selected: Bool, inspected: [String]) {
+        var inspected: [String] = []
+        for viewport in 0..<maxViewports {
+            let observations = try recognizedTextObservationsUsingOCR()
+            inspected.append(observations.compactMap { $0.topCandidates(1).first?.string }
+                .prefix(12).joined(separator: " | "))
+            let eligible = observations.filter {
+                let screenY = 1.0 - $0.boundingBox.midY
+                return screenY >= 0.12 && screenY <= 0.82
+            }
+            if let exact = eligible.first(where: { observation in
+                observation.topCandidates(3).contains {
+                    textContainsExactHandle($0.string, normalized: normalized)
+                }
+            }) {
+                let box = exact.boundingBox
+                surface.coordinate(withNormalizedOffset: CGVector(dx: box.midX, dy: 1.0 - box.midY)).tap()
+                return (true, inspected)
+            }
+            for hint in hints {
+                if let match = eligible.first(where: { observation in
+                    observation.topCandidates(3).contains {
+                        $0.string.range(of: hint, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+                    }
+                }) {
+                    let box = match.boundingBox
+                    surface.coordinate(withNormalizedOffset: CGVector(dx: box.midX, dy: 1.0 - box.midY)).tap()
+                    return (true, inspected)
+                }
+            }
+            if viewport < maxViewports - 1 {
+                // Keep both endpoints inside the scrollable account rows and
+                // above YouTube's fixed action menu at the bottom.
+                // After the first viewport, start higher so the last visible
+                // account row cannot absorb every subsequent drag.
+                let startY: CGFloat = viewport == 0 ? 0.57 : 0.45
+                let start = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: startY))
+                let end = surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.15))
+                start.press(forDuration: 0.10, thenDragTo: end)
                 Thread.sleep(forTimeInterval: 1.0)
             }
         }
-        guard try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.50, maximumVisionY: 0.94) else {
-            throw NSError(domain: "HeissRunner", code: 15, userInfo: [NSLocalizedDescriptionKey: "Account switch did not verify exact handle \(handle) on youtube"])
-        }
-        activeHandles["youtube"] = handle
-        surface.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
+        return (false, inspected)
     }
 
     private func dismissYouTubeAccountSwitcher(_ app: XCUIApplication) throws {
-        let switcherVisible = try screenContainsTextUsingOCR("Other accounts")
-            && screenContainsTextUsingOCR("Manage accounts on this device")
+        // "Other accounts" scrolls offscreen with the account rows, while the
+        // action menu is fixed. Key dismissal to its unique persistent label
+        // so a successful offscreen account selection cannot leave the sheet
+        // open and turn the following profile tap into "Manage accounts".
+        let switcherVisible = try screenContainsTextUsingOCR("Manage accounts on this device")
         guard switcherVisible else { return }
         let close = app.buttons.matching(
             NSPredicate(format: "label ==[c] %@ OR label ==[c] %@", "Close", "Cancel")
@@ -1238,10 +1492,10 @@ final class HeissRunnerUITests: XCTestCase {
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.052, dy: 0.063)).press(forDuration: 0.08)
         }
         let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline, try screenContainsTextUsingOCR("Other accounts") {
+        while Date() < deadline, try screenContainsTextUsingOCR("Manage accounts on this device") {
             Thread.sleep(forTimeInterval: 0.4)
         }
-        if try screenContainsTextUsingOCR("Other accounts") {
+        if try screenContainsTextUsingOCR("Manage accounts on this device") {
             throw NSError(domain: "HeissRunner", code: 20, userInfo: [NSLocalizedDescriptionKey: "YouTube account switcher could not be closed"])
         }
         Thread.sleep(forTimeInterval: 0.4)
@@ -1318,15 +1572,27 @@ final class HeissRunnerUITests: XCTestCase {
 
     private func textContainsExactHandle(_ raw: String, normalized: String) -> Bool {
         let escaped = NSRegularExpression.escapedPattern(for: normalized.lowercased())
-        let pattern = "(^|[^a-z0-9._])@?\(escaped)($|[^a-z0-9._])"
+        // A login such as "arete11plus@gmail.com" is identity metadata, not
+        // proof of the public @arete11plus channel. Never let an email's local
+        // part satisfy exact public-handle matching.
+        let pattern = "(^|[^a-z0-9._])@?\(escaped)(?!@)($|[^a-z0-9._])"
         return raw.lowercased().range(of: pattern, options: .regularExpression) != nil
     }
 
-    private func tapExactHandleUsingOCR(surface: XCUIElement, normalized: String) throws -> Bool {
+    private func tapExactHandleUsingOCR(
+        surface: XCUIElement,
+        normalized: String,
+        minimumScreenY: CGFloat = 0.05,
+        maximumScreenY: CGFloat = 0.92
+    ) throws -> Bool {
         // Account rows live between the status bar and bottom navigation.
         // Cropping prevents a matching handle in the underlying feed from
         // being mistaken for the switcher row.
-        guard let match = try recognizedHandleObservation(normalized: normalized, minimumVisionY: 0.08, maximumVisionY: 0.95) else { return false }
+        guard let match = try recognizedHandleObservation(
+            normalized: normalized,
+            minimumVisionY: 1.0 - maximumScreenY,
+            maximumVisionY: 1.0 - minimumScreenY
+        ) else { return false }
         let box = match.boundingBox
         surface.coordinate(withNormalizedOffset: CGVector(dx: box.midX, dy: 1.0 - box.midY)).tap()
         return true
@@ -1389,14 +1655,21 @@ final class HeissRunnerUITests: XCTestCase {
         }
     }
 
-    private func tapTextUsingOCR(surface: XCUIElement, expected: String) throws -> Bool {
+    private func tapTextUsingOCR(
+        surface: XCUIElement,
+        expected: String,
+        minimumScreenY: CGFloat = 0,
+        maximumScreenY: CGFloat = 1
+    ) throws -> Bool {
         guard let image = UIImage(data: XCUIScreen.main.screenshot().pngRepresentation)?.cgImage else { return false }
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
         try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
         guard let observation = (request.results ?? []).first(where: { observation in
-            observation.topCandidates(3).contains {
+            let screenY = 1.0 - observation.boundingBox.midY
+            return screenY >= minimumScreenY && screenY <= maximumScreenY
+                && observation.topCandidates(3).contains {
                 $0.string.range(of: expected, options: [.caseInsensitive, .diacriticInsensitive]) != nil
             }
         }) else { return false }
@@ -1416,6 +1689,15 @@ final class HeissRunnerUITests: XCTestCase {
             .compactMap { $0.topCandidates(1).first?.string }
             .prefix(12)
             .map { $0 }
+    }
+
+    private func recognizedTextObservationsUsingOCR() throws -> [VNRecognizedTextObservation] {
+        guard let image = UIImage(data: XCUIScreen.main.screenshot().pngRepresentation)?.cgImage else { return [] }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
+        return request.results ?? []
     }
 
     private func recognizedHandleObservation(

@@ -122,20 +122,26 @@ export function parseDeviceList(json: unknown): UsbIphone[] {
       : hw.productType
         ? String(hw.productType)
         : undefined;
-    const state = String(
-      d.deviceState ?? conn.tunnelState ?? d.state ?? "unknown",
-    ).toLowerCase();
+    const deviceState = String(d.deviceState ?? d.state ?? "").toLowerCase();
+    const tunnelState = String(conn.tunnelState ?? "").toLowerCase();
+    // CoreDevice can briefly report deviceState="unavailable" while its
+    // wired tunnel remains connected (notably while an XCTest host relaunches).
+    // Treat the transport/tunnel pair as authoritative for USB reachability.
+    const state = tunnelState.includes("connected")
+      ? tunnelState
+      : deviceState || tunnelState || "unknown";
     const paired =
       Boolean(conn.pairingState === "paired" || d.paired === true) ||
       state.includes("available") ||
       state.includes("connected");
     const reachable =
+      tunnelState.includes("connected") ||
       state.includes("available") ||
       state.includes("connected") ||
       Boolean(conn.transportType);
     const transport = conn.transportType ? String(conn.transportType) : undefined;
     const isUsb = Boolean(transport && /usb|wired/i.test(transport));
-    const available = reachable && isUsb;
+    const available = reachable && isUsb && !tunnelState.includes("disconnected");
     // Exclude simulators / virtual devices
     const isSim =
       String(hw.deviceType ?? d.deviceType ?? "")

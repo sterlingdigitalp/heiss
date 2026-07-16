@@ -108,6 +108,25 @@ describe("USB device list parsing", () => {
     assert.equal(devices.find((device) => device.udid === "AAAA-BBBB")?.available, true);
     assert.equal(devices.find((device) => device.udid === "WIFI-1")?.available, false);
   });
+
+  it("keeps a wired connected tunnel online during a transient unavailable device state", () => {
+    const [device] = parseDeviceList({
+      result: {
+        devices: [{
+          identifier: "WIRED-1",
+          deviceState: "unavailable",
+          hardwareProperties: { deviceType: "iPhone", productType: "iPhone14,6" },
+          connectionProperties: {
+            pairingState: "paired",
+            transportType: "wired",
+            tunnelState: "connected",
+          },
+        }],
+      },
+    });
+    assert.equal(device?.state, "connected");
+    assert.equal(device?.available, true);
+  });
 });
 
 describe("signing plans", () => {
