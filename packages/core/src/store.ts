@@ -188,13 +188,27 @@ export class JsonStore {
     }
     // A persisted "running" session means the owning process disappeared
     // before a clean completion. Recover it through the checkpoint path.
+    const orphaned = new Set<string>();
     for (const session of this.state.sessions) {
       if (session.status === "running" && !pidIsAlive(session.ownerPid)) {
         session.status = "checkpointed";
+        orphaned.add(session.id);
       }
     }
+    // A session orphaned by a dead controller must not keep the device or
+    // content locked. Its resume re-acquires cleanly, and releasing the stale
+    // lock frees the device for other consumers (the preflight canary, a fresh
+    // controller) instead of blocking it until a full resume happens to run.
+    const locks = this.state.locks ?? { devices: {}, content: {} };
+    for (const [deviceId, holder] of Object.entries(locks.devices)) {
+      if (orphaned.has(holder)) delete locks.devices[deviceId];
+    }
+    for (const [itemId, holder] of Object.entries(locks.content)) {
+      if (orphaned.has(holder)) delete locks.content[itemId];
+    }
+    this.state.locks = locks;
     this.locks = new ResourceLocks();
-    this.locks.restore(this.state.locks ?? { devices: {}, content: {} });
+    this.locks.restore(locks);
   }
 
   save(): void {

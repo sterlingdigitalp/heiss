@@ -346,6 +346,10 @@ describe("farm orchestrator (shipped path)", () => {
     store.locks.acquireDevice(account.deviceId, "crashed"); store.save();
     const recovered = new JsonStore(path);
     assert.equal(recovered.state.sessions[0]!.status, "checkpointed");
+    // A daemon killed mid-session must not strand the device lock: the reload
+    // recovers the session AND frees the lock so other consumers aren't blocked.
+    assert.equal(recovered.locks.isDeviceLocked(account.deviceId), false);
+    assert.deepEqual(recovered.state.locks.devices, {});
     const result = await new FarmOrchestrator(recovered, new RecordingDriver()).runOnce({ runnerId: "r", timeOfDay: "09:00" });
     assert.equal(result.sessions[0]!.status, "completed");
   });
