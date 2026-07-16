@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.16.10"
+private let heissRunnerBuild = "heiss-runner-2026.07.16.11"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -229,13 +229,13 @@ final class HeissRunnerUITests: XCTestCase {
         }
         let handle = command["handle"] as? String ?? ""
         if action != "post:verify_published" {
-            try ensureAccount(app, platform: platform, handle: handle, command: command)
+            try ensureAccountVerified(app, platform: platform, handle: handle, command: command)
             if app.state != .runningForeground {
                 app.activate()
                 guard app.wait(for: .runningForeground, timeout: 8) else {
                     throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) lost foreground before \(action)"])
                 }
-                try ensureAccount(app, platform: platform, handle: handle, command: command)
+                try ensureAccountVerified(app, platform: platform, handle: handle, command: command)
             }
         }
         if action == "verify:account" {
@@ -462,7 +462,7 @@ final class HeissRunnerUITests: XCTestCase {
         do {
             try sweepKnownOverlays(app: app, platform: platform)
             try assertNoBlockingOverlay(app: app, platform: platform)
-            try ensureAccount(app, platform: platform, handle: handle, command: command)
+            try ensureAccountVerified(app, platform: platform, handle: handle, command: command)
             guard app.state == .runningForeground else {
                 throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) lost foreground before batched session"])
             }
@@ -494,7 +494,7 @@ final class HeissRunnerUITests: XCTestCase {
                 // session verification, avoiding the repetitive checks that
                 // otherwise wedge the app and false-flag a flaky switcher read.
                 if disrupted || step.contains("follow") {
-                    try ensureAccount(app, platform: platform, handle: handle, command: command)
+                    try ensureAccountVerified(app, platform: platform, handle: handle, command: command)
                     guard app.state == .runningForeground else {
                         throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) lost foreground re-verifying account at step \(completed + 1)"])
                     }
@@ -1123,6 +1123,63 @@ final class HeissRunnerUITests: XCTestCase {
         if try screenContainsTextUsingOCR("Swipe up") {
             throw NSError(domain: "HeissRunner", code: 18, userInfo: [NSLocalizedDescriptionKey: "TikTok swipe tutorial did not dismiss after three gestures"])
         }
+    }
+
+    /// Verify the active account, self-remediating first. When verification
+    /// fails on an identity/UI mismatch, mimic the manual post-onboarding
+    /// cleanup — return toward Home, clear overlays, and scroll the feed a few
+    /// times — then retry, up to three attempts. Only a persistent failure
+    /// escalates to the human attention queue. Transport/navigation errors are
+    /// not remediated here; they retry through their own recovery paths.
+    private func ensureAccountVerified(_ app: XCUIApplication, platform: String, handle: String, command: [String: Any]) throws {
+        guard !handle.isEmpty else { return }
+        var lastError: Error?
+        for attempt in 0..<3 {
+            do {
+                try ensureAccount(app, platform: platform, handle: handle, command: command)
+                return
+            } catch {
+                lastError = error
+                let kind = failureKind(error)
+                guard (kind == "account_mismatch" || kind == "unknown_ui"), attempt < 2 else { throw error }
+                try remediateBeforeReverify(app: app, platform: platform, command: command)
+            }
+        }
+        throw lastError ?? NSError(domain: "HeissRunner", code: 15, userInfo: [
+            NSLocalizedDescriptionKey: "Account \(handle) could not be verified on \(platform) after remediation",
+            "failureKind": "account_mismatch",
+        ])
+    }
+
+    private func remediateBeforeReverify(app: XCUIApplication, platform: String, command: [String: Any]) throws {
+        let surface: XCUIElement
+        if platform == "tiktok" || platform == "x" {
+            let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            disableAutomaticInterruptionHandling(springboard)
+            surface = platform == "tiktok" ? springboard.windows.firstMatch : springboard
+        } else {
+            surface = app.windows.firstMatch
+        }
+        if app.state != .runningForeground {
+            app.activate()
+            _ = app.wait(for: .runningForeground, timeout: 8)
+        }
+        // Return toward Home so the next verification starts from a known state
+        // instead of a lingering search-results or profile surface.
+        let homeDy: CGFloat = platform == "youtube" ? 0.965 : 0.95
+        surface.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: homeDy))).tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        try? sweepKnownOverlays(app: app, platform: platform)
+        // Harmless feed scrolls settle first-run pop-ups the same way a manual
+        // pass would, then a final overlay sweep clears whatever they surfaced.
+        for _ in 0..<2 {
+            surface.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.72))
+                .press(forDuration: 0.08, thenDragTo: surface.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.32)))
+            Thread.sleep(forTimeInterval: 0.6)
+        }
+        try? sweepKnownOverlays(app: app, platform: platform)
+        surface.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: homeDy))).tap()
+        Thread.sleep(forTimeInterval: 0.8)
     }
 
     private func ensureAccount(_ app: XCUIApplication, platform: String, handle: String, command: [String: Any]) throws {
