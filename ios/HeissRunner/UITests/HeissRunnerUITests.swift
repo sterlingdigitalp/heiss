@@ -236,35 +236,36 @@ final class HeissRunnerUITests: XCTestCase {
                 }
             } else {
                 if platform == "youtube" {
-                    let readyDeadline = Date().addingTimeInterval(15)
-                    var navigationReady = false
-                    while Date() < readyDeadline {
-                        navigationReady = try screenContainsTextUsingOCR("Home")
-                        if !navigationReady { navigationReady = try screenContainsTextUsingOCR("Shorts") }
-                        if navigationReady { break }
-                        if try screenContainsTextUsingOCR("Default Account") {
-                            try dismissYouTubeDefaultAccountPrompt(app)
-                            try ensureAccount(app, platform: platform, handle: handle, command: command)
-                            continue
+                    if !waitForSearchField(app, timeout: 0.2) {
+                        let readyDeadline = Date().addingTimeInterval(15)
+                        var navigationReady = false
+                        while Date() < readyDeadline {
+                            navigationReady = try screenContainsTextUsingOCR("Home")
+                            if !navigationReady { navigationReady = try screenContainsTextUsingOCR("Shorts") }
+                            if navigationReady { break }
+                            if try screenContainsTextUsingOCR("Default Account") {
+                                try dismissYouTubeDefaultAccountPrompt(app)
+                                try ensureAccount(app, platform: platform, handle: handle, command: command)
+                                continue
+                            }
+                            Thread.sleep(forTimeInterval: 0.5)
                         }
-                        Thread.sleep(forTimeInterval: 0.5)
-                    }
-                    guard navigationReady else {
-                        throw NSError(domain: "HeissRunner", code: 21, userInfo: [NSLocalizedDescriptionKey: "YouTube navigation did not finish loading before search"])
+                        guard navigationReady else {
+                            throw NSError(domain: "HeissRunner", code: 21, userInfo: [NSLocalizedDescriptionKey: "YouTube navigation did not finish loading before search"])
+                        }
                     }
                 }
                 let notNow = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Not now"))
                 if notNow.count > 0, notNow.firstMatch.isHittable { notNow.firstMatch.tap() }
-                let searchButtons = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search"))
-                if searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
-                else {
-                    let fallback: CGVector
-                    if platform == "x" { fallback = CGVector(dx: 0.30, dy: 0.95) }
-                    // YouTube Shorts places Search immediately left of the
-                    // overflow menu; 0.88 hits the menu on compact iPhones.
-                    else if platform == "youtube" { fallback = CGVector(dx: 0.79, dy: 0.065) }
-                    else { fallback = CGVector(dx: 0.50, dy: 0.94) }
-                    window.coordinate(withNormalizedOffset: point(command, "search", fallback)).tap()
+                if platform == "youtube" {
+                    try openYouTubeSearch(app: app, surface: window, command: command)
+                } else {
+                    let searchButtons = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search"))
+                    if searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
+                    else {
+                        let fallback = platform == "x" ? CGVector(dx: 0.30, dy: 0.95) : CGVector(dx: 0.50, dy: 0.94)
+                        window.coordinate(withNormalizedOffset: point(command, "search", fallback)).tap()
+                    }
                 }
             }
             Thread.sleep(forTimeInterval: 0.8)
@@ -272,6 +273,7 @@ final class HeissRunnerUITests: XCTestCase {
             let terms = command["searchTerms"] as? [String] ?? []
             if fields.count > 0, let term = terms.randomElement() {
                 let field = fields.firstMatch
+                if platform == "youtube" { clearYouTubeSearchField(app: app, surface: window, field: field) }
                 if platform == "tiktok" {
                     window.coordinate(withNormalizedOffset: CGVector(dx: 0.42, dy: 0.06)).tap()
                 } else if field.isHittable { field.tap() }
@@ -296,6 +298,9 @@ final class HeissRunnerUITests: XCTestCase {
                         NSPredicate(format: "label ==[c] %@ OR label ==[c] %@ OR label ==[c] %@", "Search", "Return", "Go")
                     ).firstMatch
                     if submit.waitForExistence(timeout: 2), submit.isHittable { submit.tap() }
+                    else if platform == "youtube" {
+                        window.coordinate(withNormalizedOffset: CGVector(dx: 0.87, dy: 0.96)).tap()
+                    }
                 }
             } else {
                 throw NSError(domain: "HeissRunner", code: 12, userInfo: [NSLocalizedDescriptionKey: "Search field was not found after opening (platform) search"])
@@ -477,6 +482,63 @@ final class HeissRunnerUITests: XCTestCase {
         }
     }
 
+    private func waitForSearchField(_ app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if app.searchFields.firstMatch.exists || app.textFields.firstMatch.exists { return true }
+            Thread.sleep(forTimeInterval: 0.2)
+        } while Date() < deadline
+        return false
+    }
+
+    private func tapVisibleYouTubeSearchButton(_ app: XCUIApplication) -> Bool {
+        let buttons = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search"))
+        for button in buttons.allElementsBoundByIndex.reversed() where button.exists && button.isHittable {
+            button.tap()
+            if waitForSearchField(app, timeout: 2.5) { return true }
+        }
+        return false
+    }
+
+    private func openYouTubeSearch(
+        app: XCUIApplication,
+        surface: XCUIElement,
+        command: [String: Any]
+    ) throws {
+        if waitForSearchField(app, timeout: 0.2) { return }
+        if tapVisibleYouTubeSearchButton(app) { return }
+
+        // YouTube collapses its top toolbar after feed scrolling. Returning to
+        // the active Home tab restores it before trying bounded coordinates.
+        surface.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.965))).tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        if tapVisibleYouTubeSearchButton(app) { return }
+
+        let configured = point(command, "search", .init(dx: 0.93, dy: 0.060))
+        let anchors = [configured, CGVector(dx: 0.93, dy: 0.060), CGVector(dx: 0.90, dy: 0.070)]
+        for anchor in anchors {
+            surface.coordinate(withNormalizedOffset: anchor).tap()
+            if waitForSearchField(app, timeout: 2.5) { return }
+        }
+        throw NSError(
+            domain: "HeissRunner",
+            code: 12,
+            userInfo: [NSLocalizedDescriptionKey: "YouTube Search control did not reveal a search field after restoring the Home toolbar"]
+        )
+    }
+
+    private func clearYouTubeSearchField(app: XCUIApplication, surface: XCUIElement, field: XCUIElement) {
+        guard let value = field.value as? String else { return }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty, !normalized.contains("search youtube") else { return }
+        let clear = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "Clear")
+        ).firstMatch
+        if clear.waitForExistence(timeout: 1), clear.isHittable { clear.tap() }
+        else { surface.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.063)).tap() }
+        Thread.sleep(forTimeInterval: 0.3)
+    }
+
     private func performWarmupStep(
         _ action: String,
         app: XCUIApplication,
@@ -514,25 +576,29 @@ final class HeissRunnerUITests: XCTestCase {
             }
         } else {
             if platform == "youtube" {
-                let deadline = Date().addingTimeInterval(15)
-                var ready = false
-                while Date() < deadline {
-                    ready = try screenContainsTextUsingOCR("Home") || screenContainsTextUsingOCR("Shorts")
-                    if ready { break }
-                    try sweepKnownOverlays(app: app, platform: platform)
-                    Thread.sleep(forTimeInterval: 0.5)
-                }
-                guard ready else {
-                    throw NSError(domain: "HeissRunner", code: 21, userInfo: [NSLocalizedDescriptionKey: "YouTube navigation did not finish loading before search"])
+                if !waitForSearchField(app, timeout: 0.2) {
+                    let deadline = Date().addingTimeInterval(15)
+                    var ready = false
+                    while Date() < deadline {
+                        ready = try screenContainsTextUsingOCR("Home") || screenContainsTextUsingOCR("Shorts")
+                        if ready { break }
+                        try sweepKnownOverlays(app: app, platform: platform)
+                        Thread.sleep(forTimeInterval: 0.5)
+                    }
+                    guard ready else {
+                        throw NSError(domain: "HeissRunner", code: 21, userInfo: [NSLocalizedDescriptionKey: "YouTube navigation did not finish loading before search"])
+                    }
                 }
             }
-            let searchButtons = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search"))
-            if searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
-            else {
-                let fallback = platform == "x"
-                    ? CGVector(dx: 0.30, dy: 0.95)
-                    : platform == "youtube" ? CGVector(dx: 0.79, dy: 0.065) : CGVector(dx: 0.50, dy: 0.94)
-                window.coordinate(withNormalizedOffset: point(command, "search", fallback)).tap()
+            if platform == "youtube" {
+                try openYouTubeSearch(app: app, surface: window, command: command)
+            } else {
+                let searchButtons = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search"))
+                if searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
+                else {
+                    let fallback = platform == "x" ? CGVector(dx: 0.30, dy: 0.95) : CGVector(dx: 0.50, dy: 0.94)
+                    window.coordinate(withNormalizedOffset: point(command, "search", fallback)).tap()
+                }
             }
         }
         Thread.sleep(forTimeInterval: 0.8)
@@ -542,6 +608,7 @@ final class HeissRunnerUITests: XCTestCase {
             throw NSError(domain: "HeissRunner", code: 12, userInfo: [NSLocalizedDescriptionKey: "Search field was not found after opening platform search"])
         }
         let field = fields.firstMatch
+        if platform == "youtube" { clearYouTubeSearchField(app: app, surface: window, field: field) }
         if platform == "tiktok" { window.coordinate(withNormalizedOffset: CGVector(dx: 0.42, dy: 0.06)).tap() }
         else if field.isHittable { field.tap() }
         else { field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
@@ -563,6 +630,9 @@ final class HeissRunnerUITests: XCTestCase {
                 NSPredicate(format: "label ==[c] %@ OR label ==[c] %@ OR label ==[c] %@", "Search", "Return", "Go")
             ).firstMatch
             if submit.waitForExistence(timeout: 2), submit.isHittable { submit.tap() }
+            else if platform == "youtube" {
+                window.coordinate(withNormalizedOffset: CGVector(dx: 0.87, dy: 0.96)).tap()
+            }
         }
     }
 
@@ -1098,17 +1168,15 @@ final class HeissRunnerUITests: XCTestCase {
         // YouTube's current iOS UI puts account identity under the bottom
         // "You" tab. A channel page has a back arrow where the old profile
         // menu used to be, so always return to You before switching.
+        try dismissYouTubeManageAccounts(app)
+        try dismissYouTubeAccountSwitcher(app)
         surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
         Thread.sleep(forTimeInterval: 1.0)
         try dismissYouTubeDefaultAccountPrompt(app)
+        try dismissYouTubeManageAccounts(app)
+        try dismissYouTubeAccountSwitcher(app)
         surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
         Thread.sleep(forTimeInterval: 0.8)
-        if try screenContainsTextUsingOCR("Manage accounts") {
-            surface.coordinate(withNormalizedOffset: CGVector(dx: 0.06, dy: 0.06)).tap()
-            Thread.sleep(forTimeInterval: 0.8)
-            surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
-            Thread.sleep(forTimeInterval: 0.8)
-        }
         if try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.50, maximumVisionY: 0.94) {
             activeHandles["youtube"] = handle
             surface.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
@@ -1157,51 +1225,65 @@ final class HeissRunnerUITests: XCTestCase {
         surface.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
     }
 
-    private func dismissYouTubeDefaultAccountPrompt(_ app: XCUIApplication) throws {
-        guard try screenContainsTextUsingOCR("Default Account") else { return }
-        let surface = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        disableAutomaticInterruptionHandling(surface)
+    private func dismissYouTubeAccountSwitcher(_ app: XCUIApplication) throws {
+        let switcherVisible = try screenContainsTextUsingOCR("Other accounts")
+            && screenContainsTextUsingOCR("Manage accounts on this device")
+        guard switcherVisible else { return }
+        let close = app.buttons.matching(
+            NSPredicate(format: "label ==[c] %@ OR label ==[c] %@", "Close", "Cancel")
+        ).firstMatch
+        if close.waitForExistence(timeout: 1), close.isHittable {
+            close.tap()
+        } else {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.052, dy: 0.063)).press(forDuration: 0.08)
+        }
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, try screenContainsTextUsingOCR("Other accounts") {
+            Thread.sleep(forTimeInterval: 0.4)
+        }
+        if try screenContainsTextUsingOCR("Other accounts") {
+            throw NSError(domain: "HeissRunner", code: 20, userInfo: [NSLocalizedDescriptionKey: "YouTube account switcher could not be closed"])
+        }
+        Thread.sleep(forTimeInterval: 0.4)
+    }
+
+    private func dismissYouTubeManageAccounts(_ app: XCUIApplication) throws {
         // "Manage accounts" is also a row label on the account-switcher sheet
         // that sits UNDER the full-screen manager, so keying detection and
         // dismissal-verification on that title reports false failures after a
         // successful Done tap. The per-account "Remove from this device" rows
         // exist only on the manager screen itself.
-        if try screenContainsTextUsingOCR("Remove from this device") {
-            // This full-screen manager belongs to YouTube, not SpringBoard.
-            // Prefer its native button before falling back to OCR/coordinates
-            // on the system surface (which cannot always deliver this tap).
-            let managerDone = app.buttons.matching(
-                NSPredicate(format: "label ==[c] %@", "Done")
-            ).firstMatch
-            if managerDone.waitForExistence(timeout: 1), managerDone.isHittable {
-                managerDone.tap()
-                Thread.sleep(forTimeInterval: 0.4)
-            }
-            // Some Google account-manager builds expose Done as hittable but
-            // silently ignore XCUIElement.tap(). Re-check the manager state
-            // and deliver an application-coordinate press when necessary.
-            if try screenContainsTextUsingOCR("Remove from this device") {
-                _ = try tapTextUsingOCR(surface: app, expected: "Done")
-                Thread.sleep(forTimeInterval: 0.4)
-            }
-            if try screenContainsTextUsingOCR("Remove from this device") {
-                // The OCR observation is rendered by YouTube even when its
-                // accessibility tree omits the control. Deliver the fallback
-                // through YouTube's own application surface.
-                app.coordinate(withNormalizedOffset: CGVector(dx: 0.89, dy: 0.075)).press(forDuration: 0.08)
-            }
-            let deadline = Date().addingTimeInterval(5)
-            while Date() < deadline, try screenContainsTextUsingOCR("Remove from this device") {
-                Thread.sleep(forTimeInterval: 0.5)
-            }
-            if try screenContainsTextUsingOCR("Remove from this device") {
-                throw NSError(domain: "HeissRunner", code: 20, userInfo: [NSLocalizedDescriptionKey: "YouTube Manage accounts screen could not be dismissed after tapping Done"])
-            }
-            Thread.sleep(forTimeInterval: 0.5)
-            // Done may drop back onto the default-account sheet underneath;
-            // fall through and dismiss that too when it is still visible.
-            if !(try screenContainsTextUsingOCR("Default Account")) { return }
+        guard try screenContainsTextUsingOCR("Remove from this device") else { return }
+        // This full-screen manager belongs to YouTube, not SpringBoard.
+        let managerDone = app.buttons.matching(
+            NSPredicate(format: "label ==[c] %@", "Done")
+        ).firstMatch
+        if managerDone.waitForExistence(timeout: 1), managerDone.isHittable {
+            managerDone.tap()
+            Thread.sleep(forTimeInterval: 0.4)
         }
+        if try screenContainsTextUsingOCR("Remove from this device") {
+            _ = try tapTextUsingOCR(surface: app, expected: "Done")
+            Thread.sleep(forTimeInterval: 0.4)
+        }
+        if try screenContainsTextUsingOCR("Remove from this device") {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.89, dy: 0.075)).press(forDuration: 0.08)
+        }
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, try screenContainsTextUsingOCR("Remove from this device") {
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        if try screenContainsTextUsingOCR("Remove from this device") {
+            throw NSError(domain: "HeissRunner", code: 20, userInfo: [NSLocalizedDescriptionKey: "YouTube Manage accounts screen could not be dismissed after tapping Done"])
+        }
+        Thread.sleep(forTimeInterval: 0.5)
+    }
+
+    private func dismissYouTubeDefaultAccountPrompt(_ app: XCUIApplication) throws {
+        try dismissYouTubeManageAccounts(app)
+        guard try screenContainsTextUsingOCR("Default Account") else { return }
+        let surface = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        disableAutomaticInterruptionHandling(surface)
         let doneButton = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Done")).firstMatch
         if doneButton.waitForExistence(timeout: 1), doneButton.isHittable {
             doneButton.tap()
