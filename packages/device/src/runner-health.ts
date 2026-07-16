@@ -42,7 +42,7 @@ export interface RunnerRepairResult {
   detail: string;
 }
 
-export type DeviceSupervisorAction = RunnerRepairAction | "coredevice_restart" | "unlock_required" | "offline";
+export type DeviceSupervisorAction = RunnerRepairAction | "coredevice_restart" | "restart_deferred" | "unlock_required" | "offline";
 
 export interface DeviceSupervisorResult {
   ok: boolean;
@@ -177,7 +177,14 @@ export async function ensureAutomationRunner(
  */
 export async function superviseDeviceHealth(
   udid: string,
-  opts: { repoRoot?: string; pingTimeoutMs?: number; readyTimeoutMs?: number } = {},
+  opts: {
+    repoRoot?: string;
+    pingTimeoutMs?: number;
+    readyTimeoutMs?: number;
+    /** Restarting CoreDeviceService disrupts every attached device; the caller
+     *  sets this false when another device has active work in flight. */
+    allowServiceRestart?: boolean;
+  } = {},
 ): Promise<DeviceSupervisorResult> {
   const devices = await listUsbIphones().catch(() => []);
   const device = devices.find((candidate) => candidate.udid === udid);
@@ -221,6 +228,13 @@ export async function superviseDeviceHealth(
     }
   }
 
+  if (opts.allowServiceRestart === false) {
+    return {
+      ok: false, action: "restart_deferred",
+      checks: { ...baseChecks, commandChannel: before.pingOk, runnerHeartbeat: before.healthy, protocolCompatible: before.protocolCompatible },
+      detail: `${device.name} runner still unhealthy; CoreDevice restart deferred to avoid disrupting other active devices: ${before.detail}`,
+    };
+  }
   try {
     await execFileAsync("pkill", ["-u", String(process.getuid?.() ?? 0), "-x", "CoreDeviceService"], { timeout: 5_000 });
   } catch { /* service may have already exited */ }

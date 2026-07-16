@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.16.8"
+private let heissRunnerBuild = "heiss-runner-2026.07.16.9"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -58,6 +58,12 @@ final class HeissRunnerUITests: XCTestCase {
         for stale in (try? fm.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil)) ?? [] {
             try? fm.removeItem(at: stale)
         }
+        // Session journals from a prior host must never let a reused sessionId
+        // report recovered progress against a stale plan.
+        let journals = documents().appendingPathComponent("journals", isDirectory: true)
+        for stale in (try? fm.contentsOfDirectory(at: journals, includingPropertiesForKeys: nil)) ?? [] {
+            try? fm.removeItem(at: stale)
+        }
         print("HEISS_COMMAND_SERVER_READY")
 
         // xcodebuild owns the runner process. It is intentionally long-lived so
@@ -80,31 +86,42 @@ final class HeissRunnerUITests: XCTestCase {
     }
 
     private func handle(_ file: URL, outbox: URL) {
+        func respond(_ result: [String: Any], generation: String) {
+            var payload = result
+            payload["protocolVersion"] = heissRunnerProtocolVersion
+            payload["runnerBuild"] = heissRunnerBuild
+            payload["commandGeneration"] = generation
+            if let data = try? JSONSerialization.data(withJSONObject: payload) {
+                try? data.write(to: outbox.appendingPathComponent(file.lastPathComponent), options: .atomic)
+            }
+            try? fm.removeItem(at: file)
+        }
         guard let data = try? Data(contentsOf: file),
-              let command = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { try? fm.removeItem(at: file); return }
-        var result: [String: Any]
+              let command = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else {
+            // A malformed payload still gets a tagged reply so the Mac fails
+            // fast instead of waiting out its transport timeout.
+            respond([
+                "ok": false, "executed": false, "failureKind": "transport",
+                "detail": "Malformed command payload could not be parsed",
+            ], generation: "unknown")
+            return
+        }
+        let generation = command["commandGeneration"] as? String ?? command["id"] as? String ?? "unknown"
         do {
-            result = try perform(command)
+            respond(try perform(command), generation: generation)
         } catch {
             let screenshots = documents().appendingPathComponent("screenshots", isDirectory: true)
             try? fm.createDirectory(at: screenshots, withIntermediateDirectories: true)
             let name = "failure-\(UUID().uuidString).png"
             try? XCUIScreen.main.screenshot().pngRepresentation.write(to: screenshots.appendingPathComponent(name))
-            result = [
-                "ok": false,
-                "executed": false,
+            respond([
+                "ok": false, "executed": false,
+                "failureKind": failureKind(error),
                 "detail": "\(error.localizedDescription) (screenshot: \(name))",
                 "screenshot": name,
-            ]
+            ], generation: generation)
         }
-        result["protocolVersion"] = heissRunnerProtocolVersion
-        result["runnerBuild"] = heissRunnerBuild
-        result["commandGeneration"] = command["commandGeneration"] as? String ?? command["id"] as? String ?? "unknown"
-        if let data = try? JSONSerialization.data(withJSONObject: result) {
-            try? data.write(to: outbox.appendingPathComponent(file.lastPathComponent), options: .atomic)
-        }
-        try? fm.removeItem(at: file)
     }
 
     private func perform(_ command: [String: Any]) throws -> [String: Any] {
@@ -402,9 +419,14 @@ final class HeissRunnerUITests: XCTestCase {
 
         let journalURL = sessionJournalURL(sessionId)
         let prior = readSessionJournal(journalURL)
-        let priorCompleted = prior?["completedSteps"] as? Int ?? 0
+        // Only trust a prior journal that recorded the SAME plan. A reused
+        // sessionId carrying a different plannedSteps must not skip work.
+        // Frozen per-session plans mean legitimate retries still match here,
+        // preserving lost-acknowledgement idempotency.
+        let priorMatches = (prior?["plannedSteps"] as? [String]) == plannedSteps
+        let priorCompleted = priorMatches ? (prior?["completedSteps"] as? Int ?? 0) : 0
         var completed = min(plannedSteps.count, max(requestedStart, priorCompleted))
-        var stepDetails = prior?["stepDetails"] as? [String] ?? Array(repeating: "", count: plannedSteps.count)
+        var stepDetails = (priorMatches ? prior?["stepDetails"] as? [String] : nil) ?? Array(repeating: "", count: plannedSteps.count)
         if stepDetails.count < plannedSteps.count {
             stepDetails.append(contentsOf: Array(repeating: "", count: plannedSteps.count - stepDetails.count))
         }
@@ -458,16 +480,29 @@ final class HeissRunnerUITests: XCTestCase {
                 status: "running", completedSteps: completed, plannedSteps: plannedSteps,
                 stepDetails: stepDetails, error: nil
             )
+            var stepsSinceVerify = 0
             while completed < plannedSteps.count {
-                try sweepKnownOverlays(app: app, platform: platform)
+                let disrupted = try sweepKnownOverlays(app: app, platform: platform)
                 try assertNoBlockingOverlay(app: app, platform: platform)
                 guard app.state == .runningForeground else {
                     throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) lost foreground at step \(completed + 1)"])
+                }
+                // Re-verify the active account when an overlay sweep relaunched
+                // the app, or after a small interval — enough to catch account
+                // drift without the per-step verification that previously kept
+                // stopping the app under its own weight.
+                if disrupted || stepsSinceVerify >= 5 {
+                    try ensureAccount(app, platform: platform, handle: handle, command: command)
+                    guard app.state == .runningForeground else {
+                        throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) lost foreground re-verifying account at step \(completed + 1)"])
+                    }
+                    stepsSinceVerify = 0
                 }
                 let step = plannedSteps[completed]
                 try performWarmupStep(step, app: app, window: window, platform: platform, command: command)
                 stepDetails[completed] = "xctest:\(platform):\(step)"
                 completed += 1
+                stepsSinceVerify += 1
                 writeSessionJournal(
                     journalURL, sessionId: sessionId, platform: platform, handle: handle,
                     commandGeneration: commandGeneration,
@@ -654,52 +689,107 @@ final class HeissRunnerUITests: XCTestCase {
         }
     }
 
-    private func sweepKnownOverlays(app: XCUIApplication, platform: String) throws {
+    /// Returns true when a dismissal relaunched the foreground app, so callers
+    /// mid-session can re-verify the active account before the next gesture.
+    @discardableResult
+    private func sweepKnownOverlays(app: XCUIApplication, platform: String) throws -> Bool {
         let systemUI = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         disableAutomaticInterruptionHandling(systemUI)
+        // System prompts and passkey sheets are cheap SpringBoard element
+        // queries; always sweep them.
         _ = try dismissStaleLimitedPhotosSystemPrompt(
             surface: systemUI.windows.firstMatch,
             app: platform == "tiktok" ? nil : app
         )
         if platform == "instagram" { dismissInstagramSetupPrompt(app) }
+        if platform == "tiktok" { dismissTikTokPasskey() }
+
+        // A single OCR pass gates the per-overlay routines that each otherwise
+        // take their own screenshot. A clean feed — the common case — pays for
+        // one screenshot instead of five. Markers are a superset of every
+        // gated dismissal's own trigger, so nothing is skipped when present.
+        let observations = try recognizedTextObservationsUsingOCR()
+        let overlayMarkers = [
+            "Would Like to Access", "Add to Story", "To access all photos", "change your settings",
+            "Choose your interests", "Find contacts", "Sync contacts", "Swipe up",
+            "Default Account", "Save your login",
+        ]
+        let systemKeepVisible = systemUI.buttons.matching(
+            NSPredicate(format: "label ==[c] %@", "Keep Current Selection")
+        ).firstMatch.exists
+        guard systemKeepVisible || overlayMarkers.contains(where: { observationContains(observations, $0) }) else {
+            return false
+        }
+
+        var relaunched = false
         if platform == "tiktok" {
-            let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-            disableAutomaticInterruptionHandling(springboard)
-            let surface = springboard.windows.firstMatch
-            try dismissTikTokPhotoStoryPrompt(app: app, surface: surface)
-            dismissTikTokPasskey()
+            let surface = systemUI.windows.firstMatch
+            relaunched = try dismissTikTokPhotoStoryPrompt(app: app, surface: surface) || relaunched
             try dismissTikTokInterestsPrompt(surface: surface)
             try dismissTikTokContactsPrompt(surface: surface)
             try dismissTikTokSwipeTutorial(surface: surface)
         }
         if platform == "youtube" { try dismissYouTubeDefaultAccountPrompt(app) }
+        return relaunched
     }
 
-    private func detectPlatformState(app: XCUIApplication, platform: String) throws -> PlatformScreenState {
+    /// Membership test against an already-captured OCR pass — avoids taking a
+    /// fresh screenshot per term.
+    private func observationContains(
+        _ observations: [VNRecognizedTextObservation],
+        _ expected: String,
+        minimumVisionY: CGFloat = 0,
+        maximumVisionY: CGFloat = 1
+    ) -> Bool {
+        observations.contains { observation in
+            observation.boundingBox.midY >= minimumVisionY &&
+            observation.boundingBox.midY <= maximumVisionY && observation.topCandidates(3).contains {
+                $0.string.range(of: expected, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            }
+        }
+    }
+
+    private func detectPlatformState(
+        app: XCUIApplication,
+        platform: String,
+        observations: [VNRecognizedTextObservation]? = nil
+    ) throws -> PlatformScreenState {
+        // One OCR pass classifies the whole screen; callers may pass a shared
+        // capture to avoid a second screenshot in the same step.
+        let obs = try observations ?? recognizedTextObservationsUsingOCR()
         let onboardingTerms = ["Choose your interests", "Sync contacts", "Swipe up", "Default Account", "Save your login"]
-        for term in onboardingTerms {
-            if try screenContainsTextUsingOCR(term) { return .onboardingOverlay }
-        }
+        if onboardingTerms.contains(where: { observationContains(obs, $0) }) { return .onboardingOverlay }
         if platform != "tiktok", app.keyboards.firstMatch.exists { return .search }
-        if try screenContainsTextUsingOCR("Search", minimumVisionY: 0.72, maximumVisionY: 0.96) { return .search }
+        if observationContains(obs, "Search", minimumVisionY: 0.72, maximumVisionY: 0.96) { return .search }
         let switcherTerms = ["Add Instagram account", "Manage accounts", "Switch account", "Add account"]
-        for term in switcherTerms {
-            if try screenContainsTextUsingOCR(term) { return .accountSwitcher }
-        }
-        if try screenContainsTextUsingOCR("Profile", minimumVisionY: 0.55, maximumVisionY: 0.95) { return .profile }
-        if try screenContainsTextUsingOCR("Home", maximumVisionY: 0.30) { return .home }
+        if switcherTerms.contains(where: { observationContains(obs, $0) }) { return .accountSwitcher }
+        if observationContains(obs, "Profile", minimumVisionY: 0.55, maximumVisionY: 0.95) { return .profile }
+        if observationContains(obs, "Home", maximumVisionY: 0.30) { return .home }
         return .unknown
     }
 
     private func assertNoBlockingOverlay(app: XCUIApplication, platform: String) throws {
-        if try detectPlatformState(app: app, platform: platform) == .onboardingOverlay {
-            throw NSError(domain: "HeissRunner", code: 24, userInfo: [NSLocalizedDescriptionKey: "Onboarding overlay remains after bounded cleanup"])
+        let observations = try recognizedTextObservationsUsingOCR()
+        if try detectPlatformState(app: app, platform: platform, observations: observations) == .onboardingOverlay {
+            throw NSError(domain: "HeissRunner", code: 24, userInfo: [
+                NSLocalizedDescriptionKey: "Onboarding overlay remains after bounded cleanup",
+                "failureKind": "unknown_ui",
+            ])
         }
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         disableAutomaticInterruptionHandling(springboard)
-        let appAlertVisible = platform == "tiktok" ? false : app.alerts.count > 0
+        // TikTok's animated tree can wedge app.alerts, so its own consent/
+        // permission sheets are detected from the shared OCR pass instead of
+        // being waved through unconditionally.
+        let tiktokModalMarkers = ["Allow Access", "Don't Allow", "Allow While Using", "Turn On Notifications"]
+        let appAlertVisible = platform == "tiktok"
+            ? tiktokModalMarkers.contains(where: { observationContains(observations, $0) })
+            : app.alerts.count > 0
         if appAlertVisible || springboard.alerts.count > 0 {
-            throw NSError(domain: "HeissRunner", code: 24, userInfo: [NSLocalizedDescriptionKey: "Unexpected popup or permission alert is blocking (platform)"])
+            throw NSError(domain: "HeissRunner", code: 24, userInfo: [
+                NSLocalizedDescriptionKey: "Unexpected popup or permission alert is blocking \(platform)",
+                "failureKind": "unknown_ui",
+            ])
         }
     }
 
@@ -745,14 +835,22 @@ final class HeissRunnerUITests: XCTestCase {
     }
 
     private func failureKind(_ error: Error) -> String {
+        // An explicit classification on the thrown NSError always wins.
+        if let explicit = (error as NSError).userInfo["failureKind"] as? String { return explicit }
         let text = error.localizedDescription.lowercased()
-        if text.contains("account") && (text.contains("not found") || text.contains("verify") || text.contains("exact handle")) {
+        if (text.contains("account") || text.contains("handle") || text.contains("row"))
+            && (text.contains("not found") || text.contains("verify") || text.contains("exact handle") || text.contains("switch")) {
             return "account_mismatch"
         }
-        if text.contains("prompt") || text.contains("onboarding") || text.contains("tutorial") || text.contains("overlay") {
+        if text.contains("popup") || text.contains("alert") || text.contains("blocking") || text.contains("overlay") {
             return "unknown_ui"
         }
-        if text.contains("foreground") || text.contains("navigation") || text.contains("search field") || text.contains("keyboard") {
+        if text.contains("prompt") || text.contains("onboarding") || text.contains("tutorial")
+            || text.contains("interests") || text.contains("contacts") {
+            return "unknown_ui"
+        }
+        if text.contains("foreground") || text.contains("navigation") || text.contains("search field")
+            || text.contains("keyboard") || text.contains("did not finish loading") || text.contains("toolbar") {
             return "app_navigation"
         }
         return "action"
@@ -879,7 +977,10 @@ final class HeissRunnerUITests: XCTestCase {
         return true
     }
 
-    private func dismissTikTokPhotoStoryPrompt(app: XCUIApplication, surface: XCUIElement) throws {
+    /// Returns true when it relaunched TikTok, so the caller can re-verify the
+    /// active account before performing the next engagement gesture.
+    @discardableResult
+    private func dismissTikTokPhotoStoryPrompt(app: XCUIApplication, surface: XCUIElement) throws -> Bool {
         let keepPredicate = NSPredicate(format: "label ==[c] %@", "Keep Current Selection")
         let systemKeep = surface.buttons.matching(keepPredicate).firstMatch
         let photoPromptRendered = try screenContainsTextUsingOCR("Would Like to Access Your Photos")
@@ -904,7 +1005,7 @@ final class HeissRunnerUITests: XCTestCase {
         }
 
         var storyRendered = try screenContainsTextUsingOCR("Add to Story")
-        guard photoPromptVisible || storyRendered else { return }
+        guard photoPromptVisible || storyRendered else { return false }
         // The Photos-limitation banner also has a close glyph, so a generic
         // Close query is ambiguous here. The guarded top-left target belongs
         // specifically to the Story composer and cancels without publishing.
@@ -957,7 +1058,7 @@ final class HeissRunnerUITests: XCTestCase {
             if homeRendered, Date() >= homeEligibleAt {
                 surface.coordinate(withNormalizedOffset: CGVector(dx: 0.10, dy: 0.95)).tap()
                 Thread.sleep(forTimeInterval: 1.0)
-                return
+                return true
             }
             Thread.sleep(forTimeInterval: 0.75)
         }

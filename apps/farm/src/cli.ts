@@ -784,11 +784,11 @@ async function main(): Promise<void> {
     const runnerReinstallAttempts = new Map<string, number>();
     const authority = new SerialCommandAuthority();
     const commandServer = startCommandAuthorityServer(getArg(args, "--data") ?? defaultDataDir(), authority);
-    const superviseAutomationRunner = async (device: { udid: string; name: string }) => {
+    const superviseAutomationRunner = async (device: { udid: string; name: string }, allowServiceRestart: boolean) => {
       const last = runnerRepairAttempts.get(device.udid) ?? 0;
       if (Date.now() - last < 10 * 60 * 1000) return undefined;
       try {
-        const repair = await superviseDeviceHealth(device.udid, { repoRoot: findProjectRoot() });
+        const repair = await superviseDeviceHealth(device.udid, { repoRoot: findProjectRoot(), allowServiceRestart });
         if (repair.action === "none") return repair;
         runnerRepairAttempts.set(device.udid, Date.now());
         notifyDesktop(
@@ -869,22 +869,41 @@ async function main(): Promise<void> {
         const onlineUdids = new Set(store.state.devices.filter((device) => device.online).map((device) => device.udid));
         await renewExpiringRunners(onlineUdids, now);
         if (store.state.devices.some((device) => device.online) && store.state.accounts.length > 0) {
+          // Accounts gated by manual onboarding attention are not actionable;
+          // excluding them keeps "has work" honest so the daemon does not
+          // supervise the device for an account runOnce will only skip.
+          const attentionAccountIds = new Set(
+            store.state.sessions
+              .filter((session) => session.status === "checkpointed" && session.requiresAttention)
+              .map((session) => session.accountId),
+          );
+          const accountActionable = (account: { id: string; preflightStatus?: string }) =>
+            (account.preflightStatus ?? "ready") === "ready" && !attentionAccountIds.has(account.id);
           const dueWarmupIds = store.state.warmupSchedules.filter((schedule) => {
             const account = store.state.accounts.find((candidate) => candidate.id === schedule.accountId);
-            return account && warmupScheduleIsDue(schedule, nowIso, store.state.settings.timeZone, account.lastWarmupAt);
+            return account && accountActionable(account) && warmupScheduleIsDue(schedule, nowIso, store.state.settings.timeZone, account.lastWarmupAt);
           }).map((schedule) => schedule.accountId);
           // Supervise the on-device automation runner whenever this tick has
-          // work to send it — a dead/wedged runner is relaunched first instead
-          // of every action timing out.
+          // actionable work to send it — a dead/wedged runner is relaunched
+          // first instead of every action timing out.
           const retryDue = store.state.sessions.some(
-            (session) => session.status === "checkpointed" && (!session.nextRetryAt || session.nextRetryAt <= nowIso),
+            (session) => session.status === "checkpointed" && !session.requiresAttention
+              && (!session.nextRetryAt || session.nextRetryAt <= nowIso),
           );
           const claimable = store.state.queue.some(
-            (item) => item.status === "queued" || (item.status === "stored_local" && !item.assignedAccountId),
+            (item) => (item.status === "queued" || (item.status === "stored_local" && !item.assignedAccountId))
+              && item.accountIds.some((id) => {
+                const account = store.state.accounts.find((candidate) => candidate.id === id);
+                return account && accountActionable(account);
+              }),
           );
           if (dueWarmupIds.length > 0 || retryDue || claimable) {
-            for (const device of store.state.devices.filter((row) => row.online)) {
-              const health = await superviseAutomationRunner(device);
+            const onlineDevices = store.state.devices.filter((row) => row.online);
+            // Restarting the shared CoreDevice service would disrupt every
+            // attached iPhone; only permit it when this is the sole online one.
+            const allowServiceRestart = onlineDevices.length <= 1;
+            for (const device of onlineDevices) {
+              const health = await superviseAutomationRunner(device, allowServiceRestart);
               if (health) store.state.settings.deviceHealth[device.id] = {
                 checkedAt: new Date().toISOString(), ok: health.ok, action: health.action,
                 detail: health.detail, checks: health.checks,
