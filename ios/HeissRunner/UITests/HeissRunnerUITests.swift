@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.16.9"
+private let heissRunnerBuild = "heiss-runner-2026.07.16.10"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -480,29 +480,28 @@ final class HeissRunnerUITests: XCTestCase {
                 status: "running", completedSteps: completed, plannedSteps: plannedSteps,
                 stepDetails: stepDetails, error: nil
             )
-            var stepsSinceVerify = 0
             while completed < plannedSteps.count {
                 let disrupted = try sweepKnownOverlays(app: app, platform: platform)
                 try assertNoBlockingOverlay(app: app, platform: platform)
                 guard app.state == .runningForeground else {
                     throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) lost foreground at step \(completed + 1)"])
                 }
-                // Re-verify the active account when an overlay sweep relaunched
-                // the app, or after a small interval — enough to catch account
-                // drift without the per-step verification that previously kept
-                // stopping the app under its own weight.
-                if disrupted || stepsSinceVerify >= 5 {
+                let step = plannedSteps[completed]
+                // Re-verify identity only where drift would actually matter: when
+                // an overlay sweep relaunched the app, or immediately before a
+                // follow (the one engagement that is consequential on the wrong
+                // account). Scroll/like/search on the feed stay on the once-per-
+                // session verification, avoiding the repetitive checks that
+                // otherwise wedge the app and false-flag a flaky switcher read.
+                if disrupted || step.contains("follow") {
                     try ensureAccount(app, platform: platform, handle: handle, command: command)
                     guard app.state == .runningForeground else {
                         throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) lost foreground re-verifying account at step \(completed + 1)"])
                     }
-                    stepsSinceVerify = 0
                 }
-                let step = plannedSteps[completed]
                 try performWarmupStep(step, app: app, window: window, platform: platform, command: command)
                 stepDetails[completed] = "xctest:\(platform):\(step)"
                 completed += 1
-                stepsSinceVerify += 1
                 writeSessionJournal(
                     journalURL, sessionId: sessionId, platform: platform, handle: handle,
                     commandGeneration: commandGeneration,
