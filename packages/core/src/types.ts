@@ -65,6 +65,10 @@ export interface Device {
   /** Simulated or physical identifier */
   udid: string;
   online: boolean;
+  /** Hardware model reported by CoreDevice, used for certified capacity. */
+  model?: string;
+  /** Compact devices need stricter per-platform certification limits. */
+  viewportClass?: "compact" | "regular";
   /** Optional SOCKS5 proxy assigned one-per-device. */
   proxyId?: string;
   createdAt: string;
@@ -105,6 +109,10 @@ export interface SocialAccount {
   preflightCompletedAt?: string;
   preflightAppVersion?: string;
   preflightNote?: string;
+  /** Exact public handle most recently proven on-device. */
+  lastVerifiedHandle?: string;
+  identityVerifiedAt?: string;
+  lastCanaryAt?: string;
   stage: AccountStage;
   /** Warmup progress toward maturity (0–100). */
   trustScore: number;
@@ -191,6 +199,37 @@ export interface FarmSettings {
   deviceStates: Record<string, "online" | "offline">;
   /** Notification fingerprints already delivered by the persistent controller. */
   notificationKeys: Record<string, string>;
+  /** Scheduler pause that drains the current checkpoint before maintenance. */
+  maintenance: MaintenanceState;
+  /** Last typed device/runner health result per registered device. */
+  deviceHealth: Record<string, DeviceHealthRecord>;
+  /** Controller heartbeat proves there is one active scheduling authority. */
+  controllerHeartbeatAt?: string;
+  controllerPid?: number;
+}
+
+export interface MaintenanceState {
+  mode: "running" | "draining" | "active";
+  reason?: string;
+  requestedAt?: string;
+  enteredAt?: string;
+  requestedBy?: string;
+}
+
+export interface DeviceHealthRecord {
+  checkedAt: string;
+  ok: boolean;
+  action: string;
+  detail: string;
+  checks: {
+    usb: boolean;
+    paired: boolean;
+    commandChannel: boolean;
+    runnerHeartbeat: boolean;
+    protocolCompatible?: boolean;
+  };
+  runnerProtocolVersion?: number;
+  runnerBuild?: string;
 }
 
 export interface ActivityEvent {

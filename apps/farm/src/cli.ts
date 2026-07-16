@@ -25,6 +25,7 @@ import {
   calendarDay,
   type Platform,
   type AccountStage,
+  assessDeviceCapacity,
 } from "@heiss/core";
 import {
   RealIosDriver,
@@ -52,6 +53,13 @@ import {
 } from "./daemon-agent.js";
 import { createHmac, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import {
+  AUTHORIZED_MUTATION_ENV,
+  SerialCommandAuthority,
+  commandMutatesFarm,
+  forwardToController,
+  startCommandAuthorityServer,
+} from "./command-authority.js";
 
 function usage(): string {
   return `heiss-farm — Heiss local farm controller (real iPhones only)
@@ -85,7 +93,8 @@ Farm:
   heiss-farm account switcher <accountId> "picker label"
   heiss-farm account identity <accountId> [--display-name NAME] [--email EMAIL] [--switcher LABEL] [--avatar HASH]
   heiss-farm account preflight <accountId> <pending|ready|attention> [--app-version VERSION] [--note NOTE]
-  heiss-farm preflight canary [--accounts ID,ID]
+  heiss-farm preflight canary [--accounts ID,ID] [--low-trust-first] [--ring] [--lowest N]
+  heiss-farm preflight verify-all
   heiss-farm preflight health [--udid UDID]
   heiss-farm remove-account <accountId>
   heiss-farm add-slot <accountId> <HH:mm>
@@ -93,6 +102,7 @@ Farm:
   heiss-farm warmup-schedule list | set <accountId> <HH:mm> [--jitter N] | enable <accountId> | disable <accountId> | remove <accountId>
   heiss-farm settings show | timezone <IANA_ZONE> | caps <farm> <account>
   heiss-farm safety stop | resume
+  heiss-farm maintenance enter [--reason TEXT] | exit | status
   heiss-farm data migrate --from DIR
   heiss-farm cancel <queueItemId>
   heiss-farm drop --accounts ID,ID --caption TEXT --media REF [--music M]
@@ -330,6 +340,19 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  // The persistent controller is the sole mutation authority. Desktop and
+  // ad-hoc CLI writes are forwarded to its serialized command queue.
+  if (commandMutatesFarm(args) && process.env[AUTHORIZED_MUTATION_ENV] !== "1") {
+    const dataDir = getArg(args, "--data") ?? defaultDataDir();
+    const forwarded = await forwardToController(dataDir, args);
+    if (forwarded.forwarded) {
+      if (forwarded.stdout) process.stdout.write(forwarded.stdout);
+      if (forwarded.stderr) process.stderr.write(forwarded.stderr);
+      if ((forwarded.code ?? 0) !== 0) process.exitCode = forwarded.code;
+      return;
+    }
+  }
+
   if (cmd === "data" && args[1] === "migrate") {
     const from = getArg(args, "--from");
     if (!from) throw new Error("Usage: data migrate --from DIR [--data DIR]");
@@ -369,6 +392,32 @@ async function main(): Promise<void> {
     const store = openStore(args); store.state.settings.emergencyStop = args[1] === "stop";
     store.pushActivity({ kind: "safety", message: store.state.settings.emergencyStop ? "Emergency stop engaged" : "Emergency stop cleared" });
     store.save(); print({ ok: true, emergencyStop: store.state.settings.emergencyStop }); return;
+  }
+
+  if (cmd === "maintenance" && ["enter", "exit", "status"].includes(args[1] ?? "")) {
+    const store = openStore(args);
+    if (args[1] === "status") {
+      const running = store.state.sessions.filter((session) => session.status === "running");
+      print({ ok: true, maintenance: store.state.settings.maintenance, runningSessions: running.map((session) => session.id) });
+      return;
+    }
+    if (args[1] === "enter") {
+      const running = store.state.sessions.filter((session) => session.status === "running");
+      store.state.settings.maintenance = {
+        mode: running.length > 0 ? "draining" : "active",
+        reason: getArg(args, "--reason") ?? "Operator maintenance",
+        requestedAt: new Date().toISOString(),
+        enteredAt: running.length === 0 ? new Date().toISOString() : undefined,
+        requestedBy: `cli-${process.pid}`,
+      };
+      store.pushActivity({ kind: "maintenance", message: running.length > 0 ? "Maintenance requested; draining current checkpoint" : "Maintenance mode entered" });
+    } else {
+      store.state.settings.maintenance = { mode: "running" };
+      store.pushActivity({ kind: "maintenance", message: "Maintenance mode exited; autonomous controller resumed" });
+    }
+    store.save();
+    print({ ok: true, maintenance: store.state.settings.maintenance });
+    return;
   }
 
   // ── Setup ──────────────────────────────────────────────
@@ -532,6 +581,8 @@ async function main(): Promise<void> {
           name: d.name,
           udid: d.udid,
           online: true,
+          model: d.model,
+          viewportClass: /\bSE\b|mini/i.test(`${d.model ?? ""} ${d.name}`) ? "compact" : "regular",
           createdAt: new Date().toISOString(),
         };
         store.state.devices.push(row);
@@ -539,6 +590,8 @@ async function main(): Promise<void> {
       } else {
         row.online = true;
         row.name = d.name;
+        row.model = d.model ?? row.model;
+        row.viewportClass = /\bSE\b|mini/i.test(`${row.model ?? ""} ${row.name}`) ? "compact" : "regular";
       }
     }
     // mark missing offline
@@ -656,6 +709,19 @@ async function main(): Promise<void> {
     } catch {
       /* ignore */
     }
+    const attention = store.state.accounts.flatMap((account) => {
+      const session = [...store.state.sessions].reverse().find((candidate) => candidate.accountId === account.id && candidate.requiresAttention);
+      if ((account.preflightStatus ?? "ready") !== "attention" && !session) return [];
+      const group = store.state.accountGroups.find((candidate) => candidate.id === account.groupId);
+      const message = session?.lastError ?? account.preflightNote ?? "Account needs verification";
+      const screenshot = message.match(/Screenshot saved to (.+?\.(?:png|jpe?g))/i)?.[1];
+      return [{ accountId: account.id, groupName: group?.name, platform: account.platform, handle: account.handle,
+        trustScore: account.trustScore, message, screenshot, sessionId: session?.id,
+        lastVerifiedAt: account.identityVerifiedAt, lastCanaryAt: account.lastCanaryAt }];
+    });
+    const capacity = store.state.devices.flatMap((device) => (["x", "tiktok", "instagram", "youtube"] as Platform[])
+      .map((platform) => ({ deviceId: device.id, deviceName: device.name,
+        ...assessDeviceCapacity(store.state.accounts, device.id, platform, device.viewportClass ?? "regular") })));
     print({
       driver: "ios",
       simulator: false,
@@ -679,6 +745,8 @@ async function main(): Promise<void> {
       activePlan: activePlan(store),
       sessions: store.state.sessions.slice(-10),
       activity: store.state.activity.slice(-20),
+      attention,
+      capacity,
       plan,
       locks: store.locks.snapshot(),
     });
@@ -714,23 +782,27 @@ async function main(): Promise<void> {
     // Cooldowns so a failing relaunch/rebuild cannot thrash every tick.
     const runnerRepairAttempts = new Map<string, number>();
     const runnerReinstallAttempts = new Map<string, number>();
-    const superviseAutomationRunner = async (device: { udid: string; name: string }): Promise<void> => {
+    const authority = new SerialCommandAuthority();
+    const commandServer = startCommandAuthorityServer(getArg(args, "--data") ?? defaultDataDir(), authority);
+    const superviseAutomationRunner = async (device: { udid: string; name: string }) => {
       const last = runnerRepairAttempts.get(device.udid) ?? 0;
-      if (Date.now() - last < 10 * 60 * 1000) return;
+      if (Date.now() - last < 10 * 60 * 1000) return undefined;
       try {
         const repair = await superviseDeviceHealth(device.udid, { repoRoot: findProjectRoot() });
-        if (repair.action === "none") return;
+        if (repair.action === "none") return repair;
         runnerRepairAttempts.set(device.udid, Date.now());
         notifyDesktop(
           repair.ok ? "Heiss runner recovered" : "Heiss runner repair failed",
           `${device.name}: ${repair.detail}`,
         );
         console.log(JSON.stringify({ at: new Date().toISOString(), runnerRepair: { udid: device.udid, ...repair } }));
+        return repair;
       } catch (error) {
         runnerRepairAttempts.set(device.udid, Date.now());
         const message = error instanceof Error ? error.message : String(error);
         notifyDesktop("Heiss runner repair failed", `${device.name}: ${message}`);
         console.error(JSON.stringify({ at: new Date().toISOString(), runnerRepairError: { udid: device.udid, message } }));
+        return undefined;
       }
     };
     const renewExpiringRunners = async (onlineUdids: Set<string>, now: Date): Promise<void> => {
@@ -753,11 +825,26 @@ async function main(): Promise<void> {
     };
     print({ ok: true, daemon: "started", intervalMs, pid: process.pid });
     while (!stopping) {
+      await authority.run(async () => {
       const store = openStore(args);
       const now = new Date();
       const nowIso = now.toISOString();
       const timeOfDay = localTimeOfDay(nowIso, store.state.settings.timeZone);
       try {
+        store.state.settings.controllerHeartbeatAt = nowIso;
+        store.state.settings.controllerPid = process.pid;
+        const maintenance = store.state.settings.maintenance;
+        if (maintenance.mode !== "running") {
+          const running = store.state.sessions.filter((session) => session.status === "running");
+          if (maintenance.mode === "draining" && running.length === 0) {
+            maintenance.mode = "active";
+            maintenance.enteredAt = nowIso;
+            store.pushActivity({ kind: "maintenance", message: "Current checkpoint drained; maintenance mode is active" });
+          }
+          store.save();
+          console.log(JSON.stringify({ at: nowIso, maintenance: maintenance.mode, runningSessions: running.length }));
+          return;
+        }
         const expiry = runnerExpiryWarning(now);
         if (expiry && store.state.settings.notificationKeys.runnerExpiry !== expiry.key) {
           notifyDesktop("HeissRunner signing expires soon", expiry.body);
@@ -797,7 +884,11 @@ async function main(): Promise<void> {
           );
           if (dueWarmupIds.length > 0 || retryDue || claimable) {
             for (const device of store.state.devices.filter((row) => row.online)) {
-              await superviseAutomationRunner(device);
+              const health = await superviseAutomationRunner(device);
+              if (health) store.state.settings.deviceHealth[device.id] = {
+                checkedAt: new Date().toISOString(), ok: health.ok, action: health.action,
+                detail: health.detail, checks: health.checks,
+              };
             }
           }
           const posting = await new FarmOrchestrator(store, makeDriver()).runOnce({
@@ -805,6 +896,7 @@ async function main(): Promise<void> {
             timeOfDay,
             now: nowIso,
             skipWarmups: true,
+            maxSessions: 1,
           });
           const warmups = dueWarmupIds.length > 0
             ? await new FarmOrchestrator(store, makeDriver()).runOnce({
@@ -812,6 +904,7 @@ async function main(): Promise<void> {
                 timeOfDay,
                 now: nowIso,
                 warmupAccountIds: dueWarmupIds,
+                maxSessions: 1,
               })
             : { sessions: [], activity: [], interrupted: false };
           const result = { sessions: [...posting.sessions, ...warmups.sessions], interrupted: posting.interrupted || warmups.interrupted };
@@ -843,8 +936,10 @@ async function main(): Promise<void> {
         notifyDesktop("Heiss controller error", message);
         console.error(JSON.stringify({ at: nowIso, error: message }));
       }
+      });
       if (!stopping) await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, 60_000)));
     }
+    await new Promise<void>((resolve) => commandServer.close(() => resolve()));
     print({ ok: true, daemon: "stopped" });
     return;
   }
@@ -1040,10 +1135,19 @@ async function main(): Promise<void> {
     store.save(); print({ ok: true, account }); return;
   }
 
-  if (cmd === "preflight" && args[1] === "canary") {
+  if (cmd === "preflight" && (args[1] === "canary" || args[1] === "verify-all")) {
     const store = openStore(args);
-    const ids = (getArg(args, "--accounts") ?? "").split(",").map((id) => id.trim()).filter(Boolean);
-    const results = await new FarmOrchestrator(store, new RealIosDriver()).verifyPreflight(ids.length ? ids : undefined);
+    let ids = (getArg(args, "--accounts") ?? "").split(",").map((id) => id.trim()).filter(Boolean);
+    const lowest = Number(getArg(args, "--lowest") ?? 0);
+    if (!ids.length && Number.isInteger(lowest) && lowest > 0) {
+      ids = [...store.state.accounts].sort((a, b) => a.trustScore - b.trustScore || a.createdAt.localeCompare(b.createdAt)).slice(0, lowest).map((account) => account.id);
+    }
+    const verifyAll = args[1] === "verify-all";
+    const results = await new FarmOrchestrator(store, new RealIosDriver()).verifyPreflight({
+      accountIds: ids.length ? ids : undefined,
+      lowTrustFirst: verifyAll || hasFlag(args, "--low-trust-first"),
+      transitionRing: verifyAll || hasFlag(args, "--ring"),
+    });
     print({ ok: results.every((result) => result.ok), results }); return;
   }
 
@@ -1056,8 +1160,14 @@ async function main(): Promise<void> {
     if (devices.length === 0) throw new Error("No matching registered device");
     const results = [];
     for (const device of devices) {
-      results.push({ deviceId: device.id, name: device.name, ...(await superviseDeviceHealth(device.udid, { repoRoot: findProjectRoot() })) });
+      const result = { deviceId: device.id, name: device.name, ...(await superviseDeviceHealth(device.udid, { repoRoot: findProjectRoot() })) };
+      results.push(result);
+      store.state.settings.deviceHealth[device.id] = {
+        checkedAt: new Date().toISOString(), ok: result.ok, action: result.action, detail: result.detail,
+        checks: result.checks,
+      };
     }
+    store.save();
     print({ ok: results.every((result) => result.ok), results }); return;
   }
 

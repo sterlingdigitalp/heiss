@@ -32,6 +32,9 @@ private enum PlatformScreenState: String {
     case unknown
 }
 
+private let heissRunnerProtocolVersion = 2
+private let heissRunnerBuild = "heiss-runner-2026.07.16.8"
+
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
 final class HeissRunnerUITests: XCTestCase {
@@ -80,7 +83,7 @@ final class HeissRunnerUITests: XCTestCase {
         guard let data = try? Data(contentsOf: file),
               let command = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { try? fm.removeItem(at: file); return }
-        let result: [String: Any]
+        var result: [String: Any]
         do {
             result = try perform(command)
         } catch {
@@ -95,6 +98,9 @@ final class HeissRunnerUITests: XCTestCase {
                 "screenshot": name,
             ]
         }
+        result["protocolVersion"] = heissRunnerProtocolVersion
+        result["runnerBuild"] = heissRunnerBuild
+        result["commandGeneration"] = command["commandGeneration"] as? String ?? command["id"] as? String ?? "unknown"
         if let data = try? JSONSerialization.data(withJSONObject: result) {
             try? data.write(to: outbox.appendingPathComponent(file.lastPathComponent), options: .atomic)
         }
@@ -104,6 +110,14 @@ final class HeissRunnerUITests: XCTestCase {
     private func perform(_ command: [String: Any]) throws -> [String: Any] {
         let action = command["action"] as? String ?? "unknown"
         if action == "ping" { return ["ok": true, "executed": true, "detail": "xctest-ready"] }
+        let requestedProtocol = command["protocolVersion"] as? Int ?? 0
+        let requestedBuild = command["expectedRunnerBuild"] as? String ?? ""
+        guard requestedProtocol == heissRunnerProtocolVersion, requestedBuild == heissRunnerBuild else {
+            throw NSError(
+                domain: "HeissRunner", code: 30,
+                userInfo: [NSLocalizedDescriptionKey: "Runner protocol mismatch: controller requested v\(requestedProtocol)/\(requestedBuild), runner is v\(heissRunnerProtocolVersion)/\(heissRunnerBuild)"]
+            )
+        }
         if action == "screenshot" {
             let screenshots = documents().appendingPathComponent("screenshots", isDirectory: true)
             try fm.createDirectory(at: screenshots, withIntermediateDirectories: true)
@@ -157,7 +171,20 @@ final class HeissRunnerUITests: XCTestCase {
         // safe, non-expanding choice before attributing alerts to this app.
         let systemUI = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         disableAutomaticInterruptionHandling(systemUI)
-        _ = try dismissStaleLimitedPhotosSystemPrompt(surface: systemUI.windows.firstMatch)
+        // TikTok defers the limited-Photos sheet until its restored Story
+        // surface settles, sometimes well after XCTest reports foreground.
+        let latePromptTimeout: TimeInterval = platform == "tiktok" ? 20 : 3
+        _ = try dismissStaleLimitedPhotosSystemPrompt(
+            surface: systemUI.windows.firstMatch,
+            app: platform == "tiktok" ? nil : app,
+            appearanceTimeout: latePromptTimeout
+        )
+        if app.state != .runningForeground {
+            app.activate()
+            guard app.wait(for: .runningForeground, timeout: 8) else {
+                throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) did not recover after clearing a delayed system prompt"])
+            }
+        }
         if platform == "instagram" {
             // Instagram can present this modal over the profile immediately
             // after switching accounts. It obscures both the current handle
@@ -366,6 +393,7 @@ final class HeissRunnerUITests: XCTestCase {
         let platform = command["platform"] as? String ?? "tiktok"
         let handle = command["handle"] as? String ?? ""
         let sessionId = command["sessionId"] as? String ?? UUID().uuidString
+        let commandGeneration = command["commandGeneration"] as? String ?? command["id"] as? String ?? UUID().uuidString
         let plannedSteps = command["plannedSteps"] as? [String] ?? []
         let requestedStart = command["startIndex"] as? Int ?? 0
         guard !plannedSteps.isEmpty else {
@@ -426,6 +454,7 @@ final class HeissRunnerUITests: XCTestCase {
             }
             writeSessionJournal(
                 journalURL, sessionId: sessionId, platform: platform, handle: handle,
+                commandGeneration: commandGeneration,
                 status: "running", completedSteps: completed, plannedSteps: plannedSteps,
                 stepDetails: stepDetails, error: nil
             )
@@ -441,6 +470,7 @@ final class HeissRunnerUITests: XCTestCase {
                 completed += 1
                 writeSessionJournal(
                     journalURL, sessionId: sessionId, platform: platform, handle: handle,
+                    commandGeneration: commandGeneration,
                     status: completed == plannedSteps.count ? "completed" : "running",
                     completedSteps: completed, plannedSteps: plannedSteps,
                     stepDetails: stepDetails, error: nil
@@ -463,6 +493,7 @@ final class HeissRunnerUITests: XCTestCase {
             let kind = failureKind(error)
             writeSessionJournal(
                 journalURL, sessionId: sessionId, platform: platform, handle: handle,
+                commandGeneration: commandGeneration,
                 status: "checkpointed", completedSteps: completed, plannedSteps: plannedSteps,
                 stepDetails: stepDetails, error: error.localizedDescription
             )
@@ -626,7 +657,10 @@ final class HeissRunnerUITests: XCTestCase {
     private func sweepKnownOverlays(app: XCUIApplication, platform: String) throws {
         let systemUI = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         disableAutomaticInterruptionHandling(systemUI)
-        _ = try dismissStaleLimitedPhotosSystemPrompt(surface: systemUI.windows.firstMatch)
+        _ = try dismissStaleLimitedPhotosSystemPrompt(
+            surface: systemUI.windows.firstMatch,
+            app: platform == "tiktok" ? nil : app
+        )
         if platform == "instagram" { dismissInstagramSetupPrompt(app) }
         if platform == "tiktok" {
             let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
@@ -686,6 +720,7 @@ final class HeissRunnerUITests: XCTestCase {
         sessionId: String,
         platform: String,
         handle: String,
+        commandGeneration: String,
         status: String,
         completedSteps: Int,
         plannedSteps: [String],
@@ -694,6 +729,7 @@ final class HeissRunnerUITests: XCTestCase {
     ) {
         var journal: [String: Any] = [
             "sessionId": sessionId, "platform": platform, "handle": handle,
+            "commandGeneration": commandGeneration,
             "status": status, "completedSteps": completedSteps,
             "plannedSteps": plannedSteps, "stepDetails": stepDetails,
             "updatedAt": isoTimestamp(),
@@ -796,14 +832,49 @@ final class HeissRunnerUITests: XCTestCase {
     }
 
     @discardableResult
-    private func dismissStaleLimitedPhotosSystemPrompt(surface: XCUIElement) throws -> Bool {
-        let keep = surface.buttons.matching(
-            NSPredicate(format: "label ==[c] %@", "Keep Current Selection")
-        ).firstMatch
-        let rendered = try screenContainsTextUsingOCR("Would Like to Access Your Photos")
-        guard keep.exists || rendered else { return false }
-        if keep.waitForExistence(timeout: 1), keep.isHittable { keep.tap() }
+    private func dismissStaleLimitedPhotosSystemPrompt(
+        surface: XCUIElement,
+        app: XCUIApplication? = nil,
+        appearanceTimeout: TimeInterval = 0
+    ) throws -> Bool {
+        let predicate = NSPredicate(format: "label ==[c] %@", "Keep Current Selection")
+        let keep = surface.buttons.matching(predicate).firstMatch
+        let appKeep = app?.buttons.matching(predicate).firstMatch
+        let appAccessible = appearanceTimeout > 0
+            ? (appKeep?.waitForExistence(timeout: appearanceTimeout) ?? false)
+            : (appKeep?.exists ?? false)
+        let systemAccessible = appearanceTimeout > 0 && !appAccessible
+            ? keep.waitForExistence(timeout: appearanceTimeout)
+            : keep.exists
+        let rendered = (appAccessible || systemAccessible) ? true
+            : try (screenContainsTextUsingOCR("Would Like to Access Your Photos") || screenContainsTextUsingOCR("Keep Current Selection"))
+        guard appAccessible || systemAccessible || rendered else { return false }
+        if let appKeep, appKeep.exists, appKeep.isHittable { appKeep.tap() }
+        else if keep.waitForExistence(timeout: 1), keep.isHittable { keep.tap() }
         else { surface.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.643)).tap() }
+        Thread.sleep(forTimeInterval: 0.8)
+        return true
+    }
+
+    @discardableResult
+    private func recoverLateLimitedPhotosPrompt(
+        app: XCUIApplication,
+        surface: XCUIElement,
+        platform: String
+    ) throws -> Bool {
+        guard try dismissStaleLimitedPhotosSystemPrompt(
+            surface: surface,
+            app: platform == "tiktok" ? nil : app
+        ) else { return false }
+        if platform == "tiktok" {
+            try dismissTikTokPhotoStoryPrompt(app: app, surface: surface)
+            try openTikTokProfile(surface: surface)
+        } else if app.state != .runningForeground {
+            app.activate()
+            guard app.wait(for: .runningForeground, timeout: 8) else {
+                throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) did not recover after clearing a late Photos prompt"])
+            }
+        }
         Thread.sleep(forTimeInterval: 0.8)
         return true
     }
@@ -1096,6 +1167,7 @@ final class HeissRunnerUITests: XCTestCase {
             window.coordinate(withNormalizedOffset: point(command, "profile", fallback)).tap()
         }
         Thread.sleep(forTimeInterval: 1.0)
+        _ = try recoverLateLimitedPhotosPrompt(app: app, surface: window, platform: platform)
         if platform == "instagram" { dismissInstagramSetupPrompt(app) }
         if platform == "tiktok", app.state != .runningForeground {
             app.activate()
@@ -1133,6 +1205,7 @@ final class HeissRunnerUITests: XCTestCase {
         // TikTok has exposed the profile handle as a button/other element in
         // multiple UI revisions, so do not restrict account verification to
         // static text. The exact normalized handle is still required.
+        _ = try recoverLateLimitedPhotosPrompt(app: app, surface: window, platform: platform)
         var isCurrent: Bool
         if platform == "instagram" {
             isCurrent = instagramTitleMatches(app, normalized: normalized)
@@ -1176,11 +1249,12 @@ final class HeissRunnerUITests: XCTestCase {
 
         // Profile headers on TikTok/Instagram expose the current username and
         // open the native account switcher when tapped.
+        _ = try recoverLateLimitedPhotosPrompt(app: app, surface: window, platform: platform)
         if platform == "tiktok" {
             // Compact TikTok puts the chevron beside the display name. The
             // handle one row below copies the username instead of opening the
             // switcher, so keep this fallback centered on the chevron itself.
-            window.coordinate(withNormalizedOffset: point(command, "accountMenu", .init(dx: 0.63, dy: 0.238))).tap()
+            window.coordinate(withNormalizedOffset: point(command, "accountMenu", .init(dx: 0.58, dy: 0.267))).tap()
         } else {
             let accountMenu = app.buttons["user-switch-title-button"]
             if accountMenu.waitForExistence(timeout: 2), accountMenu.isHittable { accountMenu.tap() }
@@ -1192,6 +1266,7 @@ final class HeissRunnerUITests: XCTestCase {
             }
         }
         Thread.sleep(forTimeInterval: 0.8)
+        _ = try recoverLateLimitedPhotosPrompt(app: app, surface: window, platform: platform)
         try tapExactHandle(app, surface: window, predicate: handlePredicate, handle: handle, platform: platform, command: command)
         Thread.sleep(forTimeInterval: 0.8)
         if platform == "tiktok" {
@@ -1274,8 +1349,10 @@ final class HeissRunnerUITests: XCTestCase {
         // menu used to be, so always return to You before switching.
         try dismissYouTubeManageAccounts(app)
         try dismissYouTubeAccountSwitcher(app)
+        _ = try recoverLateLimitedPhotosPrompt(app: app, surface: surface, platform: "youtube")
         surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
         Thread.sleep(forTimeInterval: 1.0)
+        _ = try recoverLateLimitedPhotosPrompt(app: app, surface: surface, platform: "youtube")
         try dismissYouTubeDefaultAccountPrompt(app)
         try dismissYouTubeManageAccounts(app)
         try dismissYouTubeAccountSwitcher(app)
@@ -1300,6 +1377,7 @@ final class HeissRunnerUITests: XCTestCase {
             guard app.wait(for: .runningForeground, timeout: 12) else {
                 throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "YouTube did not return to foreground while recovering its account switcher"])
             }
+            _ = try recoverLateLimitedPhotosPrompt(app: app, surface: surface, platform: "youtube")
             surface.coordinate(withNormalizedOffset: point(command, "profile", .init(dx: 0.91, dy: 0.95))).tap()
             Thread.sleep(forTimeInterval: 1.5)
             switcherReady = try openYouTubeAccountSwitcher(
@@ -1630,6 +1708,7 @@ final class HeissRunnerUITests: XCTestCase {
 
     private func openXDrawer(surface: XCUIElement) throws {
         for _ in 0..<3 {
+            _ = try dismissStaleLimitedPhotosSystemPrompt(surface: surface, appearanceTimeout: 1)
             surface.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.06)).tap()
             Thread.sleep(forTimeInterval: 1.0)
             if try screenContainsTextUsingOCR("Profile", minimumVisionY: 0.55) { return }

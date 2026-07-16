@@ -8,6 +8,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { RealUsbTransport } from "./ios-transport.js";
+import { RUNNER_BUILD, RUNNER_PROTOCOL_VERSION } from "@heiss/core";
 import { listUsbIphones } from "./usb.js";
 import {
   automationRunnerLabel,
@@ -28,6 +29,9 @@ export interface AutomationHealth {
   pingOk: boolean;
   healthy: boolean;
   detail: string;
+  protocolVersion?: number;
+  runnerBuild?: string;
+  protocolCompatible: boolean;
 }
 
 export type RunnerRepairAction = "none" | "relaunch" | "reinstall";
@@ -48,6 +52,7 @@ export interface DeviceSupervisorResult {
     paired: boolean;
     commandChannel: boolean;
     runnerHeartbeat: boolean;
+    protocolCompatible?: boolean;
   };
   detail: string;
 }
@@ -98,15 +103,27 @@ export async function checkAutomationRunner(
   }
   let pingOk = false;
   let detail = "";
+  let protocolVersion: number | undefined;
+  let runnerBuild: string | undefined;
+  let protocolCompatible = false;
   const transport = new RealUsbTransport({ commandTimeoutMs: opts.pingTimeoutMs ?? 20_000 });
   try {
-    const result = await transport.runScriptAction(udid, "ping");
-    pingOk = result.ok;
-    detail = result.detail;
+    const info = await transport.runnerInfo(udid);
+    protocolVersion = info.protocolVersion;
+    runnerBuild = info.runnerBuild;
+    protocolCompatible = info.compatible;
+    pingOk = info.compatible;
+    detail = info.compatible
+      ? `xctest-ready v${info.protocolVersion}/${info.runnerBuild}`
+      : `protocol mismatch: expected v${RUNNER_PROTOCOL_VERSION}/${RUNNER_BUILD}, got v${info.protocolVersion}/${info.runnerBuild}`;
   } catch (error) {
     detail = error instanceof Error ? error.message : String(error);
   }
-  return { udid, label, jobLoaded, pingOk, healthy: jobLoaded && pingOk, detail };
+  return {
+    udid, label, jobLoaded, pingOk,
+    healthy: jobLoaded && pingOk && protocolCompatible,
+    detail, protocolVersion, runnerBuild, protocolCompatible,
+  };
 }
 
 /**
@@ -122,7 +139,11 @@ export async function ensureAutomationRunner(
   } = {},
 ): Promise<RunnerRepairResult> {
   const health = await checkAutomationRunner(udid, opts);
-  const action = planRunnerRepair(health.healthy, hasAutomationBuildProducts());
+  // A runner speaking an old/new protocol cannot be repaired by relaunching
+  // the same build products; force a fresh build and install.
+  const action = !health.protocolCompatible
+    ? "reinstall"
+    : planRunnerRepair(health.healthy, hasAutomationBuildProducts());
   if (action === "none") {
     return { ok: true, action, detail: `automation runner healthy (${health.detail})` };
   }
@@ -177,7 +198,7 @@ export async function superviseDeviceHealth(
   if (before.healthy) {
     return {
       ok: true, action: "none",
-      checks: { ...baseChecks, commandChannel: before.pingOk, runnerHeartbeat: before.healthy },
+      checks: { ...baseChecks, commandChannel: before.pingOk, runnerHeartbeat: before.healthy, protocolCompatible: before.protocolCompatible },
       detail: `USB, app-container command channel, and runner heartbeat are healthy (${before.detail})`,
     };
   }
@@ -194,7 +215,7 @@ export async function superviseDeviceHealth(
     if (afterRepair.healthy) {
       return {
         ok: true, action: repair.action,
-        checks: { ...baseChecks, commandChannel: true, runnerHeartbeat: true },
+        checks: { ...baseChecks, commandChannel: true, runnerHeartbeat: true, protocolCompatible: afterRepair.protocolCompatible },
         detail: repair.detail,
       };
     }
@@ -212,7 +233,7 @@ export async function superviseDeviceHealth(
   return {
     ok: final.healthy,
     action: "coredevice_restart",
-    checks: { ...baseChecks, commandChannel: final.pingOk, runnerHeartbeat: final.healthy },
+    checks: { ...baseChecks, commandChannel: final.pingOk, runnerHeartbeat: final.healthy, protocolCompatible: final.protocolCompatible },
     detail: final.healthy
       ? `CoreDevice and runner recovered (${finalRepair.detail})`
       : `CoreDevice restart exhausted; user intervention required: ${final.detail}`,

@@ -185,6 +185,11 @@ describe("farm orchestrator (shipped path)", () => {
     assert.equal(stopped.sessions.length, 0);
     assert.equal(driver.actions.length, 0);
     store.state.settings.emergencyStop = false;
+    store.state.settings.maintenance = { mode: "active", reason: "upgrade" };
+    const maintained = await new FarmOrchestrator(store, driver).runOnce({ runnerId: "r", timeOfDay: "20:30" });
+    assert.equal(maintained.sessions.length, 0);
+    assert.match(maintained.activity[0]!, /maintenance_active/);
+    store.state.settings.maintenance = { mode: "running" };
     store.state.settings.accountDailyActionCap = 1;
     store.state.activity.push({ id: "used", at: "2026-07-13T20:00:00.000Z", accountId: "acc-tt-fresh", kind: "action", message: "used" });
     const capped = await new FarmOrchestrator(store, driver).runOnce({ runnerId: "r", timeOfDay: "20:30", now: "2026-07-13T21:00:00.000Z" });
@@ -207,6 +212,25 @@ describe("farm orchestrator (shipped path)", () => {
     assert.equal(result.sessions[0]!.checkpoint.stepIndex, driver.sessions[0]!.steps.length);
     assert.equal(result.sessions[0]!.heartbeatAt, "2026-07-12T14:01:00.000Z");
     assert.ok(store.state.activity.some((event) => event.kind === "session_heartbeat"));
+  });
+
+  it("uses harmless identity canaries to clear current attention checkpoints", async () => {
+    const store = new JsonStore(storePath()); seedDemoFarm(store);
+    const account = store.state.accounts.find((candidate) => candidate.id === "acc-tt-fresh")!;
+    account.preflightStatus = "attention";
+    store.state.sessions.push({
+      id: "paused", kind: "warmup", accountId: account.id, deviceId: account.deviceId,
+      status: "checkpointed", checkpoint: createCheckpoint(), plannedSteps: ["feed:scroll"],
+      requiresAttention: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    });
+    const results = await new FarmOrchestrator(store, new RecordingDriver()).verifyPreflight({
+      accountIds: [account.id], lowTrustFirst: true, transitionRing: true,
+    });
+    assert.equal(results.length, 2, "a one-account transition ring closes back on its first account");
+    assert.ok(results.every((result) => result.ok && result.trustScore === account.trustScore));
+    assert.equal(account.lastVerifiedHandle, account.handle);
+    assert.ok(account.identityVerifiedAt);
+    assert.equal(store.state.sessions.at(-1)!.requiresAttention, false);
   });
 
   it("retains partial on-device progress and pauses account mismatch for attention", async () => {

@@ -20,6 +20,7 @@ import {
   accountsNeedingSlotFill,
   pickAccountForQueueItem,
   assertCanAddAccount,
+  assessDeviceCapacity,
   CapacityError,
   MAX_ACCOUNTS_PER_PLATFORM_PER_DEVICE,
   type SocialAccount,
@@ -178,5 +179,16 @@ describe("capacity", () => {
     }
     assert.throws(() => assertCanAddAccount(existing, "d1", "tiktok"), CapacityError);
     assert.doesNotThrow(() => assertCanAddAccount(existing, "d1", "instagram"));
+  });
+
+  it("reports certified compact-device capacity separately from the physical maximum", () => {
+    const existing: SocialAccount[] = Array.from({ length: 6 }, (_, index) => ({
+      id: `x${index}`, deviceId: "compact", platform: "youtube", handle: `@y${index}`,
+      stage: "fresh", trustScore: 0, searchTerms: [], createdAt: "t",
+    }));
+    assert.deepEqual(assessDeviceCapacity(existing, "compact", "youtube", "compact"), {
+      platform: "youtube", viewportClass: "compact", configured: 6,
+      certified: 5, physicalMaximum: 8, status: "uncertified",
+    });
   });
 });

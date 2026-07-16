@@ -117,6 +117,14 @@ export interface PreflightVerificationResult {
   ok: boolean;
   detail: string;
   failureKind?: import("./types.js").FailureKind;
+  transitionFrom?: string;
+  trustScore: number;
+}
+
+export interface PreflightVerificationOptions {
+  accountIds?: string[];
+  lowTrustFirst?: boolean;
+  transitionRing?: boolean;
 }
 
 export class FarmOrchestrator {
@@ -130,15 +138,34 @@ export class FarmOrchestrator {
    * require exact public-handle verification. It never advances lifecycle or
    * performs feed engagement.
    */
-  async verifyPreflight(accountIds?: string[]): Promise<PreflightVerificationResult[]> {
-    const selected = accountIds ? new Set(accountIds) : undefined;
+  async verifyPreflight(accountIdsOrOptions?: string[] | PreflightVerificationOptions): Promise<PreflightVerificationResult[]> {
+    const options = Array.isArray(accountIdsOrOptions)
+      ? { accountIds: accountIdsOrOptions }
+      : (accountIdsOrOptions ?? {});
+    const selected = options.accountIds ? new Set(options.accountIds) : undefined;
     const results: PreflightVerificationResult[] = [];
-    for (const account of this.sortAccountsByPlatform(this.store.state.accounts)) {
-      if (selected && !selected.has(account.id)) continue;
+    let accounts = this.sortAccountsByPlatform(this.store.state.accounts)
+      .filter((account) => !selected || selected.has(account.id));
+    if (options.lowTrustFirst) {
+      const order = this.store.state.settings.platformOrder;
+      accounts = accounts.sort((a, b) => order.indexOf(a.platform) - order.indexOf(b.platform)
+        || a.trustScore - b.trustScore || a.createdAt.localeCompare(b.createdAt));
+    }
+    if (options.transitionRing) {
+      const firstByPlatform = new Map<SocialAccount["platform"], SocialAccount>();
+      for (const account of accounts) if (!firstByPlatform.has(account.platform)) firstByPlatform.set(account.platform, account);
+      accounts = [...accounts, ...this.store.state.settings.platformOrder.flatMap((platform) => firstByPlatform.get(platform) ?? [])];
+    }
+    const previousByLane = new Map<string, string>();
+    for (const account of accounts) {
+      const lane = `${account.deviceId}:${account.platform}`;
+      const transitionFrom = previousByLane.get(lane);
+      previousByLane.set(lane, account.handle);
       if (this.store.locks.isDeviceLocked(account.deviceId)) {
         results.push({
           accountId: account.id, platform: account.platform, handle: account.handle, ok: false,
-          detail: "device is busy with another farm session", failureKind: "runner",
+          detail: "device is busy with another farm session", failureKind: "runner", transitionFrom,
+          trustScore: account.trustScore,
         });
         continue;
       }
@@ -146,7 +173,8 @@ export class FarmOrchestrator {
       if (!device) {
         results.push({
           accountId: account.id, platform: account.platform, handle: account.handle, ok: false,
-          detail: "account device is missing", failureKind: "transport",
+          detail: "account device is missing", failureKind: "transport", transitionFrom,
+          trustScore: account.trustScore,
         });
         continue;
       }
@@ -156,9 +184,16 @@ export class FarmOrchestrator {
         account.preflightStatus = "ready";
         account.preflightCompletedAt = new Date().toISOString();
         account.preflightNote = undefined;
+        account.lastVerifiedHandle = account.handle;
+        account.identityVerifiedAt = account.preflightCompletedAt;
+        account.lastCanaryAt = account.preflightCompletedAt;
+        for (const session of this.store.state.sessions.filter((candidate) => candidate.accountId === account.id && candidate.status === "checkpointed" && candidate.requiresAttention)) {
+          session.requiresAttention = false;
+          session.nextRetryAt = account.preflightCompletedAt;
+        }
         results.push({
           accountId: account.id, platform: account.platform, handle: account.handle, ok: true,
-          detail: verified.detail,
+          detail: verified.detail, transitionFrom, trustScore: account.trustScore,
         });
         this.store.pushActivity({
           kind: "preflight_verified", accountId: account.id, deviceId: account.deviceId,
@@ -167,13 +202,14 @@ export class FarmOrchestrator {
       } catch (error) {
         const disposition = classifyFailure(error);
         const detail = error instanceof Error ? error.message : String(error);
+        account.lastCanaryAt = new Date().toISOString();
         if (disposition.kind === "account_mismatch" || disposition.kind === "unknown_ui") {
           account.preflightStatus = "attention";
           account.preflightNote = detail;
         }
         results.push({
           accountId: account.id, platform: account.platform, handle: account.handle, ok: false,
-          detail, failureKind: disposition.kind,
+          detail, failureKind: disposition.kind, transitionFrom, trustScore: account.trustScore,
         });
         this.store.pushActivity({
           kind: "preflight_failed", accountId: account.id, deviceId: account.deviceId,
@@ -199,6 +235,10 @@ export class FarmOrchestrator {
     const timeZone = this.store.state.settings.timeZone;
     if (this.store.state.settings.emergencyStop) {
       const message = "emergency_stop: controller is paused; no device actions were attempted";
+      return { sessions, activity: [message], interrupted: false };
+    }
+    if (this.store.state.settings.maintenance.mode !== "running") {
+      const message = `maintenance_${this.store.state.settings.maintenance.mode}: controller is paused; no new device work was attempted`;
       return { sessions, activity: [message], interrupted: false };
     }
 

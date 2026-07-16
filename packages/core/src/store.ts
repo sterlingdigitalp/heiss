@@ -66,6 +66,8 @@ export function emptyState(): FarmState {
       requireHumanEngagement: true,
       deviceStates: {},
       notificationKeys: {},
+      maintenance: { mode: "running" },
+      deviceHealth: {},
     },
     sessions: [],
     activity: [],
@@ -114,6 +116,8 @@ export class JsonStore {
     this.state.settings.requireHumanEngagement ??= true;
     this.state.settings.deviceStates ??= {};
     this.state.settings.notificationKeys ??= {};
+    this.state.settings.maintenance ??= { mode: "running" };
+    this.state.settings.deviceHealth ??= {};
     // Existing flat farms with one matching handle on all four platforms can
     // be migrated safely into a single account set without guessing identity.
     if (this.state.accountGroups.length === 0) {

@@ -16,7 +16,14 @@ import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { DeviceSessionError, type IosTransport } from "./ios-driver.js";
-import type { DeviceActionContext, DeviceSessionResult, FailureKind } from "@heiss/core";
+import {
+  RUNNER_BUILD,
+  RUNNER_PROTOCOL_VERSION,
+  type DeviceActionContext,
+  type DeviceSessionResult,
+  type FailureKind,
+  type RunnerProtocolInfo,
+} from "@heiss/core";
 import { listUsbIphones, type UsbIphone } from "./usb.js";
 import {
   downloadBuildInstallRunner,
@@ -62,6 +69,17 @@ export class RealUsbTransport implements IosTransport {
 
   async installRunner(udid: string): Promise<void> {
     await downloadBuildInstallRunner({ udid, waitForDevice: true });
+  }
+
+  async runnerInfo(udid: string): Promise<RunnerProtocolInfo> {
+    const result = await this.sendCommand(udid, { action: "ping" });
+    const protocolVersion = Number(result.protocolVersion ?? 0);
+    const runnerBuild = String(result.runnerBuild ?? "unknown");
+    return {
+      protocolVersion,
+      runnerBuild,
+      compatible: protocolVersion === RUNNER_PROTOCOL_VERSION && runnerBuild === RUNNER_BUILD,
+    };
   }
 
   async tap(udid: string, x: number, y: number): Promise<void> {
@@ -116,6 +134,12 @@ export class RealUsbTransport implements IosTransport {
     context?: DeviceActionContext,
   ): Promise<{ ok: true; detail: string }> {
     const result = await this.sendCommand(udid, { action, ...(context ?? {}) });
+    if (Number(result.protocolVersion ?? 0) !== RUNNER_PROTOCOL_VERSION
+        || String(result.runnerBuild ?? "") !== RUNNER_BUILD) {
+      throw new Error(
+        `Runner protocol mismatch: expected v${RUNNER_PROTOCOL_VERSION}/${RUNNER_BUILD}, got v${String(result.protocolVersion ?? "?")}/${String(result.runnerBuild ?? "unknown")}`,
+      );
+    }
     if (result.ok !== true || result.executed !== true) {
       let screenshotNote = "";
       if (typeof result.screenshot === "string") {
@@ -151,6 +175,14 @@ export class RealUsbTransport implements IosTransport {
       startIndex,
       ...context,
     });
+    if (Number(result.protocolVersion ?? 0) !== RUNNER_PROTOCOL_VERSION
+        || String(result.runnerBuild ?? "") !== RUNNER_BUILD) {
+      throw new DeviceSessionError(
+        `Runner protocol mismatch: expected v${RUNNER_PROTOCOL_VERSION}/${RUNNER_BUILD}, got v${String(result.protocolVersion ?? "?")}/${String(result.runnerBuild ?? "unknown")}`,
+        "runner",
+        startIndex,
+      );
+    }
     const completedSteps = Number(result.completedSteps ?? startIndex);
     if (result.ok !== true || result.executed !== true) {
       let screenshotPath: string | undefined;
@@ -191,7 +223,12 @@ export class RealUsbTransport implements IosTransport {
     const work = join(tmpdir(), `heiss-cmd-${id}`);
     mkdirSync(work, { recursive: true });
     const localIn = join(work, `${id}.json`);
-    const payload: Record<string, unknown> = { ...cmd, id, ts: new Date().toISOString() };
+    const payload: Record<string, unknown> = {
+      ...cmd, id, commandGeneration: id,
+      protocolVersion: RUNNER_PROTOCOL_VERSION,
+      expectedRunnerBuild: RUNNER_BUILD,
+      ts: new Date().toISOString(),
+    };
 
     // Stage local Cloud Drop media inside the XCTest runner container. The
     // runner imports it into Photos before opening TikTok/Instagram's picker.
@@ -242,7 +279,9 @@ export class RealUsbTransport implements IosTransport {
     const action = String(cmd.action);
     const actionTimeout = action === "warmup:session"
       ? Math.max(this.commandTimeoutMs, 15 * 60_000)
-      : action.startsWith("post:") || action.startsWith("warmup:")
+      : action === "verify:account"
+        ? Math.max(this.commandTimeoutMs, 180_000)
+        : action.startsWith("post:") || action.startsWith("warmup:")
         ? Math.max(this.commandTimeoutMs, 120_000)
         : this.commandTimeoutMs;
     const deadline = Date.now() + actionTimeout;
@@ -260,6 +299,7 @@ export class RealUsbTransport implements IosTransport {
         try {
           await this.copyFromDevice(udid, remoteJournal, localJournal);
           const progress = JSON.parse(readFileSync(localJournal, "utf8")) as Record<string, unknown>;
+          if (progress.commandGeneration !== id) continue;
           const completed = Number(progress.completedSteps ?? -1);
           if (completed !== lastJournalStep) {
             lastJournalStep = completed;
@@ -274,6 +314,7 @@ export class RealUsbTransport implements IosTransport {
             string,
             unknown
           >;
+          if (result.commandGeneration && result.commandGeneration !== id) continue;
           rmSync(work, { recursive: true, force: true });
           return result;
         }

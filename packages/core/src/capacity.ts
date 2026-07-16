@@ -12,6 +12,37 @@ export class CapacityError extends Error {
   }
 }
 
+export const CERTIFIED_ACCOUNTS_PER_PLATFORM = {
+  compact: { tiktok: 5, instagram: 5, x: 5, youtube: 5 },
+  regular: { tiktok: 8, instagram: 8, x: 8, youtube: 8 },
+} as const;
+
+export interface CapacityAssessment {
+  platform: Platform;
+  viewportClass: "compact" | "regular";
+  configured: number;
+  certified: number;
+  physicalMaximum: number;
+  status: "certified" | "uncertified" | "full";
+}
+
+export function assessDeviceCapacity(
+  existing: SocialAccount[],
+  deviceId: string,
+  platform: Platform,
+  viewportClass: "compact" | "regular" = "regular",
+): CapacityAssessment {
+  const configured = existing.filter((account) => account.deviceId === deviceId && account.platform === platform).length;
+  const certified = CERTIFIED_ACCOUNTS_PER_PLATFORM[viewportClass][platform];
+  return {
+    platform, viewportClass, configured, certified,
+    physicalMaximum: MAX_ACCOUNTS_PER_PLATFORM_PER_DEVICE,
+    status: configured >= MAX_ACCOUNTS_PER_PLATFORM_PER_DEVICE
+      ? "full"
+      : configured > certified ? "uncertified" : "certified",
+  };
+}
+
 /** Enforce Warmr-style 8 accounts per platform per device. */
 export function assertCanAddAccount(
   existing: SocialAccount[],
