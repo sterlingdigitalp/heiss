@@ -9,6 +9,13 @@ import {
   warmupOnlyScript,
 } from "./lifecycle.js";
 import {
+  activeBlockedTargetKeys,
+  engagementAllowance,
+  ensureDailyEngagementApproval,
+  normalizeEngagementPolicy,
+  type EngagementAllowance,
+} from "./engagement.js";
+import {
   assignToAccount,
   claimQueueItem,
   ensureNotDoublePost,
@@ -50,6 +57,10 @@ export interface DeviceActionContext {
   slides?: string[];
   searchTerms?: string[];
   uiProfile?: import("./types.js").PlatformUiProfile;
+  /** Used on-device to refuse engagement with another locally owned identity. */
+  ownedHandles?: string[];
+  /** Global recent-target denylist prevents duplicate/coordinated engagement. */
+  blockedEngagementTargetKeys?: string[];
 }
 
 export interface DeviceSessionResult {
@@ -437,7 +448,11 @@ export class FarmOrchestrator {
     this.store.state.queue[idx] = item;
 
     const session = this.createSession(account, "post", item.id, opts.timeOfDay);
-    session.plannedSteps = postCycleScript(account.searchTerms, !this.store.state.settings.requireHumanEngagement);
+    const allowance = this.engagementFor(account, opts.now ?? new Date().toISOString());
+    session.engagementPlan = { likes: allowance.likes, follows: allowance.follows };
+    session.engagementApprovalId = allowance.approvalId;
+    const content = this.store.state.contents.find((candidate) => candidate.id === item.contentId);
+    session.plannedSteps = postCycleScript(account.searchTerms, allowance, account.platform, Boolean(content?.mediaRef));
     this.store.locks.acquireDevice(account.deviceId, session.id);
     this.store.locks.acquireContent(item.id, session.id);
     this.store.save();
@@ -453,11 +468,14 @@ export class FarmOrchestrator {
     activity: string[],
   ): Promise<{ session: FarmSession; interrupted: boolean }> {
     const session = this.createSession(account, kind);
+    const allowance = this.engagementFor(account, opts.now ?? new Date().toISOString());
+    session.engagementPlan = { likes: allowance.likes, follows: allowance.follows };
+    session.engagementApprovalId = allowance.approvalId;
     session.plannedSteps = warmupOnlyScript(
       account.searchTerms,
       account.trustScore,
       session.id,
-      !this.store.state.settings.requireHumanEngagement,
+      allowance,
     );
     this.store.locks.acquireDevice(account.deviceId, session.id);
     this.store.save();
@@ -530,11 +548,14 @@ export class FarmOrchestrator {
     }
     this.store.save();
 
+    const allowance = this.engagementFor(account, opts.now ?? new Date().toISOString());
+    const queueItem = s.queueItemId ? this.store.state.queue.find((item) => item.id === s.queueItemId) : undefined;
+    const content = queueItem ? this.store.state.contents.find((item) => item.id === queueItem.contentId) : undefined;
     const script = s.plannedSteps ?? (s.kind === "post"
-      ? postCycleScript(account.searchTerms, !this.store.state.settings.requireHumanEngagement)
-      : warmupOnlyScript(account.searchTerms, account.trustScore, s.id, !this.store.state.settings.requireHumanEngagement));
+      ? postCycleScript(account.searchTerms, allowance, account.platform, Boolean(content?.mediaRef))
+      : warmupOnlyScript(account.searchTerms, account.trustScore, s.id, allowance));
     if (!s.plannedSteps) {
-      s = { ...s, plannedSteps: script };
+      s = { ...s, plannedSteps: script, engagementPlan: { likes: allowance.likes, follows: allowance.follows }, engagementApprovalId: allowance.approvalId };
       this.replaceSession(s);
       this.store.save();
     }
@@ -728,6 +749,7 @@ export class FarmOrchestrator {
         deviceId: account.deviceId,
         message: line,
       });
+      this.recordEngagementOutcome(account, s.id, step, result.detail, runNow);
 
       const extras: Parameters<typeof advanceCheckpoint>[2] = {};
       if (step === "post:publish") {
@@ -793,6 +815,8 @@ export class FarmOrchestrator {
     const ai = this.store.state.accounts.findIndex((a) => a.id === account.id);
     this.store.state.accounts[ai] = updated;
 
+    this.completeEngagementSession(s, updated, runNow);
+
     this.releaseLocks(s);
     this.store.save();
     if (device) {
@@ -817,6 +841,8 @@ export class FarmOrchestrator {
       avatarFingerprint: account.avatarFingerprint,
       searchTerms: account.searchTerms,
       uiProfile: this.store.state.uiProfiles[account.platform],
+      ownedHandles: this.store.state.accounts.map((candidate) => candidate.handle),
+      blockedEngagementTargetKeys: activeBlockedTargetKeys(this.store.state.engagementTargets, new Date().toISOString()),
     };
   }
 
@@ -840,9 +866,71 @@ export class FarmOrchestrator {
         kind: "action", sessionId: next.id, accountId: account.id, deviceId: account.deviceId,
         message: line, meta: { batched: true, stepIndex: index + 1, stepCount: script.length },
       });
+      this.recordEngagementOutcome(account, next.id, step, details?.[index] ?? "", now);
       next = { ...next, checkpoint: advanceCheckpoint(next.checkpoint, step), updatedAt: now };
     }
     return next;
+  }
+
+  private engagementFor(account: SocialAccount, now: string): EngagementAllowance {
+    const localDay = calendarDay(now, this.store.state.settings.timeZone);
+    ensureDailyEngagementApproval(account, this.store.state.engagementApprovals, localDay, now);
+    return engagementAllowance({
+      account,
+      approvals: this.store.state.engagementApprovals,
+      activity: this.store.state.activity,
+      localDay,
+      now,
+    });
+  }
+
+  private recordEngagementOutcome(
+    account: SocialAccount,
+    sessionId: string,
+    step: string,
+    detail: string,
+    now: string,
+  ): void {
+    const action = step.includes("follow") ? "follow" : step.includes("like") ? "like" : undefined;
+    if (!action) return;
+    const executed = detail.includes("engagement:executed");
+    const targetKey = detail.match(/target:([a-zA-Z0-9_-]+)/)?.[1];
+    const outcome = executed ? "executed" : detail.includes("skipped") ? "skipped" : "unconfirmed";
+    const localDay = calendarDay(now, this.store.state.settings.timeZone);
+    this.store.pushActivity({
+      kind: "engagement", sessionId, accountId: account.id, deviceId: account.deviceId,
+      message: `${action} ${outcome}${targetKey ? ` (target ${targetKey.slice(0, 8)})` : ""}`,
+      meta: { action, outcome, targetKey, localDay },
+    });
+    if (executed && targetKey && !this.store.state.engagementTargets.some((target) => target.targetKey === targetKey)) {
+      this.store.state.engagementTargets.push({
+        id: randomUUID(), accountId: account.id, platform: account.platform, action, targetKey, at: now,
+      });
+    }
+  }
+
+  private completeEngagementSession(session: FarmSession, account: SocialAccount, now: string): void {
+    const planned = (session.engagementPlan?.likes ?? 0) + (session.engagementPlan?.follows ?? 0);
+    if (planned === 0) return;
+    const executed = this.store.state.activity.filter((event) => event.sessionId === session.id
+      && event.kind === "engagement" && event.meta?.outcome === "executed").length;
+    if (session.engagementApprovalId) {
+      const approval = this.store.state.engagementApprovals.find((item) => item.id === session.engagementApprovalId);
+      if (approval && approval.status === "approved") {
+        approval.status = "consumed";
+        approval.consumedAt = now;
+      }
+      if (executed > 0) {
+        const policy = normalizeEngagementPolicy(account.engagement);
+        policy.successfulReviewedSessions += 1;
+        account.engagement = policy;
+      }
+    }
+    this.store.pushActivity({
+      kind: "engagement_session_completed", sessionId: session.id, accountId: account.id, deviceId: account.deviceId,
+      message: `Engagement session completed: ${executed}/${planned} approved actions executed`,
+      meta: { executed, planned, reviewed: Boolean(session.engagementApprovalId) },
+    });
   }
 
   private checkpointFailure(
@@ -985,6 +1073,42 @@ function batchCompletedSteps(error: unknown): number {
     : 0;
 }
 
+/**
+ * A daemon cannot reach its next scheduling tick while it is genuinely
+ * awaiting a device session. Therefore, a `running` record already older than
+ * this lease when a later tick begins is orphaned even if it carries the
+ * daemon's still-live PID. Reclaim it through the normal checkpoint path.
+ */
+export function checkpointStaleRunningSessions(
+  store: JsonStore,
+  now = new Date().toISOString(),
+  staleAfterMs = 30 * 60_000,
+): FarmSession[] {
+  const nowMs = new Date(now).getTime();
+  const recovered: FarmSession[] = [];
+  for (const session of store.state.sessions.filter((candidate) => candidate.status === "running")) {
+    const lastProgress = session.heartbeatAt ?? session.updatedAt;
+    if (nowMs - new Date(lastProgress).getTime() < staleAfterMs) continue;
+    const next = checkpointSession({
+      ...session,
+      updatedAt: now,
+      nextRetryAt: now,
+      lastError: session.lastError ?? "stale running-session lease expired; checkpointed for safe recovery",
+      activityLog: [...session.activityLog, "stale running-session lease expired; checkpointed for safe recovery"],
+    });
+    const index = store.state.sessions.findIndex((candidate) => candidate.id === session.id);
+    store.state.sessions[index] = next;
+    store.locks.releaseDevice(session.deviceId, session.id);
+    if (session.queueItemId) store.locks.releaseContent(session.queueItemId, session.id);
+    store.pushActivity({
+      kind: "stale_session_recovered", sessionId: session.id, accountId: session.accountId, deviceId: session.deviceId,
+      message: `Stale running session ${session.id} checkpointed and its locks released`,
+    });
+    recovered.push(next);
+  }
+  return recovered;
+}
+
 /** Seed helpers for demos/tests. */
 export function seedDemoFarm(store: JsonStore, ownerId?: string): void {
   const now = new Date().toISOString();
@@ -1031,7 +1155,7 @@ export function seedDemoFarm(store: JsonStore, ownerId?: string): void {
   ensure("acc-x-warm", "x", "@warm_x", "matured", 100);
   ensure("acc-yt-warm", "youtube", "@warm_yt", "matured", 100);
 
-  for (const baseId of ["acc-tt-mature", "acc-ig-mature"]) {
+  for (const baseId of ["acc-tt-mature", "acc-ig-mature", "acc-x-warm"]) {
     const accId = `${baseId}${suffix}`;
     if (!store.state.slots.find((s) => s.accountId === accId && s.timeOfDay === "09:00")) {
       store.state.slots.push({

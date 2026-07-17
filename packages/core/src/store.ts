@@ -3,6 +3,8 @@ import { dirname } from "node:path";
 import type {
   ActivityEvent,
   AccountGroup,
+  EngagementApproval,
+  EngagementTargetRecord,
   ContentAsset,
   Device,
   FarmSession,
@@ -30,6 +32,8 @@ export interface FarmState {
   devices: Device[];
   accounts: SocialAccount[];
   accountGroups: AccountGroup[];
+  engagementApprovals: EngagementApproval[];
+  engagementTargets: EngagementTargetRecord[];
   contents: ContentAsset[];
   queue: QueueItem[];
   slots: ScheduleSlot[];
@@ -52,6 +56,8 @@ export function emptyState(): FarmState {
     devices: [],
     accounts: [],
     accountGroups: [],
+    engagementApprovals: [],
+    engagementTargets: [],
     contents: [],
     queue: [],
     slots: [],
@@ -105,6 +111,8 @@ export class JsonStore {
     this.state.magicLinks ??= [];
     this.state.uiProfiles ??= {};
     this.state.accountGroups ??= [];
+    this.state.engagementApprovals ??= [];
+    this.state.engagementTargets ??= [];
     this.state.warmupSchedules ??= [];
     this.state.settings ??= emptyState().settings;
     this.state.settings.timeZone ??= "America/Chicago";
@@ -136,6 +144,11 @@ export class JsonStore {
     }
     // Forward-fill independent evening warmup schedules for legacy accounts.
     for (const account of this.state.accounts) {
+      account.engagement ??= {
+        mode: "off", likesEnabled: false, followsEnabled: false,
+        dailyLikeCap: 2, dailyFollowCap: 1, cooldownMinutes: 720,
+        successfulReviewedSessions: 0,
+      };
       if (this.state.warmupSchedules.some((schedule) => schedule.accountId === account.id)) continue;
       const index = this.state.warmupSchedules.length;
       const minutes = 20 * 60 + 30 + index * 20;
@@ -144,6 +157,14 @@ export class JsonStore {
         timeOfDay: `${String(Math.floor(minutes / 60) % 24).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`,
         jitterMinutes: 8, enabled: true,
       });
+    }
+    // X became a posting platform after the original farms were created.
+    // Give existing X accounts the same explicit morning slot as newly added
+    // posting accounts; maturity and queue gates still prevent surprise posts.
+    for (const account of this.state.accounts.filter((candidate) => candidate.platform === "x")) {
+      if (!this.state.slots.some((slot) => slot.accountId === account.id)) {
+        this.state.slots.push({ id: cryptoRandom(), accountId: account.id, timeOfDay: "09:00", enabled: true });
+      }
     }
     // Migrate legacy alternating-person schedules once. Contiguous platform
     // windows keep each app open while all of its accounts are processed.

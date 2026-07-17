@@ -231,7 +231,7 @@ export class RealUsbTransport implements IosTransport {
     };
 
     // Stage local Cloud Drop media inside the XCTest runner container. The
-    // runner imports it into Photos before opening TikTok/Instagram's picker.
+    // runner imports it into Photos before opening a platform media picker.
     const mediaRefs = [...new Set(
       [cmd.mediaRef, ...(Array.isArray(cmd.slides) ? cmd.slides : [])]
         .filter((value): value is string => typeof value === "string" && existsSync(value)),

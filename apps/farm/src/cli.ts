@@ -26,6 +26,12 @@ import {
   type Platform,
   type AccountStage,
   assessDeviceCapacity,
+  AUTONOMOUS_REVIEWED_SESSION_THRESHOLD,
+  defaultEngagementPolicy,
+  engagementAutonomousEligible,
+  ensureDailyEngagementApproval,
+  normalizeEngagementPolicy,
+  checkpointStaleRunningSessions,
 } from "@heiss/core";
 import {
   RealIosDriver,
@@ -96,16 +102,22 @@ Farm:
   heiss-farm account preflight <accountId> <pending|ready|attention> [--app-version VERSION] [--note NOTE]
   heiss-farm preflight canary [--accounts ID,ID] [--low-trust-first] [--ring] [--lowest N]
   heiss-farm preflight verify-all
+  heiss-farm preflight x-composer <accountId>
   heiss-farm preflight health [--udid UDID]
   heiss-farm remove-account <accountId>
   heiss-farm add-slot <accountId> <HH:mm>
   heiss-farm remove-slot <slotId>
   heiss-farm warmup-schedule list | set <accountId> <HH:mm> [--jitter N] | enable <accountId> | disable <accountId> | remove <accountId>
   heiss-farm settings show | timezone <IANA_ZONE> | caps <farm> <account>
+  heiss-farm engagement show
+  heiss-farm engagement configure <accountId> --mode off|review|autonomous [--likes on|off] [--follows on|off] [--like-cap 0..5] [--follow-cap 0..2] [--cooldown-min N]
+  heiss-farm engagement review <accountId>
+  heiss-farm engagement approve|reject <approvalId>
   heiss-farm safety stop | resume
   heiss-farm maintenance enter [--reason TEXT] | exit | status
   heiss-farm data migrate --from DIR
   heiss-farm cancel <queueItemId>
+  heiss-farm drop --accounts ID,ID --caption TEXT --text
   heiss-farm drop --accounts ID,ID --caption TEXT --media REF [--music M]
   heiss-farm drop --accounts ID,ID --caption TEXT --carousel --slides a.jpg,b.jpg
   heiss-farm start-warmups [--time HH:mm] [--data DIR]   # alias: run after setup
@@ -131,6 +143,13 @@ function getArg(args: string[], name: string): string | undefined {
 
 function hasFlag(args: string[], name: string): boolean {
   return args.includes(name);
+}
+
+function parseOnOff(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  if (value === "on") return true;
+  if (value === "off") return false;
+  throw new Error(`Expected on or off, got ${value}`);
 }
 
 function openStore(args: string[]): JsonStore {
@@ -186,10 +205,10 @@ async function syncCloudDrop(store: JsonStore, args: string[]) {
   const claimed = await cloudJson(url, license, "/api/runner/claim", { runnerId: "heiss-mac" });
   if (!claimed.item) return { ok: true, synced: true, claimed: null };
   const remoteItem = claimed.item as { id: string; createdAt: string };
-  const remoteContent = claimed.content as { id: string; kind: "video"|"carousel"; mediaRef: string; slides?: string[]; mediaNames?: string[]; caption: string; music?: string; createdAt: string; createdBy: string };
+  const remoteContent = claimed.content as { id: string; kind: "text"|"video"|"carousel"; mediaRef: string; slides?: string[]; mediaNames?: string[]; caption: string; music?: string; createdAt: string; createdBy: string };
   const targets = (claimed.targets as Array<{ sourceId?: string }>).map((target) => target.sourceId).filter((id): id is string => Boolean(id && store.state.accounts.some((a) => a.id === id)));
   if (targets.length === 0) throw new Error("Cloud Drop has no matching local accounts; sync account handles before claiming content");
-  const refs = remoteContent.kind === "carousel" ? (remoteContent.slides ?? [remoteContent.mediaRef]) : [remoteContent.mediaRef];
+  const refs = remoteContent.kind === "text" ? [] : remoteContent.kind === "carousel" ? (remoteContent.slides ?? [remoteContent.mediaRef]) : [remoteContent.mediaRef];
   const names = remoteContent.mediaNames ?? [];
   const cloudDir = join(dirname(store.path), "cloud-drop"); mkdirSync(cloudDir, { recursive: true });
   const localRefs: string[] = [];
@@ -201,7 +220,7 @@ async function syncCloudDrop(store: JsonStore, args: string[]) {
     writeFileSync(localPath, Buffer.from(await response.arrayBuffer())); localRefs.push(localPath);
   }
   if (!store.state.contents.some((content) => content.id === remoteContent.id)) {
-    store.state.contents.push({ ...remoteContent, mediaRef: localRefs[0]!, slides: remoteContent.kind === "carousel" ? localRefs : undefined });
+    store.state.contents.push({ ...remoteContent, mediaRef: remoteContent.kind === "text" ? "" : localRefs[0]!, slides: remoteContent.kind === "carousel" ? localRefs : undefined });
   }
   if (!store.state.queue.some((item) => item.remoteQueueId === remoteItem.id)) {
     store.state.queue.push({
@@ -730,6 +749,8 @@ async function main(): Promise<void> {
       usb,
       accounts: store.state.accounts,
       accountGroups: store.state.accountGroups,
+      engagementApprovals: store.state.engagementApprovals,
+      engagementTargets: store.state.engagementTargets.slice(-100),
       queue: store.state.queue,
       contents: store.state.contents,
       slots: store.state.slots,
@@ -834,6 +855,26 @@ async function main(): Promise<void> {
       try {
         store.state.settings.controllerHeartbeatAt = nowIso;
         store.state.settings.controllerPid = process.pid;
+        const recoveredStaleSessions = checkpointStaleRunningSessions(store, nowIso);
+        if (recoveredStaleSessions.length > 0) {
+          notifyDesktop("Heiss recovered a stale session", `${recoveredStaleSessions.length} stale running checkpoint${recoveredStaleSessions.length === 1 ? " was" : "s were"} released for safe retry.`);
+        }
+        for (const account of store.state.accounts) {
+          const before = store.state.engagementApprovals.length;
+          const request = ensureDailyEngagementApproval(
+            account,
+            store.state.engagementApprovals,
+            calendarDay(nowIso, store.state.settings.timeZone),
+            nowIso,
+          );
+          if (request && store.state.engagementApprovals.length > before) {
+            store.pushActivity({
+              kind: "engagement_review_requested", accountId: account.id, deviceId: account.deviceId,
+              message: `${account.handle} engagement review is ready (${request.proposedLikes} likes, ${request.proposedFollows} follows)`,
+            });
+            notifyDesktop("Heiss engagement review", `${account.handle} is waiting for approval before today's engagement actions.`);
+          }
+        }
         const maintenance = store.state.settings.maintenance;
         if (maintenance.mode !== "running") {
           const running = store.state.sessions.filter((session) => session.status === "running");
@@ -1171,6 +1212,31 @@ async function main(): Promise<void> {
     print({ ok: results.every((result) => result.ok), results }); return;
   }
 
+  if (cmd === "preflight" && args[1] === "x-composer") {
+    const store = openStore(args);
+    const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
+    if (!account || account.platform !== "x") throw new Error("Usage: preflight x-composer <xAccountId>");
+    if ((account.preflightStatus ?? "ready") !== "ready") throw new Error("Account onboarding/preflight is not ready");
+    const device = store.state.devices.find((candidate) => candidate.id === account.deviceId);
+    if (!device) throw new Error("Account device is missing");
+    const driver = new RealIosDriver();
+    await driver.connect(device.id, device.udid);
+    try {
+      const result = await driver.runAction(device.id, account.id, "verify:composer", {
+        platform: account.platform, handle: account.handle, displayName: account.displayName,
+        loginEmail: account.loginEmail, switcherHint: account.switcherHint,
+        avatarFingerprint: account.avatarFingerprint, searchTerms: account.searchTerms,
+        uiProfile: store.state.uiProfiles.x,
+      });
+      store.pushActivity({ kind: "x_composer_canary", accountId: account.id, deviceId: device.id,
+        message: `${account.handle} X composer opened and closed without content or publishing` });
+      store.save(); print({ ok: true, accountId: account.id, handle: account.handle, result });
+    } finally {
+      await driver.disconnect(device.id).catch(() => undefined);
+    }
+    return;
+  }
+
   if (cmd === "preflight" && args[1] === "health") {
     const store = openStore(args);
     const requested = getArg(args, "--udid");
@@ -1235,12 +1301,13 @@ async function main(): Promise<void> {
       id: randomUUID(), groupId: group.id, deviceId: device.id, platform, handle: handles[platform]!,
       stage: "fresh" as const, trustScore: 0, warmupLocalDays: [],
       preflightStatus: "pending" as const,
+      engagement: defaultEngagementPolicy(),
       searchTerms: parseSearchTerms(getArg(args, "--terms")), createdAt: new Date().toISOString(),
     }));
     store.state.accountGroups.push(group);
     for (const account of created) {
       store.state.accounts.push(account);
-      if (account.platform === "tiktok" || account.platform === "instagram") store.state.slots.push(createSlot(account.id, "09:00"));
+      if (["tiktok", "instagram", "x"].includes(account.platform)) store.state.slots.push(createSlot(account.id, "09:00"));
       const index = store.state.warmupSchedules.length;
       const minutes = 20 * 60 + 30 + index * 20;
       const time = `${String(Math.floor(minutes / 60) % 24).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
@@ -1283,13 +1350,14 @@ async function main(): Promise<void> {
       stage,
       trustScore: stage === "fresh" ? 0 : 100,
       preflightStatus: "pending" as const,
+      engagement: defaultEngagementPolicy(),
       searchTerms: parseSearchTerms(getArg(args, "--terms")),
       createdAt: new Date().toISOString(),
     };
     store.state.accounts.push(account);
     assertWithinPlan(activePlan(store), store.state.devices.length, store.state.accounts.length);
     // default morning slot for posting platforms
-    if (platform === "tiktok" || platform === "instagram") {
+    if (["tiktok", "instagram", "x"].includes(platform)) {
       store.state.slots.push(createSlot(account.id, "09:00"));
     }
     const warmupIndex = store.state.warmupSchedules.length;
@@ -1320,6 +1388,8 @@ async function main(): Promise<void> {
     store.state.accounts.splice(index, 1);
     store.state.slots = store.state.slots.filter((slot) => slot.accountId !== account.id);
     store.state.warmupSchedules = store.state.warmupSchedules.filter((slot) => slot.accountId !== account.id);
+    store.state.engagementApprovals = store.state.engagementApprovals.filter((item) => item.accountId !== account.id);
+    store.state.engagementTargets = store.state.engagementTargets.filter((item) => item.accountId !== account.id);
     for (const item of store.state.queue.filter((queue) => queue.accountIds.includes(account.id))) {
       item.accountIds = item.accountIds.filter((id) => id !== account.id);
       if (item.accountIds.length === 0 && item.status !== "posted") item.status = "cancelled";
@@ -1330,6 +1400,77 @@ async function main(): Promise<void> {
     store.save(); print({ ok: true, account }); return;
   }
 
+  if (cmd === "engagement" && args[1] === "show") {
+    const store = openStore(args);
+    print({
+      ok: true,
+      accounts: store.state.accounts.map((account) => ({
+        id: account.id, handle: account.handle, platform: account.platform,
+        stage: account.stage, policy: normalizeEngagementPolicy(account.engagement),
+        autonomousEligible: engagementAutonomousEligible(account),
+      })),
+      approvals: store.state.engagementApprovals,
+      recentTargets: store.state.engagementTargets.slice(-100),
+    });
+    return;
+  }
+
+  if (cmd === "engagement" && args[1] === "configure") {
+    const store = openStore(args);
+    const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
+    const mode = getArg(args, "--mode") as "off" | "review" | "autonomous" | undefined;
+    if (!account || !mode || !["off", "review", "autonomous"].includes(mode)) {
+      throw new Error("Usage: engagement configure <accountId> --mode off|review|autonomous [--likes on|off] [--follows on|off] [--like-cap 0..5] [--follow-cap 0..2] [--cooldown-min N]");
+    }
+    const current = normalizeEngagementPolicy(account.engagement);
+    const likeCap = Number(getArg(args, "--like-cap") ?? current.dailyLikeCap);
+    const followCap = Number(getArg(args, "--follow-cap") ?? current.dailyFollowCap);
+    const cooldown = Number(getArg(args, "--cooldown-min") ?? current.cooldownMinutes);
+    if (!Number.isInteger(likeCap) || likeCap < 0 || likeCap > 5) throw new Error("Like cap must be an integer from 0 to 5");
+    if (!Number.isInteger(followCap) || followCap < 0 || followCap > 2) throw new Error("Follow cap must be an integer from 0 to 2");
+    if (!Number.isInteger(cooldown) || cooldown < 60 || cooldown > 10_080) throw new Error("Cooldown must be 60..10080 minutes");
+    const policy = normalizeEngagementPolicy({
+      ...current,
+      mode,
+      likesEnabled: parseOnOff(getArg(args, "--likes"), current.likesEnabled),
+      followsEnabled: parseOnOff(getArg(args, "--follows"), current.followsEnabled),
+      dailyLikeCap: likeCap,
+      dailyFollowCap: followCap,
+      cooldownMinutes: cooldown,
+    });
+    const previous = account.engagement;
+    account.engagement = policy;
+    if (mode === "autonomous" && !engagementAutonomousEligible(account)) {
+      account.engagement = previous;
+      throw new Error(`Autonomous engagement requires a mature account and ${AUTONOMOUS_REVIEWED_SESSION_THRESHOLD} successful reviewed sessions`);
+    }
+    const request = ensureDailyEngagementApproval(account, store.state.engagementApprovals, calendarDay(new Date().toISOString(), store.state.settings.timeZone));
+    store.pushActivity({ kind: "engagement_policy", accountId: account.id, deviceId: account.deviceId,
+      message: `${account.handle} engagement set to ${mode}; likes ${policy.likesEnabled ? "on" : "off"}, follows ${policy.followsEnabled ? "on" : "off"}` });
+    store.save(); print({ ok: true, account, policy, request }); return;
+  }
+
+  if (cmd === "engagement" && args[1] === "review") {
+    const store = openStore(args);
+    const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
+    if (!account) throw new Error("Usage: engagement review <accountId>");
+    const request = ensureDailyEngagementApproval(account, store.state.engagementApprovals, calendarDay(new Date().toISOString(), store.state.settings.timeZone));
+    if (!request) throw new Error("Account must be mature and configured for review engagement");
+    store.save(); print({ ok: true, request }); return;
+  }
+
+  if (cmd === "engagement" && (args[1] === "approve" || args[1] === "reject")) {
+    const store = openStore(args);
+    const request = store.state.engagementApprovals.find((candidate) => candidate.id === args[2]);
+    if (!request || request.status !== "pending") throw new Error(`Engagement approval is missing or is ${request?.status ?? "unknown"}`);
+    request.status = args[1] === "approve" ? "approved" : "rejected";
+    request.decidedAt = new Date().toISOString();
+    const account = store.state.accounts.find((candidate) => candidate.id === request.accountId);
+    store.pushActivity({ kind: "engagement_review_decided", accountId: request.accountId, deviceId: account?.deviceId,
+      message: `${account?.handle ?? request.accountId} engagement review ${request.status}` });
+    store.save(); print({ ok: true, request }); return;
+  }
+
   if (cmd === "drop") {
     const store = openStore(args);
     const accounts = (getArg(args, "--accounts") ?? "").split(",").filter(Boolean);
@@ -1337,11 +1478,16 @@ async function main(): Promise<void> {
     const media = getArg(args, "--media") ?? "media.bin";
     const music = getArg(args, "--music");
     const carousel = hasFlag(args, "--carousel");
+    const textOnly = hasFlag(args, "--text");
     const slides = (getArg(args, "--slides") ?? "").split(",").filter(Boolean);
+    if (accounts.some((id) => !store.state.accounts.some((account) => account.id === id))) throw new Error("Drop contains an unknown account id");
+    if (textOnly && accounts.some((id) => store.state.accounts.find((account) => account.id === id)?.platform !== "x")) {
+      throw new Error("Text-only drops can target X accounts only");
+    }
     if (carousel && slides.length < 2) throw new Error("Carousel drop requires --slides first.jpg,second.jpg");
     const { content, queueItem } = dropContent({
-      kind: carousel ? "carousel" : "video",
-      mediaRef: carousel ? slides[0]! : media,
+      kind: textOnly ? "text" : carousel ? "carousel" : "video",
+      mediaRef: textOnly ? "" : carousel ? slides[0]! : media,
       slides: carousel ? slides : undefined,
       caption,
       music,
@@ -1449,7 +1595,7 @@ async function main(): Promise<void> {
       humanNext: [
         "Trust developer certificate on the iPhone",
         "Open Heiss Runner app",
-        "Log into TikTok/Instagram on the phone",
+        "Log into each social platform on the phone",
         "heiss-farm add-account <deviceId> tiktok @you",
         "heiss-farm start-warmups",
       ],

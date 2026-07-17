@@ -109,13 +109,13 @@ export function marketingHtml(): string {
       <h1>Your iPhone farm,<br/><em>on autopilot.</em></h1>
       <p class="lead">
         Plug in iPhones and Heiss takes any account — even brand-new ones — from cold to consistently posting.
-        Warms them up, keeps them healthy, and auto-posts to <strong>TikTok and Instagram</strong> on schedule.
-        X and YouTube stay warm.
+        Warms them up, keeps them healthy, and auto-posts to <strong>TikTok, Instagram, and X</strong> on schedule.
+        YouTube stays warm.
       </p>
       <a class="btn" href="/app">Try Heiss free →</a>
       <a class="btn ghost" href="#how" style="margin-left:0.5rem">See how it works</a>
       <div class="stats">
-        <div class="stat"><strong>2</strong><span>posting platforms</span></div>
+        <div class="stat"><strong>3</strong><span>posting platforms</span></div>
         <div class="stat"><strong>24/7</strong><span>runs while you sleep</span></div>
         <div class="stat"><strong>8</strong><span>accounts per platform / phone</span></div>
       </div>

@@ -16,6 +16,7 @@ import {
   checkpointSession,
   remainingSteps,
   postCycleScript,
+  checkpointStaleRunningSessions,
   type DeviceDriver,
   type DeviceActionContext,
   type DeviceSessionResult,
@@ -111,6 +112,25 @@ describe("checkpoint resume", () => {
 
     const completed = checkpointSession({ ...r, status: "running" });
     assert.equal(completed.status, "checkpointed");
+  });
+});
+
+describe("stale live-session lease", () => {
+  it("checkpoints a stale running record even when its owner PID is still alive", () => {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    const account = store.state.accounts[0]!;
+    const session: FarmSession = {
+      id: "stale-live", ownerPid: process.pid, accountId: account.id, deviceId: account.deviceId,
+      kind: "warmup", status: "running", startedAt: "2026-07-17T01:00:00.000Z",
+      updatedAt: "2026-07-17T01:10:00.000Z", checkpoint: createCheckpoint(), activityLog: [],
+    };
+    store.state.sessions.push(session);
+    store.locks.acquireDevice(account.deviceId, session.id);
+    const recovered = checkpointStaleRunningSessions(store, "2026-07-17T02:00:00.000Z");
+    assert.equal(recovered.length, 1);
+    assert.equal(store.state.sessions.find((candidate) => candidate.id === session.id)?.status, "checkpointed");
+    assert.equal(store.locks.isDeviceLocked(account.deviceId), false);
   });
 });
 
@@ -354,7 +374,7 @@ describe("farm orchestrator (shipped path)", () => {
     assert.equal(result.sessions[0]!.status, "completed");
   });
 
-  it("blocks fresh from posting, posts matured with pre/post warmup, warms X/YouTube only", async () => {
+  it("blocks fresh from posting and only posts targeted mature accounts", async () => {
     const store = new JsonStore(storePath());
     seedDemoFarm(store);
     const driver = new RecordingDriver();
@@ -419,6 +439,31 @@ describe("farm orchestrator (shipped path)", () => {
     );
     assert.ok(delivered);
     assert.equal(delivered.status, "stored_local", "fresh target remains pending");
+  });
+
+  it("posts text content to mature X with the dedicated composer flow", async () => {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((account) => account.id === "acc-x-warm");
+    store.state.slots = store.state.slots.filter((slot) => slot.accountId === "acc-x-warm");
+    const dropped = dropContent({
+      kind: "text", mediaRef: "", caption: "Housing should be affordable.",
+      accountIds: ["acc-x-warm"], createdBy: "test",
+    });
+    store.state.contents.push(dropped.content);
+    store.state.queue.push(dropped.queueItem);
+    store.save();
+    const driver = new RecordingDriver();
+    const result = await new FarmOrchestrator(store, driver).runOnce({
+      runnerId: "runner-x", timeOfDay: "09:00", now: "2026-07-17T14:00:00.000Z",
+    });
+    const session = result.sessions.find((candidate) => candidate.kind === "post");
+    assert.ok(session);
+    assert.ok(session.plannedSteps?.includes("post:compose"));
+    assert.ok(session.plannedSteps?.includes("post:caption"));
+    assert.ok(!session.plannedSteps?.includes("post:upload"));
+    assert.equal(session.checkpoint.posted, true);
+    assert.equal(store.state.queue[0]?.status, "posted");
   });
 
   it("crash-recovery resumes without double-posting the same queue item", async () => {

@@ -2,11 +2,11 @@
 
 export type Platform = "tiktok" | "instagram" | "x" | "youtube";
 
-/** Platforms that support scheduled auto-post (video/carousel). */
-export const POSTING_PLATFORMS: readonly Platform[] = ["tiktok", "instagram"] as const;
+/** Platforms that support scheduled auto-post. */
+export const POSTING_PLATFORMS: readonly Platform[] = ["tiktok", "instagram", "x"] as const;
 
 /** Platforms that only warm (no auto-post). */
-export const WARM_ONLY_PLATFORMS: readonly Platform[] = ["x", "youtube"] as const;
+export const WARM_ONLY_PLATFORMS: readonly Platform[] = ["youtube"] as const;
 
 export type AccountStage =
   | "fresh"
@@ -28,7 +28,45 @@ export type FailureKind =
   | "safety_policy"
   | "action";
 
-export type ContentKind = "video" | "carousel";
+export type ContentKind = "text" | "video" | "carousel";
+
+export type EngagementMode = "off" | "review" | "autonomous";
+export type EngagementApprovalStatus = "pending" | "approved" | "rejected" | "consumed" | "expired";
+
+export interface EngagementPolicy {
+  mode: EngagementMode;
+  likesEnabled: boolean;
+  followsEnabled: boolean;
+  /** Conservative hard limits for one local calendar day. */
+  dailyLikeCap: number;
+  dailyFollowCap: number;
+  /** Minimum gap between sessions that contain engagement actions. */
+  cooldownMinutes: number;
+  /** Autonomous mode remains locked until this reaches the required threshold. */
+  successfulReviewedSessions: number;
+}
+
+export interface EngagementApproval {
+  id: string;
+  accountId: string;
+  localDay: string;
+  status: EngagementApprovalStatus;
+  proposedLikes: number;
+  proposedFollows: number;
+  createdAt: string;
+  decidedAt?: string;
+  consumedAt?: string;
+}
+
+export interface EngagementTargetRecord {
+  id: string;
+  accountId: string;
+  platform: Platform;
+  action: "like" | "follow";
+  /** Non-reversible on-device fingerprint; no third-party content is stored. */
+  targetKey: string;
+  at: string;
+}
 
 export interface PlatformUiProfile {
   platform: Platform;
@@ -123,6 +161,8 @@ export interface SocialAccount {
   /** Distinct local calendar days with a completed warmup. */
   warmupLocalDays?: string[];
   lastPostAt?: string;
+  /** Explicit, per-account engagement permission. Missing means fully off. */
+  engagement?: EngagementPolicy;
 }
 
 export interface AccountGroup {
@@ -279,6 +319,9 @@ export interface FarmSession {
   requiresAttention?: boolean;
   /** Last heartbeat/progress timestamp received from the on-device journal. */
   heartbeatAt?: string;
+  /** Review approval consumed only after a session completes successfully. */
+  engagementApprovalId?: string;
+  engagementPlan?: { likes: number; follows: number };
 }
 
 export interface User {

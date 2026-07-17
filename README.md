@@ -1,6 +1,6 @@
 # Heiss
 
-Warmr-style iPhone farm controller: **real USB iPhones only** (no simulator). Warm accounts, Cloud Drop content, auto-post TikTok/Instagram on schedule. X and YouTube stay warm-only.
+Warmr-style iPhone farm controller: **real USB iPhones only** (no simulator). Warm accounts, Cloud Drop content, and auto-post TikTok, Instagram, or X on schedule. YouTube stays warm-only.
 
 ## Packages
 
@@ -70,6 +70,8 @@ npm run app
 | `account preflight` | Mark manual onboarding ready/pending/attention |
 | `preflight health` | Check USB, trust, command channel, and runner; run the recovery ladder |
 | `preflight canary` | Harmless exact-handle verification without engagement |
+| `preflight x-composer` | Open and close the verified X composer without typing or publishing |
+| `engagement configure/review/approve` | Per-account, capped likes/follows with review-first qualification |
 | `start-warmups` / `run` | Farm tick on **real** devices only |
 | `drop` | Queue content for Cloud Drop |
 
@@ -91,7 +93,10 @@ Each tick the daemon:
 - groups work by platform, sends each account's full frozen warmup plan to the
   phone once, and journals every completed gesture on-device. Transport loss
   resumes from that journal instead of replaying the session.
-- omits likes and follows by default. An account mismatch or unknown overlay
+- omits likes and follows by default. Review mode requires a dated approval;
+  autonomous mode requires three successful reviewed sessions and retains
+  per-account caps, cooldowns, owned-account exclusion, and target deduplication.
+  An account mismatch or unknown overlay
   pauses only that account, preserves a screenshot/checkpoint, and identifies
   the person/platform that needs manual cleanup.
 

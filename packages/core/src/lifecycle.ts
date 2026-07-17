@@ -8,6 +8,7 @@ import {
   type SocialAccount,
   type WarmupAction,
 } from "./types.js";
+import type { EngagementAllowance } from "./engagement.js";
 
 const STAGE_ORDER: AccountStage[] = [
   "fresh",
@@ -29,7 +30,7 @@ export function canPost(account: Pick<SocialAccount, "stage" | "platform">): boo
   return stageIndex(account.stage) >= stageIndex("matured");
 }
 
-/** X and YouTube are warm-only. */
+/** YouTube remains warm-only. */
 export function isWarmOnlyPlatform(platform: Platform): boolean {
   return WARM_ONLY_PLATFORMS.includes(platform);
 }
@@ -123,11 +124,19 @@ export function applyKeepWarm(
 }
 
 /** Every post cycle is wrapped with pre-post and post-post warmup. */
-export function postCycleScript(searchTerms: string[], engagementAllowed = true): string[] {
-  const warmup = ["scroll", "scroll", ...(engagementAllowed ? ["like"] : []), ...(searchTerms.length ? ["search"] : [])]
+export function postCycleScript(
+  searchTerms: string[],
+  engagement: boolean | Pick<EngagementAllowance, "likes" | "follows"> = true,
+  platform: Platform = "tiktok",
+  hasMedia = true,
+): string[] {
+  const allowance = normalizeAllowance(engagement);
+  const warmup = ["scroll", "scroll", ...(allowance.likes > 0 ? ["like"] : []), ...(searchTerms.length ? ["search"] : [])]
     .map((a) => `pre_warmup:${a}`);
-  const post = ["post:upload", "post:caption", "post:music_optional", "post:publish"];
-  const after = ["scroll", "scroll", ...(engagementAllowed ? ["like"] : []), ...(searchTerms.length ? ["search"] : [])]
+  const post = platform === "x"
+    ? ["post:compose", "post:caption", ...(hasMedia ? ["post:media_optional"] : []), "post:publish"]
+    : ["post:upload", "post:caption", "post:music_optional", "post:publish"];
+  const after = ["scroll", "scroll", ...(allowance.likes > 1 ? ["like"] : []), ...(searchTerms.length ? ["search"] : [])]
     .map((a) => `post_warmup:${a}`);
   return [...warmup, ...post, ...after];
 }
@@ -136,8 +145,9 @@ export function warmupOnlyScript(
   searchTerms: string[],
   trustScore = 0,
   seed = randomSeed(),
-  engagementAllowed = true,
+  engagement: boolean | Pick<EngagementAllowance, "likes" | "follows"> = true,
 ): string[] {
+  const allowance = normalizeAllowance(engagement);
   const phase = Math.min(3, Math.floor(Math.max(0, trustScore) / TRUST_PER_WARMUP));
   const plans = [
     { scroll: 8, like: 0, follow: 0, search: 2 },
@@ -148,14 +158,21 @@ export function warmupOnlyScript(
   const plan = plans[phase]!;
   const actions: WarmupAction[] = [];
   actions.push(...Array.from({ length: plan.scroll }, () => "scroll" as const));
-  if (engagementAllowed) {
-    actions.push(...Array.from({ length: plan.like }, () => "like" as const));
-    actions.push(...Array.from({ length: plan.follow }, () => "follow" as const));
-  }
+  actions.push(...Array.from({ length: Math.min(plan.like, allowance.likes) }, () => "like" as const));
+  actions.push(...Array.from({ length: Math.min(plan.follow, allowance.follows) }, () => "follow" as const));
   if (searchTerms.length > 0) {
     actions.push(...Array.from({ length: plan.search }, () => "search" as const));
   }
   return seededShuffle(actions, seed).map((action) => `warmup:${action}`);
+}
+
+function normalizeAllowance(
+  value: boolean | Pick<EngagementAllowance, "likes" | "follows">,
+): Pick<EngagementAllowance, "likes" | "follows"> {
+  if (typeof value === "boolean") {
+    return value ? { likes: Number.MAX_SAFE_INTEGER, follows: Number.MAX_SAFE_INTEGER } : { likes: 0, follows: 0 };
+  }
+  return { likes: Math.max(0, value.likes), follows: Math.max(0, value.follows) };
 }
 
 function seededShuffle<T>(values: T[], seed: string): T[] {

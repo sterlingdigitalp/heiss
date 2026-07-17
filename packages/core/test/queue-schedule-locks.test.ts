@@ -87,6 +87,18 @@ describe("Cloud Drop queue", () => {
       QueueError,
     );
   });
+
+  it("supports text-only X queue content", () => {
+    const { content } = dropContent({
+      kind: "text", mediaRef: "", caption: "A text post",
+      accountIds: ["x1"], createdBy: "u",
+    });
+    assert.equal(content.kind, "text");
+    assert.equal(content.mediaRef, "");
+    assert.throws(() => dropContent({
+      kind: "text", mediaRef: "", caption: " ", accountIds: ["x1"], createdBy: "u",
+    }), QueueError);
+  });
 });
 
 describe("schedule slot fill", () => {

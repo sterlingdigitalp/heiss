@@ -39,10 +39,11 @@ describe("account lifecycle", () => {
     assert.equal(canPost(account({ stage: "posting", platform: "tiktok" })), true);
   });
 
-  it("never allows X/YouTube auto-post", () => {
-    assert.equal(canPost(account({ stage: "matured", platform: "x" })), false);
+  it("allows mature X posting while keeping YouTube warm-only", () => {
+    assert.equal(canPost(account({ stage: "matured", platform: "x" })), true);
     assert.equal(canPost(account({ stage: "matured", platform: "youtube" })), false);
-    assert.equal(isWarmOnlyPlatform("x"), true);
+    assert.equal(isWarmOnlyPlatform("x"), false);
+    assert.equal(supportsAutoPost("x"), true);
     assert.equal(supportsAutoPost("instagram"), true);
     assert.equal(isWarmOnlyPlatform("youtube"), true);
     assert.equal(supportsAutoPost("youtube"), false);
@@ -77,6 +78,16 @@ describe("account lifecycle", () => {
     assert.ok(post.length >= 4);
     assert.ok(script.indexOf("post:publish") > script.indexOf(pre[0]!));
     assert.ok(script.indexOf(post[0]!) > script.indexOf("post:publish"));
+  });
+
+  it("uses a dedicated X composer sequence", () => {
+    const text = postCycleScript(["housing"], false, "x", false);
+    assert.ok(text.includes("post:compose"));
+    assert.ok(text.includes("post:caption"));
+    assert.ok(!text.includes("post:upload"));
+    assert.ok(!text.includes("post:media_optional"));
+    const media = postCycleScript(["housing"], false, "x", true);
+    assert.ok(media.includes("post:media_optional"));
   });
 
   it("ramps daily warmup volume across maturity phases", () => {

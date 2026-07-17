@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.16.13"
+private let heissRunnerBuild = "heiss-runner-2026.07.17.2"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -149,6 +149,8 @@ final class HeissRunnerUITests: XCTestCase {
             return try performWarmupSession(command)
         }
         let platform = command["platform"] as? String ?? "tiktok"
+        let xPostContinuation = platform == "x" && ["post:caption", "post:media_optional", "post:publish"].contains(action)
+        let xPostStateful = xPostContinuation || (platform == "x" && action == "post:verify_published")
         let fallbackBundle = [
             "tiktok": "com.zhiliaoapp.musically",
             "instagram": "com.burbn.instagram",
@@ -169,7 +171,7 @@ final class HeissRunnerUITests: XCTestCase {
         // known Home state before every independent command.
         // YouTube search results can leave a sponsored bottom sheet over the
         // account controls, so it also starts each command from a clean state.
-        if (platform == "tiktok" || platform == "x" || platform == "youtube"), app.state != .notRunning {
+        if (platform == "tiktok" || (platform == "x" && !xPostStateful) || platform == "youtube"), app.state != .notRunning {
             app.terminate()
             Thread.sleep(forTimeInterval: 0.8)
         }
@@ -228,7 +230,18 @@ final class HeissRunnerUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.8)
         }
         let handle = command["handle"] as? String ?? ""
-        if action != "post:verify_published" {
+        if xPostContinuation {
+            guard activeHandles["x"]?.caseInsensitiveCompare(command["handle"] as? String ?? "") == .orderedSame else {
+                throw NSError(domain: "HeissRunner", code: 15, userInfo: [
+                    NSLocalizedDescriptionKey: "X composer continuation lost its verified account state; refusing to continue",
+                    "failureKind": "account_mismatch",
+                ])
+            }
+            let composer = app.textViews.firstMatch.exists || app.textFields.firstMatch.exists
+            guard composer else {
+                throw NSError(domain: "HeissRunner", code: 9, userInfo: [NSLocalizedDescriptionKey: "X composer is no longer visible; refusing to continue or publish"])
+            }
+        } else if action != "post:verify_published" {
             try ensureAccountVerified(app, platform: platform, handle: handle, command: command)
             if app.state != .runningForeground {
                 app.activate()
@@ -251,8 +264,31 @@ final class HeissRunnerUITests: XCTestCase {
             window = app.windows.firstMatch
         }
         Thread.sleep(forTimeInterval: Double.random(in: 0.65...1.8))
-        if action == "post:verify_published" {
-            let publish = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@ OR label CONTAINS[c] %@", "Post", "Share"))
+        if action == "verify:composer" {
+            guard platform == "x" else {
+                throw NSError(domain: "HeissRunner", code: 3, userInfo: [NSLocalizedDescriptionKey: "Composer canary is only supported for X"])
+            }
+            window.coordinate(withNormalizedOffset: point(command, "create", .init(dx: 0.90, dy: 0.88))).tap()
+            guard app.textViews.firstMatch.waitForExistence(timeout: 8) || app.textFields.firstMatch.waitForExistence(timeout: 2) else {
+                throw NSError(domain: "HeissRunner", code: 2, userInfo: [NSLocalizedDescriptionKey: "X composer canary could not open the composer"])
+            }
+            let close = app.buttons.matching(NSPredicate(
+                format: "label ==[c] %@ OR label ==[c] %@ OR label ==[c] %@",
+                "Close", "Cancel", "Back"
+            )).firstMatch
+            if close.waitForExistence(timeout: 2), close.isHittable { close.tap() }
+            else { window.coordinate(withNormalizedOffset: CGVector(dx: 0.06, dy: 0.07)).tap() }
+            let discard = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Discard")).firstMatch
+            if discard.waitForExistence(timeout: 1), discard.isHittable { discard.tap() }
+            if app.textViews.firstMatch.waitForExistence(timeout: 2) {
+                throw NSError(domain: "HeissRunner", code: 2, userInfo: [NSLocalizedDescriptionKey: "X composer canary opened successfully but did not close cleanly"])
+            }
+            return ["ok": true, "executed": true, "detail": "xctest:x:composer_canary:opened_and_closed"]
+        } else if action == "post:verify_published" {
+            let predicate = platform == "x"
+                ? NSPredicate(format: "label ==[c] %@", "Post")
+                : NSPredicate(format: "label CONTAINS[c] %@ OR label CONTAINS[c] %@", "Post", "Share")
+            let publish = app.buttons.matching(predicate)
             if publish.count > 0 {
                 throw NSError(domain: "HeissRunner", code: 9, userInfo: [NSLocalizedDescriptionKey: "Publish outcome is indeterminate: composer is still visible; refusing a second tap"])
             }
@@ -265,9 +301,19 @@ final class HeissRunnerUITests: XCTestCase {
             let end = window.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.28))
             start.press(forDuration: 0.08, thenDragTo: end)
         } else if action.contains("like") {
-            window.coordinate(withNormalizedOffset: point(command, "like", .init(dx: 0.90, dy: 0.55))).tap()
+            var targets = Set<String>()
+            let detail = try performGuardedEngagement(
+                action: "like", app: app, window: window, platform: platform,
+                command: command, engagedTargetKeys: &targets
+            )
+            return ["ok": true, "executed": true, "detail": detail]
         } else if action.contains("follow") {
-            window.coordinate(withNormalizedOffset: point(command, "follow", .init(dx: 0.88, dy: 0.43))).tap()
+            var targets = Set<String>()
+            let detail = try performGuardedEngagement(
+                action: "follow", app: app, window: window, platform: platform,
+                command: command, engagedTargetKeys: &targets
+            )
+            return ["ok": true, "executed": true, "detail": detail]
         } else if action.contains("search") {
             if platform == "instagram" {
                 let notNow = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Not now"))
@@ -337,6 +383,15 @@ final class HeissRunnerUITests: XCTestCase {
                 try typeUsingVisibleKeyboard(app, text: term)
                 submitVisibleSearch(app, surface: window, command: command)
             }
+        } else if action == "post:compose" {
+            guard platform == "x" else {
+                throw NSError(domain: "HeissRunner", code: 3, userInfo: [NSLocalizedDescriptionKey: "post:compose is only valid for X"])
+            }
+            window.coordinate(withNormalizedOffset: point(command, "create", .init(dx: 0.90, dy: 0.88))).tap()
+            let composer = app.textViews.firstMatch
+            guard composer.waitForExistence(timeout: 8) || app.textFields.firstMatch.waitForExistence(timeout: 2) else {
+                throw NSError(domain: "HeissRunner", code: 2, userInfo: [NSLocalizedDescriptionKey: "X compose button did not open a text composer"])
+            }
         } else if action == "post:upload" {
             let staged = command["stagedMediaNames"] as? [String] ?? []
             for name in staged {
@@ -358,7 +413,31 @@ final class HeissRunnerUITests: XCTestCase {
         } else if action == "post:caption" {
             let text = command["caption"] as? String ?? ""
             let fields = app.textViews.count > 0 ? app.textViews : app.textFields
-            if fields.count > 0 { fields.firstMatch.tap(); fields.firstMatch.typeText(text) }
+            guard fields.count > 0 else {
+                throw NSError(domain: "HeissRunner", code: 2, userInfo: [NSLocalizedDescriptionKey: "Post text field was not found"])
+            }
+            fields.firstMatch.tap(); fields.firstMatch.typeText(text)
+        } else if action == "post:media_optional" {
+            guard platform == "x" else {
+                throw NSError(domain: "HeissRunner", code: 3, userInfo: [NSLocalizedDescriptionKey: "post:media_optional is only valid for X"])
+            }
+            let staged = command["stagedMediaNames"] as? [String] ?? []
+            if !staged.isEmpty {
+                for name in staged { try importIntoPhotos(documents().appendingPathComponent("media").appendingPathComponent(name)) }
+                let media = app.buttons.matching(NSPredicate(
+                    format: "label CONTAINS[c] %@ OR label CONTAINS[c] %@ OR label CONTAINS[c] %@",
+                    "media", "photo", "gallery"
+                )).firstMatch
+                if media.waitForExistence(timeout: 3), media.isHittable { media.tap() }
+                else { window.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.88)).tap() }
+                let cells = app.cells
+                guard cells.firstMatch.waitForExistence(timeout: 8) else {
+                    throw NSError(domain: "HeissRunner", code: 2, userInfo: [NSLocalizedDescriptionKey: "X media picker did not show staged Photos"])
+                }
+                for index in 0..<min(staged.count, cells.count) { cells.element(boundBy: index).tap() }
+                let add = app.buttons.matching(NSPredicate(format: "label ==[c] %@ OR label ==[c] %@ OR label ==[c] %@", "Add", "Done", "Next")).firstMatch
+                if add.waitForExistence(timeout: 3), add.isHittable { add.tap() }
+            }
         } else if action == "post:music_optional" {
             let music = command["music"] as? String ?? ""
             if !music.isEmpty {
@@ -378,7 +457,10 @@ final class HeissRunnerUITests: XCTestCase {
                 if use.count > 0 { use.firstMatch.tap() }
             }
         } else if action == "post:publish" {
-            let candidates = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@ OR label CONTAINS[c] %@", "Post", "Share"))
+            let predicate = platform == "x"
+                ? NSPredicate(format: "label ==[c] %@", "Post")
+                : NSPredicate(format: "label CONTAINS[c] %@ OR label CONTAINS[c] %@", "Post", "Share")
+            let candidates = app.buttons.matching(predicate)
             guard candidates.count > 0 else {
                 throw NSError(domain: "HeissRunner", code: 2, userInfo: [NSLocalizedDescriptionKey: "Publish button not found; app layout may have changed"])
             }
@@ -481,6 +563,9 @@ final class HeissRunnerUITests: XCTestCase {
                 status: "running", completedSteps: completed, plannedSteps: plannedSteps,
                 stepDetails: stepDetails, error: nil
             )
+            var engagedTargetKeys = Set(stepDetails.compactMap { detail in
+                detail.range(of: "target:").map { String(detail[$0.upperBound...]).split(separator: ":").first.map(String.init) ?? "" }
+            }.filter { !$0.isEmpty })
             while completed < plannedSteps.count {
                 let disrupted = try sweepKnownOverlays(app: app, platform: platform)
                 try assertNoBlockingOverlay(app: app, platform: platform)
@@ -500,8 +585,10 @@ final class HeissRunnerUITests: XCTestCase {
                         throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) lost foreground re-verifying account at step \(completed + 1)"])
                     }
                 }
-                try performWarmupStep(step, app: app, window: window, platform: platform, command: command)
-                stepDetails[completed] = "xctest:\(platform):\(step)"
+                stepDetails[completed] = try performWarmupStep(
+                    step, app: app, window: window, platform: platform,
+                    command: command, engagedTargetKeys: &engagedTargetKeys
+                )
                 completed += 1
                 writeSessionJournal(
                     journalURL, sessionId: sessionId, platform: platform, handle: handle,
@@ -592,21 +679,26 @@ final class HeissRunnerUITests: XCTestCase {
         app: XCUIApplication,
         window: XCUIElement,
         platform: String,
-        command: [String: Any]
-    ) throws {
+        command: [String: Any],
+        engagedTargetKeys: inout Set<String>
+    ) throws -> String {
         if action.contains("scroll") {
             let start = window.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.78))
             let end = window.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.28))
             start.press(forDuration: 0.08, thenDragTo: end)
-            return
+            return "xctest:\(platform):\(action)"
         }
         if action.contains("like") {
-            window.coordinate(withNormalizedOffset: point(command, "like", .init(dx: 0.90, dy: 0.55))).tap()
-            return
+            return try performGuardedEngagement(
+                action: "like", app: app, window: window, platform: platform,
+                command: command, engagedTargetKeys: &engagedTargetKeys
+            )
         }
         if action.contains("follow") {
-            window.coordinate(withNormalizedOffset: point(command, "follow", .init(dx: 0.88, dy: 0.43))).tap()
-            return
+            return try performGuardedEngagement(
+                action: "follow", app: app, window: window, platform: platform,
+                command: command, engagedTargetKeys: &engagedTargetKeys
+            )
         }
         guard action.contains("search") else {
             throw NSError(domain: "HeissRunner", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unsupported batched action \(action)"])
@@ -654,7 +746,7 @@ final class HeissRunnerUITests: XCTestCase {
                 throw NSError(domain: "HeissRunner", code: 12, userInfo: [NSLocalizedDescriptionKey: "No search term is configured"])
             }
             try performTikTokSearchTyping(surface: window, term: term)
-            return
+            return "xctest:\(platform):\(action)"
         }
         let fields = app.searchFields.count > 0 ? app.searchFields : app.textFields
         guard fields.count > 0, let term = terms.randomElement() else {
@@ -669,6 +761,93 @@ final class HeissRunnerUITests: XCTestCase {
         clearSearchFieldIfNeeded(app, surface: window, field: field)
         try typeUsingVisibleKeyboard(app, text: term)
         submitVisibleSearch(app, surface: window, command: command)
+        return "xctest:\(platform):\(action)"
+    }
+
+    private func performGuardedEngagement(
+        action: String,
+        app: XCUIApplication,
+        window: XCUIElement,
+        platform: String,
+        command: [String: Any],
+        engagedTargetKeys: inout Set<String>
+    ) throws -> String {
+        let target = try engagementTarget(platform: platform, actor: command["handle"] as? String ?? "")
+        let blocked = Set(command["blockedEngagementTargetKeys"] as? [String] ?? [])
+        let owned = Set((command["ownedHandles"] as? [String] ?? []).map(normalizedHandle))
+        let actor = normalizedHandle(command["handle"] as? String ?? "")
+        if target.handles.contains(where: { owned.contains($0) && $0 != actor }) {
+            return "engagement:skipped_owned:\(action):target:\(target.key)"
+        }
+        if blocked.contains(target.key) || engagedTargetKeys.contains(target.key) {
+            return "engagement:skipped_duplicate:\(action):target:\(target.key)"
+        }
+
+        if action == "like" {
+            let already = app.buttons.matching(NSPredicate(
+                format: "label BEGINSWITH[c] %@ OR label BEGINSWITH[c] %@",
+                "Unlike", "Liked"
+            )).firstMatch
+            if already.exists { return "engagement:skipped_already_liked:like:target:\(target.key)" }
+            let likes = app.buttons.matching(NSPredicate(
+                format: "label ==[c] %@ OR label BEGINSWITH[c] %@",
+                "Like", "Like,"
+            ))
+            let button = likes.allElementsBoundByIndex.first(where: { $0.exists && $0.isHittable })
+            if let button { button.tap() }
+            else { window.coordinate(withNormalizedOffset: point(command, "like", .init(dx: 0.90, dy: 0.55))).tap() }
+        } else {
+            let already = app.buttons.matching(NSPredicate(
+                format: "label BEGINSWITH[c] %@ OR label BEGINSWITH[c] %@",
+                "Following", "Unfollow"
+            )).firstMatch
+            if already.exists { return "engagement:skipped_already_following:follow:target:\(target.key)" }
+            let follows = app.buttons.matching(NSPredicate(
+                format: "label ==[c] %@ OR label BEGINSWITH[c] %@",
+                "Follow", "Follow "
+            ))
+            let button = follows.allElementsBoundByIndex.first(where: { $0.exists && $0.isHittable })
+            if let button { button.tap() }
+            else { window.coordinate(withNormalizedOffset: point(command, "follow", .init(dx: 0.88, dy: 0.43))).tap() }
+        }
+        engagedTargetKeys.insert(target.key)
+        return "engagement:executed:\(action):target:\(target.key)"
+    }
+
+    private func engagementTarget(platform: String, actor: String) throws -> (key: String, handles: Set<String>) {
+        let observations = try recognizedTextObservationsUsingOCR()
+        let visible = observations.filter { observation in
+            observation.boundingBox.midY >= 0.16 && observation.boundingBox.midY <= 0.88
+        }.compactMap { $0.topCandidates(1).first?.string.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let handles = Set(visible.flatMap { text in
+            text.split(whereSeparator: { $0.isWhitespace || ",;()[]{}".contains($0) })
+                .map(String.init)
+                .filter { $0.hasPrefix("@") && $0.count > 1 }
+                .map(normalizedHandle)
+        })
+        let actorNormalized = normalizedHandle(actor)
+        let candidates = handles.filter { $0 != actorNormalized }
+        guard candidates.count == 1, let candidate = candidates.first else {
+            throw NSError(domain: "HeissRunner", code: 25, userInfo: [
+                NSLocalizedDescriptionKey: "No single unambiguous visible target handle was available; engagement was refused",
+                "failureKind": "safety_policy",
+            ])
+        }
+        return (stableFingerprint("\(platform)|\(candidate)"), handles)
+    }
+
+    private func normalizedHandle(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased().replacingOccurrences(of: "@", with: "")
+    }
+
+    private func stableFingerprint(_ value: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in value.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
     }
 
     /// Returns true when a dismissal relaunched the foreground app, so callers

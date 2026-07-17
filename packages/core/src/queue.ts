@@ -38,6 +38,12 @@ export function dropContent(input: DropContentInput): DropResult {
   if (input.kind === "carousel" && (!input.slides || input.slides.length < 2)) {
     throw new QueueError("Carousel requires at least two slides in slides[]");
   }
+  if (input.kind === "text" && input.caption.trim().length === 0) {
+    throw new QueueError("Text posts require a caption");
+  }
+  if (input.kind !== "text" && !input.mediaRef.trim()) {
+    throw new QueueError("Media posts require mediaRef");
+  }
   const now = input.now ?? new Date().toISOString();
   const content: ContentAsset = {
     id: randomUUID(),

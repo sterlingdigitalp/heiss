@@ -223,7 +223,7 @@ export function createWebServer() {
         return;
       }
       if (url.pathname === "/llms.txt" && req.method === "GET") {
-        send(res, 200, `# Heiss\n\n> Heiss runs social accounts on autopilot from real iPhones you own.\n\n- TikTok and Instagram: phased warmup plus scheduled video/carousel posting.\n- X and YouTube: warmup only.\n- Real wired iPhones, signed XCTest gestures, no unofficial social APIs.\n- Local-first farm state with optional hosted Cloud Drop.\n\nDashboard: ${origin}/app\nGuides: ${origin}/blog.html\n`, "text/plain; charset=utf-8");
+        send(res, 200, `# Heiss\n\n> Heiss runs social accounts on autopilot from real iPhones you own.\n\n- TikTok and Instagram: phased warmup plus scheduled media posting.\n- X: phased warmup plus scheduled text/media posting.\n- YouTube: warmup only.\n- Real wired iPhones, signed XCTest gestures, no unofficial social APIs.\n- Local-first farm state with optional hosted Cloud Drop.\n\nDashboard: ${origin}/app\nGuides: ${origin}/blog.html\n`, "text/plain; charset=utf-8");
         return;
       }
 
@@ -655,7 +655,7 @@ export function createWebServer() {
         if (!user) { send(res, 401, { error: "Unauthorized" }); return; }
         if (!subscriptionActive(user)) { send(res, 402, { error: "Free trial expired" }); return; }
         const json = JSON.parse(await readBody(req)) as {
-          kind?: "video" | "carousel";
+          kind?: "text" | "video" | "carousel";
           mediaRef?: string;
           slides?: string[];
           caption?: string;
@@ -669,7 +669,7 @@ export function createWebServer() {
         const farm = farmForUser(s, user.id);
         const mediaRefs = [json.mediaRef, ...(json.slides ?? [])]
           .filter((ref): ref is string => Boolean(ref));
-        if (mediaRefs.length === 0 || mediaRefs.some((ref) => !userUploadPath(user.id, ref))) {
+        if (json.kind !== "text" && (mediaRefs.length === 0 || mediaRefs.some((ref) => !userUploadPath(user.id, ref)))) {
           send(res, 400, { error: "Media must come from your authenticated Cloud Drop uploads" }); return;
         }
         // Validate accounts exist
@@ -679,10 +679,13 @@ export function createWebServer() {
             return;
           }
         }
+        if (json.kind === "text" && accountIds.some((id) => farm.accounts.find((account) => account.id === id)?.platform !== "x")) {
+          send(res, 400, { error: "Text-only drops can target X accounts only" }); return;
+        }
         const { content, queueItem } = dropContent({
           ownerId: user.id,
           kind: json.kind ?? "video",
-          mediaRef: json.mediaRef ?? "upload.bin",
+          mediaRef: json.kind === "text" ? "" : json.mediaRef ?? "upload.bin",
           slides: json.slides,
           caption: json.caption ?? "",
           music: json.music,
