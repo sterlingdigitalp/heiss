@@ -89,6 +89,7 @@ Farm:
   heiss-farm add-account <deviceId> <platform> <handle> [--stage STAGE] [--terms a,b]
   heiss-farm add-account-set <deviceId> <name> --instagram @h --tiktok @h --x @h --youtube @h [--terms "term,term"]
   heiss-farm account-set terms <groupId> "term,term"
+  heiss-farm account-set rename <groupId> <name>
   heiss-farm account handle <accountId> @handle
   heiss-farm account switcher <accountId> "picker label"
   heiss-farm account identity <accountId> [--display-name NAME] [--email EMAIL] [--switcher LABEL] [--avatar HASH]
@@ -1188,6 +1189,15 @@ async function main(): Promise<void> {
     }
     store.save();
     print({ ok: results.every((result) => result.ok), results }); return;
+  }
+
+  if (cmd === "account-set" && args[1] === "rename") {
+    const store = openStore(args);
+    const group = store.state.accountGroups.find((candidate) => candidate.id === args[2]);
+    const name = args.slice(3).join(" ").trim();
+    if (!group || !name) throw new Error("Usage: account-set rename <groupId> <name>");
+    group.name = name;
+    store.save(); print({ ok: true, group }); return;
   }
 
   if (cmd === "account-set" && args[1] === "terms") {
