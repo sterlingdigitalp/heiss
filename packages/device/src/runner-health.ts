@@ -32,6 +32,9 @@ export interface AutomationHealth {
   protocolVersion?: number;
   runnerBuild?: string;
   protocolCompatible: boolean;
+  /** True ONLY when the runner answered with a version that differs. A ping
+   *  timeout leaves this false — it is not evidence of a wrong build. */
+  protocolMismatch: boolean;
 }
 
 export type RunnerRepairAction = "none" | "relaunch" | "reinstall";
@@ -106,23 +109,28 @@ export async function checkAutomationRunner(
   let protocolVersion: number | undefined;
   let runnerBuild: string | undefined;
   let protocolCompatible = false;
+  let protocolMismatch = false;
   const transport = new RealUsbTransport({ commandTimeoutMs: opts.pingTimeoutMs ?? 20_000 });
   try {
     const info = await transport.runnerInfo(udid);
+    // The runner answered — distinguish a real version mismatch (needs a
+    // rebuild) from a delivery failure (just needs a relaunch/retry).
+    pingOk = true;
     protocolVersion = info.protocolVersion;
     runnerBuild = info.runnerBuild;
     protocolCompatible = info.compatible;
-    pingOk = info.compatible;
+    protocolMismatch = !info.compatible;
     detail = info.compatible
       ? `xctest-ready v${info.protocolVersion}/${info.runnerBuild}`
       : `protocol mismatch: expected v${RUNNER_PROTOCOL_VERSION}/${RUNNER_BUILD}, got v${info.protocolVersion}/${info.runnerBuild}`;
   } catch (error) {
+    // No response at all — transport/contention failure, not a wrong build.
     detail = error instanceof Error ? error.message : String(error);
   }
   return {
     udid, label, jobLoaded, pingOk,
     healthy: jobLoaded && pingOk && protocolCompatible,
-    detail, protocolVersion, runnerBuild, protocolCompatible,
+    detail, protocolVersion, runnerBuild, protocolCompatible, protocolMismatch,
   };
 }
 
@@ -139,9 +147,11 @@ export async function ensureAutomationRunner(
   } = {},
 ): Promise<RunnerRepairResult> {
   const health = await checkAutomationRunner(udid, opts);
-  // A runner speaking an old/new protocol cannot be repaired by relaunching
-  // the same build products; force a fresh build and install.
-  const action = !health.protocolCompatible
+  // Only a CONFIRMED protocol mismatch (the runner answered with a different
+  // version) justifies a full rebuild. A ping that merely failed to deliver
+  // is transport contention — relaunch the existing build instead of forcing
+  // an expensive, device-busy-prone rebuild.
+  const action = health.protocolMismatch
     ? "reinstall"
     : planRunnerRepair(health.healthy, hasAutomationBuildProducts());
   if (action === "none") {
