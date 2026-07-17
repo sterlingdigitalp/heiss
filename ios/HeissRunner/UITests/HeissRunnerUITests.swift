@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.17.2"
+private let heissRunnerBuild = "heiss-runner-2026.07.17.3"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -746,7 +746,8 @@ final class HeissRunnerUITests: XCTestCase {
                 throw NSError(domain: "HeissRunner", code: 12, userInfo: [NSLocalizedDescriptionKey: "No search term is configured"])
             }
             try performTikTokSearchTyping(surface: window, term: term)
-            return "xctest:\(platform):\(action)"
+            Thread.sleep(forTimeInterval: 1.2)
+            return discoveryDetail(base: "xctest:\(platform):\(action)", platform: platform, actor: command["handle"] as? String ?? "")
         }
         let fields = app.searchFields.count > 0 ? app.searchFields : app.textFields
         guard fields.count > 0, let term = terms.randomElement() else {
@@ -761,7 +762,38 @@ final class HeissRunnerUITests: XCTestCase {
         clearSearchFieldIfNeeded(app, surface: window, field: field)
         try typeUsingVisibleKeyboard(app, text: term)
         submitVisibleSearch(app, surface: window, command: command)
-        return "xctest:\(platform):\(action)"
+        Thread.sleep(forTimeInterval: 1.2)
+        return discoveryDetail(base: "xctest:\(platform):\(action)", platform: platform, actor: command["handle"] as? String ?? "")
+    }
+
+    /// Search-result observation is deliberately read-only. Failure to extract
+    /// candidates never fails the warmup step or triggers a recovery loop.
+    private func discoveryDetail(base: String, platform: String, actor: String) -> String {
+        do {
+            let observations = try recognizedTextObservationsUsingOCR()
+            let visible = observations.filter { observation in
+                observation.boundingBox.midY >= 0.14 && observation.boundingBox.midY <= 0.90
+            }.compactMap { $0.topCandidates(1).first?.string.trimmingCharacters(in: .whitespacesAndNewlines) }
+            let actorNormalized = normalizedHandle(actor)
+            let handles = Array(Set(visible.flatMap { text in
+                text.split(whereSeparator: { $0.isWhitespace || ",;()[]{}".contains($0) })
+                    .map(String.init)
+                    .filter { $0.hasPrefix("@") && $0.count > 1 }
+                    .map(normalizedHandle)
+                    .filter { !$0.isEmpty && $0 != actorNormalized }
+            })).sorted()
+            guard !handles.isEmpty else { return base }
+            let excerpt = String(visible.joined(separator: " ").prefix(700))
+            let payload: [String: Any] = [
+                "handles": handles,
+                "excerpt": excerpt,
+                "screenKey": stableFingerprint("\(platform)|\(excerpt.lowercased())"),
+            ]
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            return "\(base)|discovery:\(data.base64EncodedString())"
+        } catch {
+            return base
+        }
     }
 
     private func performGuardedEngagement(

@@ -201,6 +201,7 @@ export class RealUsbTransport implements IosTransport {
         kind,
         completedSteps,
         screenshotPath,
+        Array.isArray(result.stepDetails) ? result.stepDetails.map((value) => String(value)) : undefined,
       );
     }
     return {

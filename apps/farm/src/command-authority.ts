@@ -20,6 +20,7 @@ export function commandMutatesFarm(args: string[]): boolean {
   if (cmd === "license" && sub === "show") return false;
   if (cmd === "setup" && sub === "status") return false;
   if (cmd === "maintenance" && sub === "status") return false;
+  if (cmd === "candidates" && sub === "show") return false;
   return true;
 }
 

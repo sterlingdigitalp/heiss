@@ -26,12 +26,14 @@ import {
   type Platform,
   type AccountStage,
   assessDeviceCapacity,
-  AUTONOMOUS_REVIEWED_SESSION_THRESHOLD,
   defaultEngagementPolicy,
   engagementAutonomousEligible,
   ensureDailyEngagementApproval,
   normalizeEngagementPolicy,
   checkpointStaleRunningSessions,
+  approveCandidate,
+  refreshCandidateQueue,
+  recordDiscoveryCandidates,
 } from "@heiss/core";
 import {
   RealIosDriver,
@@ -107,12 +109,17 @@ Farm:
   heiss-farm remove-account <accountId>
   heiss-farm add-slot <accountId> <HH:mm>
   heiss-farm remove-slot <slotId>
-  heiss-farm warmup-schedule list | set <accountId> <HH:mm> [--jitter N] | enable <accountId> | disable <accountId> | remove <accountId>
+  heiss-farm warmup-schedule list | rebalance | set <accountId> <HH:mm> [--jitter N] | enable <accountId> | disable <accountId> | remove <accountId>
   heiss-farm settings show | timezone <IANA_ZONE> | caps <farm> <account>
   heiss-farm engagement show
   heiss-farm engagement configure <accountId> --mode off|review|autonomous [--likes on|off] [--follows on|off] [--like-cap 0..5] [--follow-cap 0..2] [--cooldown-min N]
   heiss-farm engagement review <accountId>
   heiss-farm engagement approve|reject <approvalId>
+  heiss-farm candidates show [--group GROUP_ID]
+  heiss-farm candidates canary <accountId>
+  heiss-farm candidates approve <candidateId> <like|follow>
+  heiss-farm candidates reject <candidateId>
+  heiss-farm candidates assist <approvalId> | complete <approvalId> | skip <approvalId>
   heiss-farm safety stop | resume
   heiss-farm maintenance enter [--reason TEXT] | exit | status
   heiss-farm data migrate --from DIR
@@ -344,11 +351,11 @@ function rebalanceWarmupSchedules(store: JsonStore): void {
     const deviceId = accountById.get(schedule.accountId)?.deviceId ?? "unassigned";
     const index = deviceScheduleIndexes.get(deviceId) ?? 0;
     deviceScheduleIndexes.set(deviceId, index + 1);
-    const minutes = 20 * 60 + index * 15;
+    const minutes = 15 * 60 + 30 + index * 14;
     schedule.timeOfDay = `${String(Math.floor(minutes / 60) % 24).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
     schedule.jitterMinutes = Math.min(schedule.jitterMinutes, 5);
   }
-  store.state.settings.platformScheduleVersion = 1;
+  store.state.settings.platformScheduleVersion = 2;
 }
 
 async function main(): Promise<void> {
@@ -751,6 +758,8 @@ async function main(): Promise<void> {
       accountGroups: store.state.accountGroups,
       engagementApprovals: store.state.engagementApprovals,
       engagementTargets: store.state.engagementTargets.slice(-100),
+      engagementCandidates: store.state.engagementCandidates.slice(-500),
+      engagementActionApprovals: store.state.engagementActionApprovals.slice(-500),
       queue: store.state.queue,
       contents: store.state.contents,
       slots: store.state.slots,
@@ -859,21 +868,20 @@ async function main(): Promise<void> {
         if (recoveredStaleSessions.length > 0) {
           notifyDesktop("Heiss recovered a stale session", `${recoveredStaleSessions.length} stale running checkpoint${recoveredStaleSessions.length === 1 ? " was" : "s were"} released for safe retry.`);
         }
-        for (const account of store.state.accounts) {
-          const before = store.state.engagementApprovals.length;
-          const request = ensureDailyEngagementApproval(
-            account,
-            store.state.engagementApprovals,
-            calendarDay(nowIso, store.state.settings.timeZone),
-            nowIso,
-          );
-          if (request && store.state.engagementApprovals.length > before) {
-            store.pushActivity({
-              kind: "engagement_review_requested", accountId: account.id, deviceId: account.deviceId,
-              message: `${account.handle} engagement review is ready (${request.proposedLikes} likes, ${request.proposedFollows} follows)`,
-            });
-            notifyDesktop("Heiss engagement review", `${account.handle} is waiting for approval before today's engagement actions.`);
-          }
+        const localDayNow = calendarDay(nowIso, store.state.settings.timeZone);
+        const newlyReady = refreshCandidateQueue(
+          store.state.engagementCandidates, store.state.engagementActionApprovals,
+          localDayNow, nowIso,
+        );
+        if (newlyReady > 0) notifyDesktop("Heiss approved actions are ready", `${newlyReady} reviewed action${newlyReady === 1 ? " is" : "s are"} ready for guided completion.`);
+        if (timeOfDay >= "22:00" && store.state.settings.notificationKeys.candidateReview !== localDayNow) {
+          const reviewCount = store.state.engagementCandidates.filter((candidate) => candidate.status === "pending"
+            && calendarDay(candidate.lastSeenAt, store.state.settings.timeZone) === localDayNow).length;
+          store.state.settings.notificationKeys.candidateReview = localDayNow;
+          notifyDesktop("Heiss candidate review is ready", reviewCount > 0
+            ? `${reviewCount} candidate${reviewCount === 1 ? " is" : "s are"} ready for exact approval.`
+            : "No candidates were captured tonight; check Attention for paused accounts.");
+          store.pushActivity({ kind: "candidate_review_ready", message: `10 p.m. candidate review ready (${reviewCount} candidates)` });
         }
         const maintenance = store.state.settings.maintenance;
         if (maintenance.mode !== "running") {
@@ -1309,7 +1317,7 @@ async function main(): Promise<void> {
       store.state.accounts.push(account);
       if (["tiktok", "instagram", "x"].includes(account.platform)) store.state.slots.push(createSlot(account.id, "09:00"));
       const index = store.state.warmupSchedules.length;
-      const minutes = 20 * 60 + 30 + index * 20;
+      const minutes = 15 * 60 + 30 + index * 14;
       const time = `${String(Math.floor(minutes / 60) % 24).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
       store.state.warmupSchedules.push(createWarmupSchedule(account.id, time, 8));
     }
@@ -1361,7 +1369,7 @@ async function main(): Promise<void> {
       store.state.slots.push(createSlot(account.id, "09:00"));
     }
     const warmupIndex = store.state.warmupSchedules.length;
-    const minutes = 20 * 60 + 30 + warmupIndex * 20;
+    const minutes = 15 * 60 + 30 + warmupIndex * 14;
     const warmupTime = `${String(Math.floor(minutes / 60) % 24).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
     store.state.warmupSchedules.push(createWarmupSchedule(account.id, warmupTime, 8));
     if (store.state.warmupSchedules.length > 4) rebalanceWarmupSchedules(store);
@@ -1390,6 +1398,8 @@ async function main(): Promise<void> {
     store.state.warmupSchedules = store.state.warmupSchedules.filter((slot) => slot.accountId !== account.id);
     store.state.engagementApprovals = store.state.engagementApprovals.filter((item) => item.accountId !== account.id);
     store.state.engagementTargets = store.state.engagementTargets.filter((item) => item.accountId !== account.id);
+    store.state.engagementCandidates = store.state.engagementCandidates.filter((item) => item.accountId !== account.id);
+    store.state.engagementActionApprovals = store.state.engagementActionApprovals.filter((item) => item.accountId !== account.id);
     for (const item of store.state.queue.filter((queue) => queue.accountIds.includes(account.id))) {
       item.accountIds = item.accountIds.filter((id) => id !== account.id);
       if (item.accountIds.length === 0 && item.status !== "posted") item.status = "cancelled";
@@ -1415,6 +1425,98 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cmd === "candidates" && args[1] === "show") {
+    const store = openStore(args);
+    refreshCandidateQueue(store.state.engagementCandidates, store.state.engagementActionApprovals,
+      calendarDay(new Date().toISOString(), store.state.settings.timeZone), new Date().toISOString());
+    const groupId = getArg(args, "--group");
+    print({ ok: true,
+      candidates: store.state.engagementCandidates.filter((candidate) => !groupId || candidate.groupId === groupId),
+      approvals: store.state.engagementActionApprovals.filter((approval) => !groupId || approval.groupId === groupId),
+    }); return;
+  }
+
+  if (cmd === "candidates" && args[1] === "canary") {
+    const store = openStore(args); const account = store.state.accounts.find((item) => item.id === args[2]);
+    const device = account && store.state.devices.find((item) => item.id === account.deviceId);
+    if (!account || !device) throw new Error("Usage: candidates canary <accountId>");
+    if ((account.preflightStatus ?? "ready") !== "ready") throw new Error("Account preflight must be ready before a discovery canary");
+    const driver = makeDriver(); const sessionId = `candidate-canary-${randomUUID()}`;
+    await driver.connect(device.id, device.udid);
+    try {
+      if (!driver.runSession) throw new Error("The physical-device session runner is unavailable");
+      const result = await driver.runSession(device.id, account.id, sessionId, ["warmup:search"], 0, {
+        platform: account.platform, handle: account.handle, displayName: account.displayName,
+        loginEmail: account.loginEmail, switcherHint: account.switcherHint, avatarFingerprint: account.avatarFingerprint,
+        searchTerms: account.searchTerms, uiProfile: store.state.uiProfiles[account.platform],
+        ownedHandles: store.state.accounts.map((item) => item.handle),
+      });
+      const recorded = (result.stepDetails ?? []).flatMap((detail) => recordDiscoveryCandidates({
+        candidates: store.state.engagementCandidates, account,
+        ownedHandles: store.state.accounts.map((item) => item.handle), sessionId, detail, now: new Date().toISOString(),
+      }));
+      store.pushActivity({ kind: "candidate_canary", accountId: account.id, deviceId: account.deviceId,
+        message: `${account.handle} discovery canary completed; ${recorded.length} candidate${recorded.length === 1 ? "" : "s"} observed` });
+      store.save(); print({ ok: true, accountId: account.id, completedSteps: result.completedSteps, recorded }); return;
+    } finally { await driver.disconnect(device.id).catch(() => undefined); }
+  }
+
+  if (cmd === "candidates" && args[1] === "approve") {
+    const store = openStore(args); const candidate = store.state.engagementCandidates.find((item) => item.id === args[2]);
+    const action = args[3] as "like" | "follow" | undefined;
+    if (!candidate || !action || !["like", "follow"].includes(action)) throw new Error("Usage: candidates approve <candidateId> <like|follow>");
+    const account = store.state.accounts.find((item) => item.id === candidate.accountId);
+    if (!account || !["matured", "kept_warm", "posting"].includes(account.stage)) throw new Error("Candidate approvals unlock when this account is mature");
+    const now = new Date().toISOString();
+    const approval = approveCandidate({ candidate, action, approvals: store.state.engagementActionApprovals,
+      allCandidates: store.state.engagementCandidates, localDay: calendarDay(now, store.state.settings.timeZone), now });
+    store.pushActivity({ kind: "candidate_approved", accountId: account.id, deviceId: account.deviceId,
+      message: `${action} @${candidate.targetHandle} approved and ready for guided completion` });
+    store.save(); print({ ok: true, candidate, approval }); return;
+  }
+
+  if (cmd === "candidates" && args[1] === "reject") {
+    const store = openStore(args); const candidate = store.state.engagementCandidates.find((item) => item.id === args[2]);
+    if (!candidate || !["pending", "approved"].includes(candidate.status)) throw new Error("Candidate is not reviewable");
+    candidate.status = "rejected";
+    for (const approval of store.state.engagementActionApprovals.filter((item) => item.candidateId === candidate.id && !["completed", "skipped"].includes(item.status))) approval.status = "skipped";
+    store.save(); print({ ok: true, candidate }); return;
+  }
+
+  if (cmd === "candidates" && args[1] === "assist") {
+    const store = openStore(args); const approval = store.state.engagementActionApprovals.find((item) => item.id === args[2]);
+    if (!approval || !["ready", "needs_manual"].includes(approval.status)) throw new Error("Approved action is not ready yet");
+    const account = store.state.accounts.find((item) => item.id === approval.accountId);
+    const device = account && store.state.devices.find((item) => item.id === account.deviceId);
+    if (!account || !device) throw new Error("Candidate account or device is missing");
+    const driver = makeDriver(); await driver.connect(device.id, device.udid);
+    try {
+      await driver.runAction(device.id, account.id, "candidate:search", {
+        platform: account.platform, handle: account.handle, displayName: account.displayName,
+        loginEmail: account.loginEmail, switcherHint: account.switcherHint, avatarFingerprint: account.avatarFingerprint,
+        searchTerms: [`@${approval.targetHandle}`], uiProfile: store.state.uiProfiles[account.platform],
+        ownedHandles: store.state.accounts.map((item) => item.handle),
+      });
+      approval.status = "needs_manual"; approval.attemptedAt = new Date().toISOString();
+      store.pushActivity({ kind: "candidate_assisted", accountId: account.id, deviceId: account.deviceId,
+        message: `Opened @${approval.targetHandle} for human-confirmed ${approval.action}` });
+      store.save(); print({ ok: true, approval, next: `Confirm the ${approval.action} on the iPhone, then mark complete.` }); return;
+    } finally { await driver.disconnect(device.id).catch(() => undefined); }
+  }
+
+  if (cmd === "candidates" && (args[1] === "complete" || args[1] === "skip")) {
+    const store = openStore(args); const approval = store.state.engagementActionApprovals.find((item) => item.id === args[2]);
+    if (!approval || !["ready", "needs_manual"].includes(approval.status)) throw new Error("Approved action is not completable");
+    const account = store.state.accounts.find((item) => item.id === approval.accountId); const now = new Date().toISOString();
+    approval.status = args[1] === "complete" ? "completed" : "skipped"; approval.completedAt = now;
+    if (approval.status === "completed" && !store.state.engagementTargets.some((item) => item.accountId === approval.accountId && item.targetKey === approval.targetKey && item.action === approval.action)) {
+      store.state.engagementTargets.push({ id: randomUUID(), accountId: approval.accountId, platform: approval.platform, action: approval.action, targetKey: approval.targetKey, at: now });
+    }
+    store.pushActivity({ kind: "candidate_completed", accountId: approval.accountId, deviceId: account?.deviceId,
+      message: `${approval.action} @${approval.targetHandle} ${approval.status}` });
+    store.save(); print({ ok: true, approval }); return;
+  }
+
   if (cmd === "engagement" && args[1] === "configure") {
     const store = openStore(args);
     const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
@@ -1422,6 +1524,7 @@ async function main(): Promise<void> {
     if (!account || !mode || !["off", "review", "autonomous"].includes(mode)) {
       throw new Error("Usage: engagement configure <accountId> --mode off|review|autonomous [--likes on|off] [--follows on|off] [--like-cap 0..5] [--follow-cap 0..2] [--cooldown-min N]");
     }
+    if (mode === "autonomous") throw new Error("Unattended engagement is disabled; use exact candidate approvals and guided completion");
     const current = normalizeEngagementPolicy(account.engagement);
     const likeCap = Number(getArg(args, "--like-cap") ?? current.dailyLikeCap);
     const followCap = Number(getArg(args, "--follow-cap") ?? current.dailyFollowCap);
@@ -1438,12 +1541,7 @@ async function main(): Promise<void> {
       dailyFollowCap: followCap,
       cooldownMinutes: cooldown,
     });
-    const previous = account.engagement;
     account.engagement = policy;
-    if (mode === "autonomous" && !engagementAutonomousEligible(account)) {
-      account.engagement = previous;
-      throw new Error(`Autonomous engagement requires a mature account and ${AUTONOMOUS_REVIEWED_SESSION_THRESHOLD} successful reviewed sessions`);
-    }
     const request = ensureDailyEngagementApproval(account, store.state.engagementApprovals, calendarDay(new Date().toISOString(), store.state.settings.timeZone));
     store.pushActivity({ kind: "engagement_policy", accountId: account.id, deviceId: account.deviceId,
       message: `${account.handle} engagement set to ${mode}; likes ${policy.likesEnabled ? "on" : "off"}, follows ${policy.followsEnabled ? "on" : "off"}` });
@@ -1524,6 +1622,15 @@ async function main(): Promise<void> {
       schedules: store.state.warmupSchedules,
       next: nextWarmupSummary(store.state.warmupSchedules, store.state.accounts, new Date().toISOString(), store.state.settings.timeZone),
     });
+    return;
+  }
+
+  if (cmd === "warmup-schedule" && args[1] === "rebalance") {
+    const store = openStore(args); rebalanceWarmupSchedules(store); store.save();
+    print({ ok: true, timeZone: store.state.settings.timeZone, schedules: store.state.warmupSchedules,
+      latestByDevice: store.state.devices.map((device) => ({ deviceId: device.id, name: device.name,
+        latest: store.state.warmupSchedules.filter((schedule) => store.state.accounts.find((account) => account.id === schedule.accountId)?.deviceId === device.id)
+          .map((schedule) => schedule.timeOfDay).sort().at(-1) ?? null })) });
     return;
   }
 

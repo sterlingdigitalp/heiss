@@ -1,6 +1,7 @@
 export * from "./types.js";
 export * from "./lifecycle.js";
 export * from "./engagement.js";
+export * from "./candidates.js";
 export * from "./capacity.js";
 export * from "./protocol.js";
 export * from "./locks.js";

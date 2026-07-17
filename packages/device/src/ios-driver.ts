@@ -31,6 +31,7 @@ export class DeviceSessionError extends Error {
     readonly failureKind: FailureKind,
     readonly completedSteps = 0,
     readonly screenshot?: string,
+    readonly stepDetails?: string[],
   ) {
     super(message);
     this.name = "DeviceSessionError";

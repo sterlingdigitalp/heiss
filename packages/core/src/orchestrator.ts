@@ -36,6 +36,7 @@ import {
   resumeSession,
 } from "./checkpoint.js";
 import { classifyFailure } from "./failures.js";
+import { recordDiscoveryCandidates } from "./candidates.js";
 import type { JsonStore } from "./store.js";
 import type {
   FarmSession,
@@ -650,7 +651,9 @@ export class FarmOrchestrator {
       } catch (error) {
         const completedSteps = batchCompletedSteps(error);
         if (completedSteps > s.checkpoint.stepIndex) {
-          s = this.applyBatchedProgress(s, account, script, completedSteps, undefined, activity, runNow);
+          const partialDetails = error && typeof error === "object" && Array.isArray((error as { stepDetails?: unknown }).stepDetails)
+            ? (error as { stepDetails: unknown[] }).stepDetails.map(String) : undefined;
+          s = this.applyBatchedProgress(s, account, script, completedSteps, partialDetails, activity, runNow);
         }
         const failedStep = script[s.checkpoint.stepIndex] ?? "session:complete";
         const message = `action_failed: ${failedStep} → ${error instanceof Error ? error.message : String(error)}`;
@@ -750,6 +753,7 @@ export class FarmOrchestrator {
         message: line,
       });
       this.recordEngagementOutcome(account, s.id, step, result.detail, runNow);
+      this.recordCandidateObservations(account, s.id, result.detail, runNow);
 
       const extras: Parameters<typeof advanceCheckpoint>[2] = {};
       if (step === "post:publish") {
@@ -867,6 +871,7 @@ export class FarmOrchestrator {
         message: line, meta: { batched: true, stepIndex: index + 1, stepCount: script.length },
       });
       this.recordEngagementOutcome(account, next.id, step, details?.[index] ?? "", now);
+      this.recordCandidateObservations(account, next.id, details?.[index] ?? "", now);
       next = { ...next, checkpoint: advanceCheckpoint(next.checkpoint, step), updatedAt: now };
     }
     return next;
@@ -907,6 +912,23 @@ export class FarmOrchestrator {
         id: randomUUID(), accountId: account.id, platform: account.platform, action, targetKey, at: now,
       });
     }
+  }
+
+  private recordCandidateObservations(account: SocialAccount, sessionId: string, detail: string, now: string): void {
+    const recorded = recordDiscoveryCandidates({
+      candidates: this.store.state.engagementCandidates,
+      account,
+      ownedHandles: this.store.state.accounts.map((candidate) => candidate.handle),
+      sessionId,
+      detail,
+      now,
+    });
+    if (recorded.length === 0) return;
+    this.store.pushActivity({
+      kind: "candidate_discovery", sessionId, accountId: account.id, deviceId: account.deviceId,
+      message: `${account.handle} found ${recorded.length} engagement candidate${recorded.length === 1 ? "" : "s"}`,
+      meta: { candidateIds: recorded.map((candidate) => candidate.id), platform: account.platform },
+    });
   }
 
   private completeEngagementSession(session: FarmSession, account: SocialAccount, now: string): void {

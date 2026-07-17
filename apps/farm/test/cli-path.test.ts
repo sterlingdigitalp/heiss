@@ -104,7 +104,7 @@ describe("farm CLI real-only path", () => {
     assert.ok(saved.state.accounts.every((account) => account.searchTerms.join("|") === "automation|embodied AI"));
     assert.equal(saved.state.accounts.find((account) => account.id === body.accounts[2].id)?.handle, "@XCase");
     assert.equal(saved.state.warmupSchedules.length, 4);
-    assert.deepEqual(saved.state.warmupSchedules.map((schedule) => schedule.timeOfDay), ["20:00", "20:15", "20:30", "20:45"]);
+    assert.deepEqual(saved.state.warmupSchedules.map((schedule) => schedule.timeOfDay), ["15:30", "15:44", "15:58", "16:12"]);
     assert.deepEqual(saved.state.warmupSchedules.map((schedule) => saved.state.accounts.find((account) => account.id === schedule.accountId)?.platform), ["x", "tiktok", "instagram", "youtube"]);
     assert.ok(saved.state.warmupSchedules.every((schedule) => schedule.jitterMinutes <= 5));
 

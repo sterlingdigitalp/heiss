@@ -4,6 +4,8 @@ import type {
   ActivityEvent,
   AccountGroup,
   EngagementApproval,
+  EngagementActionApproval,
+  EngagementCandidate,
   EngagementTargetRecord,
   ContentAsset,
   Device,
@@ -34,6 +36,8 @@ export interface FarmState {
   accountGroups: AccountGroup[];
   engagementApprovals: EngagementApproval[];
   engagementTargets: EngagementTargetRecord[];
+  engagementCandidates: EngagementCandidate[];
+  engagementActionApprovals: EngagementActionApproval[];
   contents: ContentAsset[];
   queue: QueueItem[];
   slots: ScheduleSlot[];
@@ -58,6 +62,8 @@ export function emptyState(): FarmState {
     accountGroups: [],
     engagementApprovals: [],
     engagementTargets: [],
+    engagementCandidates: [],
+    engagementActionApprovals: [],
     contents: [],
     queue: [],
     slots: [],
@@ -68,7 +74,7 @@ export function emptyState(): FarmState {
       dailyActionCap: 400,
       accountDailyActionCap: 25,
       platformOrder: ["x", "tiktok", "instagram", "youtube"],
-      platformScheduleVersion: 1,
+      platformScheduleVersion: 2,
       requireHumanEngagement: true,
       deviceStates: {},
       notificationKeys: {},
@@ -113,6 +119,8 @@ export class JsonStore {
     this.state.accountGroups ??= [];
     this.state.engagementApprovals ??= [];
     this.state.engagementTargets ??= [];
+    this.state.engagementCandidates ??= [];
+    this.state.engagementActionApprovals ??= [];
     this.state.warmupSchedules ??= [];
     this.state.settings ??= emptyState().settings;
     this.state.settings.timeZone ??= "America/Chicago";
@@ -149,9 +157,16 @@ export class JsonStore {
         dailyLikeCap: 2, dailyFollowCap: 1, cooldownMinutes: 720,
         successfulReviewedSessions: 0,
       };
+      // Legacy unattended engagement is intentionally retired. Candidate
+      // discovery and exact human approvals are now the only write path.
+      if (account.engagement.mode === "autonomous") {
+        account.engagement.mode = "off";
+        account.engagement.likesEnabled = false;
+        account.engagement.followsEnabled = false;
+      }
       if (this.state.warmupSchedules.some((schedule) => schedule.accountId === account.id)) continue;
       const index = this.state.warmupSchedules.length;
-      const minutes = 20 * 60 + 30 + index * 20;
+      const minutes = 15 * 60 + 30 + index * 14;
       this.state.warmupSchedules.push({
         id: cryptoRandom(), accountId: account.id,
         timeOfDay: `${String(Math.floor(minutes / 60) % 24).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`,
@@ -168,7 +183,7 @@ export class JsonStore {
     }
     // Migrate legacy alternating-person schedules once. Contiguous platform
     // windows keep each app open while all of its accounts are processed.
-    if (this.state.settings.platformScheduleVersion < 1) {
+    if (this.state.settings.platformScheduleVersion < 2) {
       const accountById = new Map(this.state.accounts.map((account) => [account.id, account]));
       const order = this.state.settings.platformOrder;
       this.state.warmupSchedules.sort((left, right) => {
@@ -180,12 +195,16 @@ export class JsonStore {
           || (a?.groupId ?? "").localeCompare(b?.groupId ?? "")
           || left.accountId.localeCompare(right.accountId);
       });
-      for (const [index, schedule] of this.state.warmupSchedules.entries()) {
-        const minutes = 20 * 60 + index * 15;
+      const deviceScheduleIndexes = new Map<string, number>();
+      for (const schedule of this.state.warmupSchedules) {
+        const deviceId = accountById.get(schedule.accountId)?.deviceId ?? "unassigned";
+        const index = deviceScheduleIndexes.get(deviceId) ?? 0;
+        deviceScheduleIndexes.set(deviceId, index + 1);
+        const minutes = 15 * 60 + 30 + index * 14;
         schedule.timeOfDay = `${String(Math.floor(minutes / 60) % 24).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
         schedule.jitterMinutes = Math.min(schedule.jitterMinutes, 5);
       }
-      this.state.settings.platformScheduleVersion = 1;
+      this.state.settings.platformScheduleVersion = 2;
     }
     // Reconcile legacy trust with distinct local days. This corrects farms that
     // crossed UTC midnight while still on the same local evening.

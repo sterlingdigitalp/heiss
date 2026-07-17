@@ -68,6 +68,50 @@ export interface EngagementTargetRecord {
   at: string;
 }
 
+export type EngagementCandidateStatus = "pending" | "approved" | "rejected" | "expired";
+export type EngagementActionStatus = "approved" | "ready" | "needs_manual" | "completed" | "skipped" | "expired" | "failed";
+
+/** A read-only observation gathered during a normal search warmup. */
+export interface EngagementCandidate {
+  id: string;
+  groupId: string;
+  accountId: string;
+  platform: Platform;
+  actorHandle: string;
+  targetHandle: string;
+  targetKey: string;
+  screenKey: string;
+  excerpt: string;
+  searchTerms: string[];
+  relevanceScore: number;
+  seenCount: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  sessionId: string;
+  status: EngagementCandidateStatus;
+}
+
+/** Exact human authorization for one target and one action. */
+export interface EngagementActionApproval {
+  id: string;
+  candidateId: string;
+  groupId: string;
+  accountId: string;
+  platform: Platform;
+  action: "like" | "follow";
+  targetHandle: string;
+  targetKey: string;
+  /** Current platforms use assisted navigation; the human performs the final tap. */
+  executionMode: "assisted" | "api";
+  status: EngagementActionStatus;
+  approvedAt: string;
+  executeLocalDay: string;
+  expiresAt: string;
+  attemptedAt?: string;
+  completedAt?: string;
+  lastError?: string;
+}
+
 export interface PlatformUiProfile {
   platform: Platform;
   revision: string;
