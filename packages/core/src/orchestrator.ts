@@ -858,32 +858,40 @@ export class FarmOrchestrator {
     const retryCount = disposition.incrementSocialRetry ? (session.retryCount ?? 0) + 1 : session.retryCount;
     const socialDelay = retryCount ? Math.min(120, 5 * 2 ** (retryCount - 1)) * 60_000 : undefined;
     const delay = disposition.retryDelayMs ?? socialDelay;
+    // A recoverable failure that keeps recurring must not retry forever in
+    // silence. After enough attempts, escalate to the human attention queue so
+    // a genuinely stuck account stops consuming device time every cycle.
+    const RETRY_ESCALATION_LIMIT = 6;
+    const escalate = disposition.requiresAttention || (retryCount ?? 0) >= RETRY_ESCALATION_LIMIT;
+    const escalationNote = !disposition.requiresAttention && escalate
+      ? `${message} (escalated after ${retryCount} recovery attempts)`
+      : message;
     const paused = checkpointSession({
       ...session,
       retryCount,
       transportRetryCount: disposition.kind === "transport" || disposition.kind === "runner"
         ? (session.transportRetryCount ?? 0) + 1
         : session.transportRetryCount,
-      nextRetryAt: disposition.requiresAttention || delay === undefined
+      nextRetryAt: escalate || delay === undefined
         ? undefined
         : new Date(new Date(now).getTime() + delay).toISOString(),
-      lastError: message,
+      lastError: escalationNote,
       failureKind: disposition.kind,
-      requiresAttention: disposition.requiresAttention,
+      requiresAttention: escalate,
       updatedAt: now,
-      activityLog: [...session.activityLog, message],
+      activityLog: [...session.activityLog, escalationNote],
     });
-    if (disposition.requiresAttention) {
+    if (escalate) {
       const storedAccount = this.store.state.accounts.find((candidate) => candidate.id === account.id);
       if (storedAccount) {
         storedAccount.preflightStatus = "attention";
-        storedAccount.preflightNote = message;
+        storedAccount.preflightNote = escalationNote;
       }
     }
-    activity.push(`${account.handle}: ${message}`);
+    activity.push(`${account.handle}: ${escalationNote}`);
     this.store.pushActivity({
       kind: activityKind, sessionId: paused.id, accountId: account.id, deviceId: account.deviceId,
-      message, meta: { failureKind: disposition.kind, requiresAttention: disposition.requiresAttention },
+      message: escalationNote, meta: { failureKind: disposition.kind, requiresAttention: escalate },
     });
     this.replaceSession(paused);
     this.releaseLocks(paused);

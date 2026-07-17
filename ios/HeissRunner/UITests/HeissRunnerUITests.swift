@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.16.11"
+private let heissRunnerBuild = "heiss-runner-2026.07.16.12"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -448,11 +448,18 @@ final class HeissRunnerUITests: XCTestCase {
         let bundle = ((command["uiProfile"] as? [String: Any])?["bundleId"] as? String) ?? fallbackBundle
         let app = XCUIApplication(bundleIdentifier: bundle)
         if platform == "tiktok" || platform == "x" { disableAutomaticInterruptionHandling(app) }
-        if platform == "tiktok" || platform == "youtube" {
+        if platform == "tiktok" || platform == "youtube" || platform == "x" {
             app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
         }
-        // Platform-major scheduling deliberately leaves the current app open.
-        // Launch only when needed; never terminate between accounts or steps.
+        // TikTok/X/YouTube leave search-result and keyboard surfaces that hide
+        // Home and the account controls, so a prior session's leftover search
+        // (e.g. X on a results screen with the keyboard up) breaks the next
+        // session's drawer/profile navigation. Reset each to a clean state at
+        // session start — once per account, not per step.
+        if (platform == "tiktok" || platform == "x" || platform == "youtube"), app.state != .notRunning {
+            app.terminate()
+            Thread.sleep(forTimeInterval: 0.8)
+        }
         if app.state != .runningForeground { app.launch() }
         if !app.wait(for: .runningForeground, timeout: 12) { app.activate() }
         guard app.wait(for: .runningForeground, timeout: 12) else {
