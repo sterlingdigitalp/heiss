@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.16.12"
+private let heissRunnerBuild = "heiss-runner-2026.07.16.13"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -328,20 +328,14 @@ final class HeissRunnerUITests: XCTestCase {
                     throw NSError(domain: "HeissRunner", code: 12, userInfo: [NSLocalizedDescriptionKey: "Search field was not found after opening platform search"])
                 }
                 let field = fields.firstMatch
-                if platform == "youtube" { clearYouTubeSearchField(app: app, surface: window, field: field) }
                 if field.isHittable { field.tap() }
                 else { field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
                 guard app.keyboards.firstMatch.waitForExistence(timeout: 3) else {
                     throw NSError(domain: "HeissRunner", code: 11, userInfo: [NSLocalizedDescriptionKey: "Search field did not receive keyboard focus"])
                 }
+                clearSearchFieldIfNeeded(app, surface: window, field: field)
                 try typeUsingVisibleKeyboard(app, text: term)
-                let submit = app.keys.matching(
-                    NSPredicate(format: "label ==[c] %@ OR label ==[c] %@ OR label ==[c] %@", "Search", "Return", "Go")
-                ).firstMatch
-                if submit.waitForExistence(timeout: 2), submit.isHittable { submit.tap() }
-                else if platform == "youtube" {
-                    window.coordinate(withNormalizedOffset: CGVector(dx: 0.87, dy: 0.96)).tap()
-                }
+                submitVisibleSearch(app, surface: window, command: command)
             }
         } else if action == "post:upload" {
             let staged = command["stagedMediaNames"] as? [String] ?? []
@@ -593,18 +587,6 @@ final class HeissRunnerUITests: XCTestCase {
         )
     }
 
-    private func clearYouTubeSearchField(app: XCUIApplication, surface: XCUIElement, field: XCUIElement) {
-        guard let value = field.value as? String else { return }
-        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty, !normalized.contains("search youtube") else { return }
-        let clear = app.buttons.matching(
-            NSPredicate(format: "label CONTAINS[c] %@", "Clear")
-        ).firstMatch
-        if clear.waitForExistence(timeout: 1), clear.isHittable { clear.tap() }
-        else { surface.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.063)).tap() }
-        Thread.sleep(forTimeInterval: 0.3)
-    }
-
     private func performWarmupStep(
         _ action: String,
         app: XCUIApplication,
@@ -679,20 +661,14 @@ final class HeissRunnerUITests: XCTestCase {
             throw NSError(domain: "HeissRunner", code: 12, userInfo: [NSLocalizedDescriptionKey: "Search field was not found after opening platform search"])
         }
         let field = fields.firstMatch
-        if platform == "youtube" { clearYouTubeSearchField(app: app, surface: window, field: field) }
         if field.isHittable { field.tap() }
         else { field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
         guard app.keyboards.firstMatch.waitForExistence(timeout: 3) else {
             throw NSError(domain: "HeissRunner", code: 11, userInfo: [NSLocalizedDescriptionKey: "Search field did not receive keyboard focus"])
         }
+        clearSearchFieldIfNeeded(app, surface: window, field: field)
         try typeUsingVisibleKeyboard(app, text: term)
-        let submit = app.keys.matching(
-            NSPredicate(format: "label ==[c] %@ OR label ==[c] %@ OR label ==[c] %@", "Search", "Return", "Go")
-        ).firstMatch
-        if submit.waitForExistence(timeout: 2), submit.isHittable { submit.tap() }
-        else if platform == "youtube" {
-            window.coordinate(withNormalizedOffset: CGVector(dx: 0.87, dy: 0.96)).tap()
-        }
+        submitVisibleSearch(app, surface: window, command: command)
     }
 
     /// Returns true when a dismissal relaunched the foreground app, so callers
@@ -864,6 +840,40 @@ final class HeissRunnerUITests: XCTestCase {
 
     private func documents() -> URL {
         fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    }
+
+    /// Clear any existing text before typing so an unsubmitted term from a
+    /// prior search step is not appended (which reads as the term "typed
+    /// twice"). Non-destructive when the field is empty or shows a placeholder.
+    private func clearSearchFieldIfNeeded(_ app: XCUIApplication, surface: XCUIElement, field: XCUIElement) {
+        let value = (field.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = value.lowercased()
+        guard !value.isEmpty, !lower.contains("search"), !lower.contains("find") else { return }
+        let clear = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Clear")).firstMatch
+        if clear.waitForExistence(timeout: 1), clear.isHittable { clear.tap() }
+        else { surface.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.063)).tap() }
+        Thread.sleep(forTimeInterval: 0.3)
+    }
+
+    /// Submit a typed search. Prefers the labeled Return/Search/Go key, but
+    /// falls back to the bottom-right keyboard corner where iOS always places
+    /// it — without this the term is typed but the search never executes.
+    /// Confirms the keyboard dismissed; one bounded corner retry otherwise.
+    private func submitVisibleSearch(_ app: XCUIApplication, surface: XCUIElement, command: [String: Any]) {
+        let submit = app.keys.matching(
+            NSPredicate(format: "label ==[c] %@ OR label ==[c] %@ OR label ==[c] %@ OR label ==[c] %@", "Search", "Return", "Go", "Enter")
+        ).firstMatch
+        if submit.waitForExistence(timeout: 2), submit.isHittable {
+            submit.tap()
+        } else {
+            surface.coordinate(withNormalizedOffset: point(command, "searchSubmit", .init(dx: 0.92, dy: 0.965))).tap()
+        }
+        Thread.sleep(forTimeInterval: 0.7)
+        // If the keyboard is still up, the submit missed — retry the corner once.
+        if app.keyboards.firstMatch.exists {
+            surface.coordinate(withNormalizedOffset: point(command, "searchSubmit", .init(dx: 0.92, dy: 0.965))).tap()
+            Thread.sleep(forTimeInterval: 0.5)
+        }
     }
 
     private func typeUsingVisibleKeyboard(_ app: XCUIApplication, text: String) throws {
