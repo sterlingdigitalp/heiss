@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.17.3"
+private let heissRunnerBuild = "heiss-runner-2026.07.17.5"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1088,15 +1088,47 @@ final class HeissRunnerUITests: XCTestCase {
     }
 
     private func typeUsingVisibleKeyboard(_ app: XCUIApplication, text: String) throws {
-        for character in text.lowercased() {
+        // A plus sign is a natural way to configure topics such as "11+ exam",
+        // but third-party search keyboards expose it behind inconsistent
+        // second-layer labels. The word is semantically identical and keeps
+        // input deterministic across app versions.
+        let keyboardSafeText = text.replacingOccurrences(of: "+", with: " plus ")
+            .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        for character in keyboardSafeText.lowercased() {
             let label = character == " " ? "space" : String(character)
-            let key = app.keys[label]
+            var key = app.keys[label]
+            if !key.exists || !key.isHittable {
+                if character.isNumber {
+                    _ = tapKeyboardMode(app, labels: ["numbers", "123", "more"])
+                } else if character == "+" {
+                    _ = tapKeyboardMode(app, labels: ["numbers", "123", "more"])
+                    key = app.keys[label]
+                    if !key.waitForExistence(timeout: 0.5) {
+                        _ = tapKeyboardMode(app, labels: ["symbols", "#+=", "more"])
+                    }
+                } else if character.isLetter {
+                    _ = tapKeyboardMode(app, labels: ["letters", "abc"])
+                }
+                key = app.keys[label]
+            }
             guard key.waitForExistence(timeout: 2), key.isHittable else {
                 throw NSError(domain: "HeissRunner", code: 13, userInfo: [NSLocalizedDescriptionKey: "Keyboard key \(label) was not available"])
             }
             key.tap()
             Thread.sleep(forTimeInterval: Double.random(in: 0.06...0.16))
         }
+    }
+
+    private func tapKeyboardMode(_ app: XCUIApplication, labels: [String]) -> Bool {
+        let candidates = app.keys.allElementsBoundByIndex
+        guard let key = candidates.first(where: { element in
+            labels.contains(where: { label in
+                element.label.range(of: label, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            }) && element.isHittable
+        }) else { return false }
+        key.tap()
+        Thread.sleep(forTimeInterval: 0.25)
+        return true
     }
 
     private func typeUsingKeyboardCoordinates(_ surface: XCUIElement, text: String) throws {
