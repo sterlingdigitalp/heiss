@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.17.5"
+private let heissRunnerBuild = "heiss-runner-2026.07.17.6"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1148,10 +1148,14 @@ final class HeissRunnerUITests: XCTestCase {
             "n": .init(dx: 0.71, dy: 0.88), "m": .init(dx: 0.81, dy: 0.88),
             " ": .init(dx: 0.55, dy: 0.96),
         ]
-        for character in text.lowercased() {
-            guard let key = keys[character] else {
-                throw NSError(domain: "HeissRunner", code: 14, userInfo: [NSLocalizedDescriptionKey: "Keyboard coordinate for \(character) is unavailable"])
-            }
+        // TikTok's coordinate keyboard exposes only the letter plane, so match
+        // the visible-keyboard path: spell out a plus, and skip any remaining
+        // digit/punctuation rather than aborting the whole search. A warmup
+        // search does not need exact numerals, and throwing here previously sent
+        // any digit-bearing term (e.g. "11+ exam") into an endless retry loop.
+        let normalized = text.lowercased().replacingOccurrences(of: "+", with: " plus ")
+        for character in normalized {
+            guard let key = keys[character] else { continue }
             surface.coordinate(withNormalizedOffset: key).tap()
             Thread.sleep(forTimeInterval: Double.random(in: 0.06...0.16))
         }
