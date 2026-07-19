@@ -294,6 +294,20 @@ export class RealUsbTransport implements IosTransport {
     const localJournal = safeSessionId ? join(work, `journal-${safeSessionId}.json`) : undefined;
     let lastJournalStep = -1;
     let nextJournalPoll = 0;
+    // Every poll spawns a `devicectl device copy from` process that opens a
+    // fresh XPC connection to CoreDeviceService. A flat 400ms against a
+    // 15-minute batched-session deadline is ~2,250 connections for a single
+    // account, and CoreDeviceService reliably wedges under that load ("the
+    // connection was interrupted"), taking the whole farm offline until the Mac
+    // is rebooted. Stay responsive for short commands, then back off hard —
+    // a batched session cannot possibly answer in its first minute anyway.
+    const pollStartedAt = Date.now();
+    const pollDelay = () => {
+      const elapsed = Date.now() - pollStartedAt;
+      if (elapsed < 5_000) return 400;
+      if (elapsed < 60_000) return 1_500;
+      return 4_000;
+    };
     while (Date.now() < deadline) {
       if (remoteJournal && localJournal && this.onProgress && Date.now() >= nextJournalPoll) {
         nextJournalPoll = Date.now() + 5_000;
@@ -322,7 +336,7 @@ export class RealUsbTransport implements IosTransport {
       } catch {
         /* keep polling */
       }
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, pollDelay()));
     }
     rmSync(work, { recursive: true, force: true });
     throw new Error(
