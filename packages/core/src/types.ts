@@ -89,6 +89,8 @@ export interface EngagementCandidate {
   lastSeenAt: string;
   sessionId: string;
   status: EngagementCandidateStatus;
+  /** True when the normalized handle came from a genuinely unresolvable observation (boundary truncation, length cap, OCR fragment, or UI ellipsis) and warrants human review before trust. Optional so existing persisted state stays valid. */
+  ambiguous?: boolean;
 }
 
 /** Exact human authorization for one target and one action. */

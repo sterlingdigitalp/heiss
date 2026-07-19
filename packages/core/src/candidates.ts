@@ -3,14 +3,79 @@ import type { EngagementActionApproval, EngagementCandidate, Platform, SocialAcc
 
 interface DiscoveryPayload { handles?: unknown; excerpt?: unknown; screenKey?: unknown }
 
+/**
+ * Screen-scraped handles routinely arrive with a "time-ago" suffix welded on
+ * by an OCR/UI separator (e.g. `@realtordotcom•7h`). Rather than stripping a
+ * timestamp-shaped suffix (which silently corrupts legitimate handles like
+ * `cinema4d` or `blender3d`), we cut at the first character outside the
+ * platform's legal username charset. Bullet/hyphen/etc. are illegal on every
+ * supported platform, so cutting there removes the pollution as a side
+ * effect of correct boundary detection and can never truncate a handle made
+ * entirely of legal characters.
+ */
+const HANDLE_CHARSET: Record<Platform, { re: RegExp; max: number }> = {
+  x: { re: /^[a-z0-9_]+/, max: 15 },
+  instagram: { re: /^[a-z0-9._]+/, max: 30 },
+  tiktok: { re: /^[a-z0-9._]+/, max: 24 },
+  // youtube has no dedicated charset here; fall back to x's (stricter, no
+  // dots) via the `?? HANDLE_CHARSET.x` lookup below. That's a safe,
+  // non-corrupting default — worst case it over-truncates a long/dotted
+  // youtube handle, never welds unrelated characters together.
+  youtube: { re: /^[a-z0-9_]+/, max: 15 },
+};
+
 export function normalizeCandidateHandle(value: string): string {
-  return value.trim().replace(/^@/, "").toLowerCase().replace(/^[^a-z0-9_]+|[^a-z0-9._-]+$/g, "");
+  return value.trim().replace(/^[^a-z0-9_@]+/i, "").replace(/^@+/, "").toLowerCase();
+}
+
+interface HandleCut {
+  /** normalizeCandidateHandle(value): lowercased, leading junk/@ stripped, trailing junk NOT yet cut. */
+  raw: string;
+  /** Longest prefix of `raw` made entirely of legal charset characters. */
+  matched: string;
+  /** `matched` with a trailing `.`/`-` boundary artifact removed and length-capped. */
+  cut: string;
+  max: number;
+}
+
+function cutCandidateHandle(platform: Platform, value: string): HandleCut {
+  const raw = normalizeCandidateHandle(value);
+  const spec = HANDLE_CHARSET[platform] ?? HANDLE_CHARSET.x;
+  const matched = raw.match(spec.re)?.[0] ?? "";
+  // Only `.` and `-` are stripped: both are illegal as trailing username
+  // characters on every supported platform (`-` isn't legal anywhere in
+  // these charsets at all), so removing them is always safe. `_` is a legal
+  // trailing character (e.g. `peptidedaily_`) and MUST be preserved.
+  const cut = matched.replace(/[.-]+$/, "").slice(0, spec.max);
+  return { raw, matched, cut, max: spec.max };
 }
 
 export function normalizePlatformCandidateHandle(platform: Platform, value: string): string {
-  let normalized = normalizeCandidateHandle(value).replace(/\.(?:\d+)(?:s|m|h|d|w)$/i, "");
-  if (platform === "x") normalized = normalized.split(".")[0]!.replace(/[^a-z0-9_]/g, "").slice(0, 15);
-  return normalized;
+  return cutCandidateHandle(platform, value).cut;
+}
+
+/**
+ * Reports whether a normalized handle was produced from a genuinely
+ * unresolvable observation: real content was discarded at a boundary
+ * (distinct from a confidently-detected illegal separator like the OCR
+ * bullet), the input was truncated by the platform length cap, the result
+ * is an implausibly short OCR fragment, or the source text carried a UI
+ * ellipsis. This is recorded for later human review only; it does not gate
+ * any approval/blocking logic.
+ */
+export function isAmbiguousCandidateHandle(platform: Platform, value: string): boolean {
+  // NB: length is measured against `matched` (the legal-charset run), never the
+  // pre-cut `raw`. Using `raw` would flag any handle whose *pollution* pushed it
+  // past the platform cap — e.g. `@realtordotcom•7h` resolves to `realtordotcom`
+  // with full confidence, yet raw is 16 chars on a 15-char platform. Flagging
+  // well-resolved handles trains reviewers to ignore the flag, which is exactly
+  // when the genuinely unresolvable ones (`@te`) get waved through. The cap case
+  // is already covered by `matched.length > cut.length`, since cut is a slice of
+  // matched.
+  const { matched, cut } = cutCandidateHandle(platform, value);
+  return matched.length > cut.length
+    || cut.length <= 3
+    || /(\.\.\.|…)/.test(value);
 }
 
 export function candidateTargetKey(platform: Platform, handle: string): string {
@@ -59,6 +124,7 @@ export function recordDiscoveryCandidates(input: {
     if (!targetHandle) continue;
     if (targetHandle === actor || owned.has(targetHandle)) continue;
     const targetKey = candidateTargetKey(input.account.platform, targetHandle);
+    const ambiguous = isAmbiguousCandidateHandle(input.account.platform, observedHandle);
     const existing = input.candidates.find((candidate) => candidate.accountId === input.account.id
       && candidate.targetKey === targetKey && candidate.status !== "expired");
     const crossPersona = input.candidates.some((candidate) => candidate.groupId !== input.account.groupId
@@ -73,6 +139,7 @@ export function recordDiscoveryCandidates(input: {
       existing.screenKey = discovery.screenKey;
       existing.relevanceScore = relevanceScore;
       existing.sessionId = input.sessionId;
+      existing.ambiguous = ambiguous;
       recorded.push(existing);
       continue;
     }
@@ -82,6 +149,7 @@ export function recordDiscoveryCandidates(input: {
       targetHandle, targetKey, screenKey: discovery.screenKey, excerpt: discovery.excerpt,
       searchTerms: [...input.account.searchTerms], relevanceScore, seenCount: 1,
       firstSeenAt: input.now, lastSeenAt: input.now, sessionId: input.sessionId, status: "pending",
+      ambiguous,
     };
     input.candidates.push(candidate); recorded.push(candidate);
   }

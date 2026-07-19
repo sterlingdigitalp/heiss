@@ -34,6 +34,9 @@ import {
   approveCandidate,
   refreshCandidateQueue,
   recordDiscoveryCandidates,
+  normalizePlatformCandidateHandle,
+  isAmbiguousCandidateHandle,
+  candidateTargetKey,
 } from "@heiss/core";
 import {
   RealIosDriver,
@@ -1428,6 +1431,63 @@ async function main(): Promise<void> {
       recentTargets: store.state.engagementTargets.slice(-100),
     });
     return;
+  }
+
+  if (cmd === "candidates" && args[1] === "repair") {
+    // One-off migration for candidates recorded BEFORE the charset-boundary fix.
+    // The old normalizer deleted illegal characters globally, welding a feed
+    // timestamp onto the handle (`@realtordotcom•7h` -> `realtordotcom7h`). The
+    // boundary evidence survives in `excerpt`, which never passed through handle
+    // normalization — so we re-derive the handle from the excerpt token whose OLD
+    // normalization reproduces the stored value, then re-cut it with the new logic.
+    // Requires a UNIQUE excerpt match; anything else is left untouched for review.
+    const store = openStore(args);
+    const apply = args.includes("--apply");
+    const oldNormalize = (platform: Platform, value: string): string => {
+      let n = value.trim().replace(/^@/, "").toLowerCase().replace(/^[^a-z0-9_]+|[^a-z0-9._-]+$/g, "");
+      n = n.replace(/\.(?:\d+)(?:s|m|h|d|w)$/i, "");
+      if (platform === "x") n = n.split(".")[0]!.replace(/[^a-z0-9_]/g, "").slice(0, 15);
+      return n;
+    };
+    const changes: Array<Record<string, unknown>> = [];
+    for (const candidate of store.state.engagementCandidates) {
+      if (!["pending", "approved"].includes(candidate.status)) continue;
+      const platform = candidate.platform;
+      const tokens = (candidate.excerpt ?? "").split(/[\s,;()\[\]{}]+/).filter((token) => token.startsWith("@"));
+      const sources = [...new Set(tokens.filter((token) => oldNormalize(platform, token) === candidate.targetHandle))];
+      if (sources.length !== 1) {
+        if (sources.length > 1) changes.push({ id: candidate.id, handle: candidate.targetHandle, verdict: "skipped_ambiguous_excerpt" });
+        continue;
+      }
+      const repaired = normalizePlatformCandidateHandle(platform, sources[0]!);
+      const ambiguous = isAmbiguousCandidateHandle(platform, sources[0]!);
+      if (!repaired || repaired === candidate.targetHandle) {
+        if (candidate.ambiguous !== ambiguous && apply) candidate.ambiguous = ambiguous;
+        continue;
+      }
+      const targetKey = candidateTargetKey(platform, repaired);
+      // A repair can collapse two rows onto one real account (e.g. the same
+      // handle seen with two different timestamps). Fold rather than duplicate.
+      const collision = store.state.engagementCandidates.find((other) => other.id !== candidate.id
+        && other.accountId === candidate.accountId && other.targetKey === targetKey && other.status !== "expired");
+      changes.push({ id: candidate.id, from: candidate.targetHandle, to: repaired, ambiguous,
+        verdict: collision ? "repaired_merged_duplicate" : "repaired" });
+      if (!apply) continue;
+      for (const approval of store.state.engagementActionApprovals.filter((item) => item.candidateId === candidate.id)) {
+        approval.targetHandle = repaired; approval.targetKey = targetKey;
+      }
+      candidate.targetHandle = repaired; candidate.targetKey = targetKey; candidate.ambiguous = ambiguous;
+      if (collision) {
+        // Keep whichever row carries the human decision. Expiring an approved
+        // row in favour of a pending duplicate would silently drop the approval.
+        const loser = candidate.status === "approved" ? collision : candidate;
+        const winner = loser === candidate ? collision : candidate;
+        winner.seenCount += loser.seenCount;
+        loser.status = "expired";
+      }
+    }
+    if (apply) store.save();
+    print({ ok: true, applied: apply, changed: changes.length, changes }); return;
   }
 
   if (cmd === "candidates" && args[1] === "show") {

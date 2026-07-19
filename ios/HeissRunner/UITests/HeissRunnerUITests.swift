@@ -791,7 +791,7 @@ final class HeissRunnerUITests: XCTestCase {
             }.compactMap { $0.topCandidates(1).first?.string.trimmingCharacters(in: .whitespacesAndNewlines) }
             let actorNormalized = normalizedHandle(actor)
             let handles = Array(Set(visible.flatMap { text in
-                text.split(whereSeparator: { $0.isWhitespace || ",;()[]{}".contains($0) })
+                text.split(whereSeparator: { $0.isWhitespace || ",;()[]{}·•‧・…|–—".contains($0) })
                     .map(String.init)
                     .filter { $0.hasPrefix("@") && $0.count > 1 }
                     .map(normalizedHandle)
@@ -867,7 +867,7 @@ final class HeissRunnerUITests: XCTestCase {
             observation.boundingBox.midY >= 0.16 && observation.boundingBox.midY <= 0.88
         }.compactMap { $0.topCandidates(1).first?.string.trimmingCharacters(in: .whitespacesAndNewlines) }
         let handles = Set(visible.flatMap { text in
-            text.split(whereSeparator: { $0.isWhitespace || ",;()[]{}".contains($0) })
+            text.split(whereSeparator: { $0.isWhitespace || ",;()[]{}·•‧・…|–—".contains($0) })
                 .map(String.init)
                 .filter { $0.hasPrefix("@") && $0.count > 1 }
                 .map(normalizedHandle)
@@ -884,8 +884,10 @@ final class HeissRunnerUITests: XCTestCase {
     }
 
     private func normalizedHandle(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased().replacingOccurrences(of: "@", with: "")
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var result = Substring(trimmed)
+        while result.first == "@" { result = result.dropFirst() }
+        return String(result)
     }
 
     private func stableFingerprint(_ value: String) -> String {
