@@ -858,7 +858,20 @@ async function main(): Promise<void> {
       }
     };
     print({ ok: true, daemon: "started", intervalMs, pid: process.pid });
+    // A tick that hangs (a stalled devicectl, an un-returning supervision or
+    // reinstall) freezes the whole daemon, and launchd KeepAlive never helps
+    // because the process is still alive. Bound each tick well beyond the
+    // 15-minute batched-session ceiling; if it is exceeded, force-restart so
+    // KeepAlive brings up a fresh daemon that recovers state on load().
+    const TICK_WATCHDOG_MS = 25 * 60_000;
     while (!stopping) {
+      const watchdog = setTimeout(() => {
+        const message = `controller tick exceeded ${TICK_WATCHDOG_MS}ms — force-restarting to recover a wedged tick`;
+        console.error(JSON.stringify({ at: new Date().toISOString(), fatal: message }));
+        notifyDesktop("Heiss controller restarted", "A tick hung; the controller restarted itself to recover.");
+        process.exit(1);
+      }, TICK_WATCHDOG_MS);
+      try {
       await authority.run(async () => {
       const store = openStore(args);
       const now = new Date();
@@ -1009,6 +1022,9 @@ async function main(): Promise<void> {
         console.error(JSON.stringify({ at: nowIso, error: message }));
       }
       });
+      } finally {
+        clearTimeout(watchdog);
+      }
       if (!stopping) await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, 60_000)));
     }
     await new Promise<void>((resolve) => commandServer.close(() => resolve()));

@@ -219,6 +219,7 @@ export async function installAppOnDevice(
   const dir = join(runnerWorkDir(), "install-logs");
   mkdirSync(dir, { recursive: true });
   const jsonOut = join(dir, `install-${Date.now()}.json`);
+  const INSTALL_TIMEOUT_MS = 5 * 60_000;
   await new Promise<void>((resolve, reject) => {
     const child = spawn(
       "xcrun",
@@ -236,11 +237,26 @@ export async function installAppOnDevice(
       { stdio: ["ignore", "pipe", "pipe"] },
     );
     let stderr = "";
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      error ? reject(error) : resolve();
+    };
+    // Without these, an ENOENT (xcrun off PATH under launchd, Xcode mid-upgrade)
+    // emits `error` with no listener and the promise never settles, and a
+    // stalled devicectl install hangs the whole daemon tick forever.
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(new Error(`Runner install on ${udid} timed out after ${INSTALL_TIMEOUT_MS}ms`));
+    }, INSTALL_TIMEOUT_MS);
     child.stderr.on("data", (d) => {
       stderr += String(d);
     });
+    child.on("error", (error) => finish(error));
     child.on("close", (code) => {
-      if (code === 0) resolve();
+      if (code === 0) finish();
       else {
         let extra = "";
         try {
@@ -248,7 +264,7 @@ export async function installAppOnDevice(
         } catch {
           /* ignore */
         }
-        reject(
+        finish(
           new Error(
             `Failed to install runner on ${udid} (exit ${code}).\n` +
               `On the phone: Settings → General → VPN & Device Management → Trust developer.\n` +
@@ -405,7 +421,14 @@ export function automationPlistXml(
   logPath: string,
 ): string {
   const argsXml = programArguments.map((arg) => `<string>${xmlEscape(arg)}</string>`).join("");
-  return `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>${xmlEscape(label)}</string><key>ProgramArguments</key><array>${argsXml}</array><key>WorkingDirectory</key><string>${xmlEscape(workingDirectory)}</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>15</integer><key>StandardOutPath</key><string>${xmlEscape(logPath)}</string><key>StandardErrorPath</key><string>${xmlEscape(logPath)}</string></dict></plist>`;
+  // ThrottleInterval is the crash-loop cap. When CoreDevice degrades, xcodebuild
+  // exits ~immediately (EX_SOFTWARE) and a 15s throttle respawned it four times
+  // a minute, each opening a fresh CoreDeviceService connection and deepening
+  // the wedge. 300s means a genuine one-off crash still recovers within minutes,
+  // but a degraded stretch respawns 20x less often — giving CoreDevice room to
+  // recover instead of being hammered. A healthy runner starts once and lives
+  // its full 12h recycle, so normal operation is unaffected.
+  return `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>${xmlEscape(label)}</string><key>ProgramArguments</key><array>${argsXml}</array><key>WorkingDirectory</key><string>${xmlEscape(workingDirectory)}</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>300</integer><key>StandardOutPath</key><string>${xmlEscape(logPath)}</string><key>StandardErrorPath</key><string>${xmlEscape(logPath)}</string></dict></plist>`;
 }
 
 export async function waitForAutomationRunnerReady(

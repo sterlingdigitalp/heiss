@@ -38,6 +38,9 @@ describe("automation runner supervision", () => {
     assert.match(xml, /My &lt;Farm&gt; &amp; Co/);
     assert.ok(!xml.includes("<Farm>"));
     assert.match(xml, /<string>so.heiss.automation.TEST<\/string>/);
+    // Crash-loop cap: 15s let a degraded runner hammer CoreDevice 4x/minute.
+    assert.match(xml, /<key>ThrottleInterval<\/key><integer>300<\/integer>/);
+    assert.ok(!/<integer>15<\/integer>/.test(xml), "the old 15s throttle must be gone");
   });
 });
 
