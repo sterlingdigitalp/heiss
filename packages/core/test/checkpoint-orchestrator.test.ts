@@ -352,6 +352,81 @@ describe("farm orchestrator (shipped path)", () => {
     assert.ok(result.activity.some((line) => line.startsWith("resume_deferred:")));
   });
 
+  it("an interrupted resume does not abort the tick for other devices", async () => {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    // Two devices: the first has a checkpointed session whose device is dead.
+    const deadDevice = store.state.devices[0]!;
+    store.state.devices.push({
+      id: "dev-2", name: "iPhone Two", udid: "SIM-0002", online: true,
+      createdAt: "2026-07-12T00:00:00.000Z",
+    });
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");
+    store.state.accounts.push({
+      id: "acc-second-device", deviceId: "dev-2", platform: "tiktok", handle: "@second",
+      stage: "fresh", trustScore: 0, searchTerms: ["founders"], preflightStatus: "ready",
+      createdAt: "2026-07-12T00:00:00.000Z",
+    });
+    store.state.slots = [];
+    const stranded = store.state.accounts.find((a) => a.id === "acc-tt-fresh")!;
+    store.state.sessions.push({
+      id: "stranded", accountId: stranded.id, deviceId: deadDevice.id,
+      kind: "warmup", status: "checkpointed",
+      startedAt: "2026-07-12T00:00:00.000Z", updatedAt: "2026-07-12T00:00:00.000Z",
+      checkpoint: createCheckpoint(), activityLog: [],
+    });
+    store.save();
+
+    // Only the dead device fails to connect; the second device is healthy.
+    const driver: DeviceDriver = {
+      kind: "ios",
+      async connect(deviceId: string) {
+        if (deviceId === deadDevice.id) throw new Error("device UDID not found on USB");
+      },
+      async disconnect() {},
+      async runAction(_d, _a, action) { return { ok: true as const, detail: `sim:${action}` }; },
+    };
+    const result = await new FarmOrchestrator(store, driver).runOnce({ runnerId: "r", timeOfDay: "09:00" });
+
+    assert.equal(result.interrupted, true, "the dead device still reports an interruption");
+    const secondDeviceSession = result.sessions.find((s) => s.deviceId === "dev-2");
+    assert.ok(secondDeviceSession, "the healthy device must still be scheduled in the same tick");
+    assert.equal(secondDeviceSession.status, "completed");
+    // And the dead device is not retried again within the same tick.
+    assert.equal(result.sessions.filter((s) => s.deviceId === deadDevice.id).length, 1);
+  });
+
+  it("escalates infrastructure failures to attention after the transport ceiling", async () => {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");
+    store.state.slots = [];
+    const account = store.state.accounts[0]!;
+    // 19 prior infrastructure attempts; the next one crosses the ceiling.
+    store.state.sessions.push({
+      id: "flapping", accountId: account.id, deviceId: account.deviceId,
+      kind: "warmup", status: "checkpointed",
+      startedAt: "2026-07-12T00:00:00.000Z", updatedAt: "2026-07-12T00:00:00.000Z",
+      checkpoint: createCheckpoint(), activityLog: [], transportRetryCount: 19,
+    });
+    store.save();
+    const unreachable: DeviceDriver = {
+      kind: "ios",
+      async connect() { throw new Error("device UDID not found on USB"); },
+      async disconnect() {},
+      async runAction() { throw new Error("unreachable"); },
+    };
+    const result = await new FarmOrchestrator(store, unreachable).runOnce({ runnerId: "r", timeOfDay: "09:00" });
+    const paused = result.sessions.find((s) => s.id === "flapping")!;
+    assert.equal(paused.transportRetryCount, 20);
+    assert.equal(paused.requiresAttention, true, "must stop retrying silently and reach a human");
+    assert.equal(paused.nextRetryAt, undefined, "an escalated session is not auto-retried");
+    assert.equal(
+      store.state.accounts.find((a) => a.id === account.id)!.preflightStatus,
+      "attention",
+    );
+  });
+
   it("recovers a process-crashed running session from disk", async () => {
     const path = storePath();
     const store = new JsonStore(path); seedDemoFarm(store);

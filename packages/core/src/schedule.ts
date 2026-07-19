@@ -178,11 +178,25 @@ function pad(value: number): string {
   return String(value).padStart(2, "0");
 }
 
+// Constructing an Intl.DateTimeFormat is one of the most expensive allocations
+// in Node, and calendarDay runs once per activity event inside per-step cap
+// scans — thousands of times per session. The options are constant, so the
+// formatter depends only on the zone and is safe to reuse.
+const zonedFormatters = new Map<string, Intl.DateTimeFormat>();
+function zonedFormatter(timeZone: string): Intl.DateTimeFormat {
+  let formatter = zonedFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    });
+    zonedFormatters.set(timeZone, formatter);
+  }
+  return formatter;
+}
+
 function zonedParts(iso: string, timeZone: string): Record<"year" | "month" | "day" | "hour" | "minute", number> {
   const values: Partial<Record<"year" | "month" | "day" | "hour" | "minute", number>> = {};
-  for (const part of new Intl.DateTimeFormat("en-US", {
-    timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
-  }).formatToParts(new Date(iso))) {
+  for (const part of zonedFormatter(timeZone).formatToParts(new Date(iso))) {
     if (["year", "month", "day", "hour", "minute"].includes(part.type)) {
       values[part.type as keyof typeof values] = Number(part.value);
     }

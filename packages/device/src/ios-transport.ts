@@ -233,10 +233,19 @@ export class RealUsbTransport implements IosTransport {
 
     // Stage local Cloud Drop media inside the XCTest runner container. The
     // runner imports it into Photos before opening a platform media picker.
-    const mediaRefs = [...new Set(
-      [cmd.mediaRef, ...(Array.isArray(cmd.slides) ? cmd.slides : [])]
-        .filter((value): value is string => typeof value === "string" && existsSync(value)),
-    )];
+    // A supplied asset that is missing on disk is a hard error: silently
+    // dropping it used to send the device an empty staged list, which then
+    // published an arbitrary camera-roll photo to a real account.
+    const suppliedRefs = [cmd.mediaRef, ...(Array.isArray(cmd.slides) ? cmd.slides : [])]
+      .filter((value): value is string => typeof value === "string" && value.length > 0);
+    const missingRefs = suppliedRefs.filter((value) => !existsSync(value));
+    if (missingRefs.length > 0) {
+      rmSync(work, { recursive: true, force: true });
+      throw new Error(
+        `Refusing to send ${String(cmd.action)} to ${udid.slice(0, 8)}: staged media missing on disk: ${missingRefs.join(", ")}`,
+      );
+    }
+    const mediaRefs = [...new Set(suppliedRefs)];
     if (mediaRefs.length > 0) {
       const stagedMediaNames: string[] = [];
       for (const [index, mediaPath] of mediaRefs.entries()) {

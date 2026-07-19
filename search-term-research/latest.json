@@ -1,0 +1,177 @@
+{
+  "generated_at": "2026-07-18T02:14:48Z",
+  "niche": "UK 11+ / grammar school (@arete11plus)",
+  "terms_tested": [
+    {
+      "term": "11 plus",
+      "relevance_density": "low",
+      "volume": "high",
+      "tiktok_safe": false,
+      "notes": "Only about 20-30% of the inspected raw results were UK 11+ related. The stream was very fresh and included a credible UK local-news item and genuine selection debate, but arithmetic jokes, football language and an Indonesian 11plus gaming promotion dominated; account quality was therefore mixed.",
+      "example_urls": [
+        "https://x.com/newsandstar/status/2077780359614247138",
+        "https://x.com/11plus_football/status/2077768991482036349"
+      ]
+    },
+    {
+      "term": "eleven plus",
+      "relevance_density": "medium",
+      "volume": "medium",
+      "tiktok_safe": true,
+      "notes": "Roughly 40-50% of the inspected recent results referred to the UK exam or grammar-school selection, mostly through genuine personal or policy discussion. The rest used the phrase quantitatively, such as eleven plus million or eleven plus years, so the live stream is usable but still noisy and not strongly tutor/parent led.",
+      "example_urls": [
+        "https://x.com/fireytassimo/status/2072616585362030995",
+        "https://x.com/moderateright13/status/2076285814128988302"
+      ]
+    },
+    {
+      "term": "11+ exam",
+      "relevance_density": "medium",
+      "volume": "medium",
+      "tiktok_safe": false,
+      "notes": "About 60-70% of inspected posts were on the UK 11+ exam, including fresh tutoring, mock-test and grammar-admissions content from specialist accounts. Noise came from metaphorical uses, 11:11 wording and foreign exam-number matches; relevant account quality was good but engagement was generally modest.",
+      "example_urls": [
+        "https://x.com/mrjamestuition/status/2076246222545834147",
+        "https://x.com/lernovatic/status/2073498735158374876"
+      ]
+    },
+    {
+      "term": "11 plus exam",
+      "relevance_density": "high",
+      "volume": "medium",
+      "tiktok_safe": false,
+      "notes": "Approximately 80% of the inspected recent results were genuinely about UK grammar-school entry, preparation, resources or the wider 11+ debate. It surfaced specialist tutors plus established education publishers such as Teachwire, with only limited anecdotal or humorous noise; this was the best broad X balance of density, freshness and account quality.",
+      "example_urls": [
+        "https://x.com/teachwire/status/2077117175312335200",
+        "https://x.com/elevenpluspreps/status/2076630586849136945"
+      ]
+    },
+    {
+      "term": "eleven plus exam",
+      "relevance_density": "low",
+      "volume": "low",
+      "tiktok_safe": true,
+      "notes": "The exact wording produced only about 4-5 distinct recent posts, with repetition from the same user. Most were nostalgic anecdotes or jokes rather than current preparation, parents, tutors or admissions content, and no strong education-specialist account surfaced.",
+      "example_urls": [
+        "https://x.com/barrett_k83556/status/2077855251973943436",
+        "https://x.com/duduschka/status/2071617990806679571"
+      ]
+    },
+    {
+      "term": "grammar school",
+      "relevance_density": "low",
+      "volume": "high",
+      "tiktok_safe": true,
+      "notes": "Only around 20-30% of the inspected results had any modern UK selection relevance. High freshness and volume were outweighed by Nigerian and Pakistani school names, historical references, book listings and idiomatic uses; a few official UK school accounts surfaced, but parent/tutor/11+ content was rare.",
+      "example_urls": [
+        "https://x.com/NHGS/status/2077312450278359494",
+        "https://x.com/CrownprinceCom2/status/2070060696528732354"
+      ]
+    },
+    {
+      "term": "grammar school entrance",
+      "relevance_density": "high",
+      "volume": "low",
+      "tiktok_safe": true,
+      "notes": "All roughly five distinct results were on-niche, covering 11+ technique, grammar entry and specialist resources. The accounts were legitimate niche tutors and resource creators, but the stream was promotional, low-engagement and too thin for reliable ongoing discovery.",
+      "example_urls": [
+        "https://x.com/elevenpluspreps/status/2076630586849136945",
+        "https://x.com/Tutorinwithnene/status/2074413698819490094"
+      ]
+    },
+    {
+      "term": "grammar school prep",
+      "relevance_density": "low",
+      "volume": "medium",
+      "tiktok_safe": true,
+      "notes": "Only about 20-30% of the inspected stream was meaningfully about UK 11+ preparation. A strong tutor post and an authentic parent pathway appeared, but US schooling, private-prep-versus-grammar politics and metaphorical language created substantial noise; account quality varied from official schools to low-context personal accounts.",
+      "example_urls": [
+        "https://x.com/Tutorinwithnene/status/2075868540817584521",
+        "https://x.com/PeteFranzese/status/2076822857221329198"
+      ]
+    },
+    {
+      "term": "11 plus tutor",
+      "relevance_density": "low",
+      "volume": "low",
+      "tiktok_safe": false,
+      "notes": "Only about three of ten inspected matches were UK 11+ related. Those hits were fresh, credible tutor services, but loose matching introduced finance, crypto, AI and generic tutoring noise; the exact phrase itself appears thin despite useful specialist accounts at the top.",
+      "example_urls": [
+        "https://x.com/elevenpluspreps/status/2076630586849136945",
+        "https://x.com/merit_tutors_/status/2076712707995390263"
+      ]
+    },
+    {
+      "term": "eleven plus tutor",
+      "relevance_density": "low",
+      "volume": "low",
+      "tiktok_safe": true,
+      "notes": "No inspected result concerned UK 11+ tutoring, and Latest returned no results. Top results were loose keyword matches from finance, crypto and quantitative-trading accounts, so both topical density and relevant account quality were effectively zero.",
+      "example_urls": [
+        "https://x.com/Dexter_1104/status/2070435727008043293",
+        "https://x.com/PennyStocksProX/status/2076762884315779374"
+      ]
+    },
+    {
+      "term": "11 plus prep",
+      "relevance_density": "low",
+      "volume": "low",
+      "tiktok_safe": false,
+      "notes": "Only about 10-20% of inspected results were genuine 11+ preparation posts. Two fresh education accounts offered good parent-focused signal, but football, events, fantasy sports and travel dominated because the component words matched loosely; the useful exact-phrase stream is small.",
+      "example_urls": [
+        "https://x.com/unblurthepath/status/2073730887447937381",
+        "https://x.com/11Plus_Course/status/2071655091224940882"
+      ]
+    },
+    {
+      "term": "Kent test",
+      "relevance_density": "high",
+      "volume": "medium",
+      "tiktok_safe": true,
+      "notes": "About seven of eight distinct results were directly about the Kent 11+, including strategy, summer courses, local tuition and grammar-school choices. The stream was fresh and driven by credible Kent tutors and local accounts, with one obvious keyword-stuffed spam result; quality is strong but geographically narrow.",
+      "example_urls": [
+        "https://x.com/BrynPies/status/2070889193849430147",
+        "https://x.com/lernovatic/status/2067736295753867352"
+      ]
+    },
+    {
+      "term": "GL assessment 11 plus",
+      "relevance_density": "low",
+      "volume": "low",
+      "tiktok_safe": false,
+      "notes": "None of the ten inspected Top results concerned GL Assessment, 11+ papers or grammar admissions, and Latest returned no results. The fresh matches were unrelated sports, finance and professional content produced by loose overlap, so relevant account quality and usable volume were zero.",
+      "example_urls": [
+        "https://x.com/FM_Guru88/status/2077535335068668049",
+        "https://x.com/Kweku75/status/2076322525517091324"
+      ]
+    },
+    {
+      "term": "CEM 11 plus",
+      "relevance_density": "low",
+      "volume": "low",
+      "tiktok_safe": false,
+      "notes": "No inspected post discussed the CEM 11+ or UK grammar-school preparation. Results were fresh but entirely off-topic, especially French-language quantitative uses, sport, politics and accounts where Cem was a name; no education specialist surfaced.",
+      "example_urls": [
+        "https://x.com/CemBuildsAi/status/2076693405468385651",
+        "https://x.com/Fallfree_Seck1/status/2077379589135806925"
+      ]
+    },
+    {
+      "term": "grammar school entrance exam",
+      "relevance_density": "high",
+      "volume": "medium",
+      "tiktok_safe": true,
+      "notes": "Roughly 70-80% of the 15-20 inspected results were UK grammar-school/11+ related, including fresh local news, specialist tutoring, teacher explanations and selection debate. Some Nigerian common-entrance and generic exam noise remained, but this was the strongest letters-only balance of specificity, live volume and credible accounts.",
+      "example_urls": [
+        "https://x.com/altrinchamtoday/status/2076986420091113613",
+        "https://x.com/elevenpluspreps/status/2076630586849136945"
+      ]
+    }
+  ],
+  "recommendation": {
+    "x_term": "11 plus exam",
+    "tiktok_term": "grammar school entrance exam",
+    "shared_term_if_any": "grammar school entrance exam",
+    "rationale": "On X, '11 plus exam' had the best broad-niche trade-off: about 80% relevance with fresh tutor, publisher and discussion accounts, while '11+ exam' was somewhat noisier and the ultra-clean 'grammar school entrance' stream was too thin. For TikTok, 'grammar school entrance exam' is letters/spaces only and was the strongest TikTok-safe candidate in the X control, with roughly 70-80% relevance and more live depth than 'grammar school entrance'; it is also the best acceptable shared fallback. Two SearXNG TikTok sanity-check calls were attempted but the local backend was unavailable, so the TikTok choice is grounded in the required symbol constraint plus the comparative live-X evidence rather than claimed TikTok result counts."
+  }
+}

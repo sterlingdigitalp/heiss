@@ -1278,9 +1278,14 @@ async function main(): Promise<void> {
     const store = openStore(args);
     const group = store.state.accountGroups.find((candidate) => candidate.id === args[2]);
     const terms = parseSearchTerms(args[3], "");
-    if (!group || terms.length === 0) throw new Error("Usage: account-set terms <groupId> \"term,term\"");
-    const accounts = store.state.accounts.filter((account) => account.groupId === group.id);
-    if (accounts.length === 0) throw new Error(`Account set ${group.name} has no linked accounts`);
+    if (!group || terms.length === 0) throw new Error("Usage: account-set terms <groupId> \"term,term\" [--platform instagram|tiktok|x|youtube]");
+    const platform = getArg(args, "--platform")?.trim().toLowerCase();
+    if (platform && !["instagram", "tiktok", "x", "youtube"].includes(platform)) {
+      throw new Error(`Unknown platform ${platform} — expected instagram, tiktok, x or youtube`);
+    }
+    const accounts = store.state.accounts.filter((account) => account.groupId === group.id
+      && (!platform || account.platform === platform));
+    if (accounts.length === 0) throw new Error(`Account set ${group.name} has no linked accounts${platform ? ` on ${platform}` : ""}`);
     for (const account of accounts) account.searchTerms = terms;
     store.save(); print({ ok: true, group, terms, accounts: accounts.map((account) => account.id) }); return;
   }

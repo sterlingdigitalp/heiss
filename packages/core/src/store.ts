@@ -249,6 +249,7 @@ export class JsonStore {
     this.state.locks = locks;
     this.locks = new ResourceLocks();
     this.locks.restore(locks);
+    pruneActivity(this.state);
   }
 
   save(): void {
@@ -288,6 +289,27 @@ export class JsonStore {
     this.state.activity.push(full);
     return full;
   }
+}
+
+/**
+ * The activity log is scanned in full on every step by the daily-cap checks, so
+ * unbounded growth made per-step cost rise with farm age. Retain a window
+ * comfortably beyond every lookback that reads it — the 30-day target
+ * de-duplication horizon and the 7-day maximum engagement cooldown — and drop
+ * the rest. Anything older is display-only history.
+ */
+export const ACTIVITY_RETENTION_DAYS = 45;
+
+export function pruneActivity(state: FarmState, now: string = new Date().toISOString()): number {
+  const cutoff = new Date(now).getTime() - ACTIVITY_RETENTION_DAYS * 86_400_000;
+  if (!Number.isFinite(cutoff)) return 0;
+  const before = state.activity.length;
+  state.activity = state.activity.filter((event) => {
+    const at = new Date(event.at).getTime();
+    // Keep anything with an unparseable timestamp rather than silently dropping it.
+    return !Number.isFinite(at) || at >= cutoff;
+  });
+  return before - state.activity.length;
 }
 
 function localDay(iso: string, timeZone: string): string {

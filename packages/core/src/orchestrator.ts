@@ -281,13 +281,23 @@ export class FarmOrchestrator {
         && (!opts.accountId || s.accountId === opts.accountId)
         && (opts.resumeFirst || !s.nextRetryAt || s.nextRetryAt <= runNow),
     ));
+    // A device that fails this tick is skipped for the rest of it, but must not
+    // abort the tick: returning here meant one unplugged iPhone — whose
+    // checkpoint is due on nearly every tick and sorts first — permanently
+    // stopped warmups and posting for every account on every other device.
+    const blockedDevices = new Set<string>();
     for (const s of checkpointed) {
+      if (blockedDevices.has(s.deviceId)) continue;
       const resumed = await this.continueSession(s, opts, activity);
       sessions.push(resumed.session);
       if (resumed.interrupted) {
         interrupted = true;
-        this.store.save();
-        return { sessions, activity, interrupted };
+        blockedDevices.add(s.deviceId);
+        // The test hook still stops the whole tick deterministically.
+        if (opts.interruptAfterSteps !== undefined) {
+          this.store.save();
+          return { sessions, activity, interrupted };
+        }
       }
     }
 
@@ -345,6 +355,7 @@ export class FarmOrchestrator {
         continue;
       }
       if (this.store.locks.isDeviceLocked(account.deviceId)) continue;
+      if (blockedDevices.has(account.deviceId)) continue;
       if (filledThisTick.has(account.id)) continue;
 
       const queueItem = this.findClaimableForAccount(account.id);
@@ -369,8 +380,11 @@ export class FarmOrchestrator {
       }
       if (session.interrupted) {
         interrupted = true;
-        this.store.save();
-        return { sessions, activity, interrupted };
+        blockedDevices.add(account.deviceId);
+        if (opts.interruptAfterSteps !== undefined) {
+          this.store.save();
+          return { sessions, activity, interrupted };
+        }
       }
     }
 
@@ -392,6 +406,7 @@ export class FarmOrchestrator {
         continue;
       }
       if (this.store.locks.isDeviceLocked(account.deviceId)) continue;
+      if (blockedDevices.has(account.deviceId)) continue;
       // Skip if already had a session this tick
       if (sessions.some((s) => s.accountId === account.id)) continue;
       // Warmup maturity progresses at most once per calendar day. Post sessions
@@ -411,8 +426,11 @@ export class FarmOrchestrator {
       started += 1;
       if (session.interrupted) {
         interrupted = true;
-        this.store.save();
-        return { sessions, activity, interrupted };
+        blockedDevices.add(account.deviceId);
+        if (opts.interruptAfterSteps !== undefined) {
+          this.store.save();
+          return { sessions, activity, interrupted };
+        }
       }
     }
 
@@ -965,23 +983,38 @@ export class FarmOrchestrator {
     activityKind: string,
   ): FarmSession {
     const disposition = classifyFailure(error);
+    const isInfrastructure = disposition.kind === "transport" || disposition.kind === "runner";
     const retryCount = disposition.incrementSocialRetry ? (session.retryCount ?? 0) + 1 : session.retryCount;
+    const transportRetryCount = isInfrastructure
+      ? (session.transportRetryCount ?? 0) + 1
+      : session.transportRetryCount;
     const socialDelay = retryCount ? Math.min(120, 5 * 2 ** (retryCount - 1)) * 60_000 : undefined;
-    const delay = disposition.retryDelayMs ?? socialDelay;
+    // Infrastructure failures deliberately do not inflate the social retry
+    // counter, but they previously retried at a flat 60s *forever* and could
+    // never escalate — a dead cable or an un-relaunchable runner blocked an
+    // account indefinitely and never reached a human. Give them their own
+    // backoff and ceiling.
+    const transportDelay = transportRetryCount
+      ? Math.min(30 * 60_000, 60_000 * 2 ** Math.min(transportRetryCount - 1, 5))
+      : undefined;
+    const delay = isInfrastructure
+      ? (transportDelay ?? disposition.retryDelayMs)
+      : (disposition.retryDelayMs ?? socialDelay);
     // A recoverable failure that keeps recurring must not retry forever in
     // silence. After enough attempts, escalate to the human attention queue so
     // a genuinely stuck account stops consuming device time every cycle.
     const RETRY_ESCALATION_LIMIT = 6;
-    const escalate = disposition.requiresAttention || (retryCount ?? 0) >= RETRY_ESCALATION_LIMIT;
+    const TRANSPORT_ESCALATION_LIMIT = 20;
+    const escalate = disposition.requiresAttention
+      || (retryCount ?? 0) >= RETRY_ESCALATION_LIMIT
+      || (transportRetryCount ?? 0) >= TRANSPORT_ESCALATION_LIMIT;
     const escalationNote = !disposition.requiresAttention && escalate
-      ? `${message} (escalated after ${retryCount} recovery attempts)`
+      ? `${message} (escalated after ${retryCount ?? transportRetryCount} recovery attempts)`
       : message;
     const paused = checkpointSession({
       ...session,
       retryCount,
-      transportRetryCount: disposition.kind === "transport" || disposition.kind === "runner"
-        ? (session.transportRetryCount ?? 0) + 1
-        : session.transportRetryCount,
+      transportRetryCount,
       nextRetryAt: escalate || delay === undefined
         ? undefined
         : new Date(new Date(now).getTime() + delay).toISOString(),

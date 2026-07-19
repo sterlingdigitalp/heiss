@@ -394,6 +394,16 @@ final class HeissRunnerUITests: XCTestCase {
             }
         } else if action == "post:upload" {
             let staged = command["stagedMediaNames"] as? [String] ?? []
+            // Never open the composer without media to attach. An empty list
+            // previously still tapped picker cell 0 (via a max(_,1) floor),
+            // which publishes an arbitrary photo from the camera roll to a real
+            // account. A missing asset is a hard error, not an optional.
+            guard !staged.isEmpty else {
+                throw NSError(domain: "HeissRunner", code: 25, userInfo: [
+                    NSLocalizedDescriptionKey: "post:upload received no staged media; refusing to open the picker",
+                    "failureKind": "action",
+                ])
+            }
             for name in staged {
                 try importIntoPhotos(documents().appendingPathComponent("media").appendingPathComponent(name))
             }
@@ -404,8 +414,13 @@ final class HeissRunnerUITests: XCTestCase {
                 if multiple.count > 0 { multiple.firstMatch.tap() }
             }
             let cells = app.cells
-            _ = cells.firstMatch.waitForExistence(timeout: 8)
-            for index in 0..<min(max(staged.count, 1), cells.count) {
+            guard cells.firstMatch.waitForExistence(timeout: 8) else {
+                throw NSError(domain: "HeissRunner", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "Media picker did not show staged Photos",
+                    "failureKind": "app_navigation",
+                ])
+            }
+            for index in 0..<min(staged.count, cells.count) {
                 cells.element(boundBy: index).tap()
             }
             let next = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Next"))
