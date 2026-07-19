@@ -300,6 +300,16 @@ final class HeissRunnerUITests: XCTestCase {
             let start = window.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.78))
             let end = window.coordinate(withNormalizedOffset: CGVector(dx: 0.50, dy: 0.28))
             start.press(forDuration: 0.08, thenDragTo: end)
+        } else if action == "candidate:like" {
+            // Fully unattended targeted like for an operator-approved
+            // candidate. Runs on the account's normal schedule with no human
+            // watching, so — unlike the generic `like` primitive below, which
+            // may fall back to a blind fixed-coordinate tap when a human is
+            // present to catch a mistake — every step here either finds its
+            // target through a verified predicate/OCR match or the action
+            // returns a non-executed result with a reason. Never taps blind.
+            let detail = try performCandidateLike(app: app, window: window, platform: platform, command: command)
+            return ["ok": true, "executed": true, "detail": detail]
         } else if action.contains("like") {
             var targets = Set<String>()
             let detail = try performGuardedEngagement(
@@ -881,6 +891,166 @@ final class HeissRunnerUITests: XCTestCase {
             ])
         }
         return (stableFingerprint("\(platform)|\(candidate)"), handles)
+    }
+
+    /// Fully automated, unattended like for one operator-approved candidate:
+    /// search the exact target handle, open its profile, open its latest
+    /// post, tap Like. Called only from `candidate:like`, never from the
+    /// generic `like` primitive.
+    ///
+    /// Every navigation step below only proceeds on a verified match (an
+    /// OCR-confirmed exact-handle tap, a real collection-view cell, or a
+    /// button predicate) — none of them fall back to a blind fixed-coordinate
+    /// tap. If a step cannot confidently locate its target, the action
+    /// returns a non-executed `"engagement:not_executed:..."` result with a
+    /// reason instead of guessing. The final Like tap in particular MUST be a
+    /// verified predicate match: a blind tap on an unknown profile/post page
+    /// with no human watching could hit anything.
+    private func performCandidateLike(
+        app: XCUIApplication,
+        window: XCUIElement,
+        platform: String,
+        command: [String: Any]
+    ) throws -> String {
+        let terms = command["searchTerms"] as? [String] ?? []
+        guard let rawTarget = terms.first, rawTarget.hasPrefix("@"), rawTarget.count > 1 else {
+            throw NSError(domain: "HeissRunner", code: 40, userInfo: [
+                NSLocalizedDescriptionKey: "candidate:like requires searchTerms: [\"@handle\"]",
+            ])
+        }
+        let normalizedTarget = normalizedHandle(rawTarget)
+        let targetKey = stableFingerprint("\(platform)|\(normalizedTarget)")
+        let owned = Set((command["ownedHandles"] as? [String] ?? []).map(normalizedHandle))
+        let blocked = Set(command["blockedEngagementTargetKeys"] as? [String] ?? [])
+        if owned.contains(normalizedTarget) {
+            return "engagement:skipped_owned:like:target:\(targetKey)"
+        }
+        if blocked.contains(targetKey) {
+            return "engagement:skipped_duplicate:like:target:\(targetKey)"
+        }
+
+        // 1) Search for the exact target handle (mirrors the generic `search`
+        // action's platform navigation, but always types this one handle).
+        try openSearchAndType(app: app, window: window, platform: platform, command: command, term: rawTarget)
+        Thread.sleep(forTimeInterval: 1.0)
+
+        // 2) Open the target's profile from the search results. Only an
+        // OCR-confirmed exact-handle match is tapped — never a coordinate guess.
+        guard try tapExactHandleUsingOCR(surface: window, normalized: normalizedTarget) else {
+            return "engagement:not_executed:like:target:\(targetKey):reason:profile_not_found"
+        }
+        Thread.sleep(forTimeInterval: 1.5)
+        guard try waitForExactHandleUsingOCR(normalized: normalizedTarget, timeout: 6, minimumVisionY: 0.55, maximumVisionY: 1.0) else {
+            return "engagement:not_executed:like:target:\(targetKey):reason:profile_not_confirmed"
+        }
+
+        // 3) Open the latest post from the profile grid — the first real
+        // collection-view cell. No coordinate fallback: an absent/unhittable
+        // cell means "no post to like", not "tap where a post usually is".
+        let firstPost = app.cells.firstMatch
+        guard firstPost.waitForExistence(timeout: 6), firstPost.isHittable else {
+            return "engagement:not_executed:like:target:\(targetKey):reason:no_post_found"
+        }
+        firstPost.tap()
+        Thread.sleep(forTimeInterval: 1.2)
+
+        // 4) Tap Like. CRITICAL SAFETY REQUIREMENT: the predicate match is
+        // mandatory here. Unlike `performGuardedEngagement`'s assisted `like`
+        // branch, there is no `window.coordinate(...).tap()` fallback — if no
+        // matching, hittable Like button is found, refuse instead of tapping.
+        let already = app.buttons.matching(NSPredicate(
+            format: "label BEGINSWITH[c] %@ OR label BEGINSWITH[c] %@",
+            "Unlike", "Liked"
+        )).firstMatch
+        if already.exists { return "engagement:skipped_already_liked:like:target:\(targetKey)" }
+        let likes = app.buttons.matching(NSPredicate(
+            format: "label ==[c] %@ OR label BEGINSWITH[c] %@",
+            "Like", "Like,"
+        ))
+        guard let button = likes.allElementsBoundByIndex.first(where: { $0.exists && $0.isHittable }) else {
+            return "engagement:not_executed:like:target:\(targetKey):reason:no_like_button_found"
+        }
+        button.tap()
+        return "engagement:executed:like:target:\(targetKey)"
+    }
+
+    /// Mirrors the generic `search` action's platform-specific navigation
+    /// (same button/coordinate heuristics), but always types one exact term
+    /// instead of a random topic term. Kept separate from the `search`
+    /// branch in `perform()` so that well-exercised generic-warmup path is
+    /// never touched by this change.
+    private func openSearchAndType(
+        app: XCUIApplication,
+        window: XCUIElement,
+        platform: String,
+        command: [String: Any],
+        term: String
+    ) throws {
+        let handle = command["handle"] as? String ?? ""
+        if platform == "instagram" {
+            let notNow = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Not now"))
+            if notNow.count > 0, notNow.firstMatch.isHittable { notNow.firstMatch.tap() }
+            let explore = app.buttons["explore-tab"]
+            if explore.waitForExistence(timeout: 3), explore.isHittable { explore.tap() }
+            else { window.coordinate(withNormalizedOffset: point(command, "search", .init(dx: 0.70, dy: 0.95))).tap() }
+        } else if platform == "tiktok" {
+            // Reset to Home so the search button has one stable meaning;
+            // querying the animated results hierarchy can wedge XCTest.
+            window.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.965))).tap()
+            Thread.sleep(forTimeInterval: 0.8)
+            window.coordinate(withNormalizedOffset: point(command, "search", .init(dx: 0.92, dy: 0.08))).tap()
+        } else {
+            if platform == "youtube" {
+                if !waitForSearchField(app, timeout: 0.2) {
+                    let readyDeadline = Date().addingTimeInterval(15)
+                    var navigationReady = false
+                    while Date() < readyDeadline {
+                        navigationReady = try screenContainsTextUsingOCR("Home")
+                        if !navigationReady { navigationReady = try screenContainsTextUsingOCR("Shorts") }
+                        if navigationReady { break }
+                        if try screenContainsTextUsingOCR("Default Account") {
+                            try dismissYouTubeDefaultAccountPrompt(app)
+                            try ensureAccount(app, platform: platform, handle: handle, command: command)
+                            continue
+                        }
+                        Thread.sleep(forTimeInterval: 0.5)
+                    }
+                    guard navigationReady else {
+                        throw NSError(domain: "HeissRunner", code: 21, userInfo: [NSLocalizedDescriptionKey: "YouTube navigation did not finish loading before search"])
+                    }
+                }
+            }
+            let notNow = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Not now"))
+            if notNow.count > 0, notNow.firstMatch.isHittable { notNow.firstMatch.tap() }
+            if platform == "youtube" {
+                try openYouTubeSearch(app: app, surface: window, command: command)
+            } else {
+                let searchButtons = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search"))
+                if searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
+                else {
+                    let fallback = platform == "x" ? CGVector(dx: 0.30, dy: 0.95) : CGVector(dx: 0.50, dy: 0.94)
+                    window.coordinate(withNormalizedOffset: point(command, "search", fallback)).tap()
+                }
+            }
+        }
+        Thread.sleep(forTimeInterval: 0.8)
+        if platform == "tiktok" {
+            try performTikTokSearchTyping(surface: window, term: term)
+        } else {
+            let fields = app.searchFields.count > 0 ? app.searchFields : app.textFields
+            guard fields.count > 0 else {
+                throw NSError(domain: "HeissRunner", code: 12, userInfo: [NSLocalizedDescriptionKey: "Search field was not found after opening platform search"])
+            }
+            let field = fields.firstMatch
+            if field.isHittable { field.tap() }
+            else { field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+            guard app.keyboards.firstMatch.waitForExistence(timeout: 3) else {
+                throw NSError(domain: "HeissRunner", code: 11, userInfo: [NSLocalizedDescriptionKey: "Search field did not receive keyboard focus"])
+            }
+            clearSearchFieldIfNeeded(app, surface: window, field: field)
+            try typeUsingVisibleKeyboard(app, text: term)
+            submitVisibleSearch(app, surface: window, command: command)
+        }
     }
 
     private func normalizedHandle(_ value: String) -> String {

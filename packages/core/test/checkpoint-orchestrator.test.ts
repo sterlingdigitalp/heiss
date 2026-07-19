@@ -679,3 +679,142 @@ describe("farm orchestrator (shipped path)", () => {
     assert.equal(store.state.queue[0]!.status, "posted");
   });
 });
+
+describe("targeted candidate:like execution", () => {
+  class TargetingDriver implements DeviceDriver {
+    readonly kind = "ios" as const;
+    calls: Array<{ action: string; context?: DeviceActionContext }> = [];
+    constructor(private detailFor: (action: string) => string) {}
+    async connect(): Promise<void> {}
+    async disconnect(): Promise<void> {}
+    async runAction(_deviceId: string, _accountId: string, action: string, context?: DeviceActionContext) {
+      this.calls.push({ action, context });
+      return { ok: true as const, detail: this.detailFor(action) };
+    }
+  }
+
+  const now = "2026-07-17T14:00:00.000Z"; // 09:00 America/Chicago on 2026-07-17
+
+  function setup() {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-mature");
+    store.state.slots = [];
+    const account = store.state.accounts[0]!;
+    account.groupId = "person-tt";
+    account.lastWarmupAt = undefined;
+    account.engagement = {
+      mode: "review", likesEnabled: true, followsEnabled: false,
+      dailyLikeCap: 2, dailyFollowCap: 1, cooldownMinutes: 720, successfulReviewedSessions: 0,
+    };
+    store.state.engagementApprovals.push({
+      id: "review-1", accountId: account.id, localDay: "2026-07-17", status: "approved",
+      proposedLikes: 2, proposedFollows: 1, createdAt: now,
+    });
+    store.state.engagementCandidates.push({
+      id: "cand-1", groupId: account.groupId, accountId: account.id, platform: "tiktok",
+      actorHandle: account.handle, targetHandle: "target1", targetKey: "targetkey1",
+      screenKey: "s1", excerpt: "", searchTerms: [], relevanceScore: 60, seenCount: 1,
+      firstSeenAt: now, lastSeenAt: now, sessionId: "seed", status: "approved", ambiguous: false,
+    });
+    store.state.engagementActionApprovals.push({
+      id: "approval-1", candidateId: "cand-1", groupId: account.groupId, accountId: account.id,
+      platform: "tiktok", action: "like", targetHandle: "target1", targetKey: "targetkey1",
+      executionMode: "assisted", status: "ready", approvedAt: now,
+      executeLocalDay: "2026-07-17", expiresAt: "2026-07-20T00:00:00.000Z",
+    });
+    store.save();
+    return { store, account };
+  }
+
+  it("executes an approved candidate as a targeted like consuming the same allowance budget", async () => {
+    const { store } = setup();
+    const driver = new TargetingDriver((action) => action === "candidate:like"
+      ? "engagement:executed:like:target:swift-fingerprint"
+      : `sim:${action}`);
+    const result = await new FarmOrchestrator(store, driver).runOnce({ runnerId: "r", timeOfDay: "09:00", now });
+    assert.equal(result.interrupted, false);
+    assert.equal(result.sessions[0]!.status, "completed");
+
+    const targetedCall = driver.calls.find((call) => call.action === "candidate:like");
+    assert.ok(targetedCall, "the targeted candidate:like device action must run");
+    assert.deepEqual(targetedCall!.context!.searchTerms, ["@target1"]);
+
+    // Generic warmup likes never exceed the leftover budget (cap=2, 1 targeted → at most 1 generic).
+    const genericLikeCalls = driver.calls.filter((call) => call.action === "warmup:like");
+    assert.ok(genericLikeCalls.length <= 1, "targeted approval must be consumed from the same budget, not additional to it");
+
+    const approval = store.state.engagementActionApprovals.find((item) => item.id === "approval-1")!;
+    assert.equal(approval.status, "completed");
+    assert.ok(approval.completedAt);
+
+    assert.ok(store.state.engagementTargets.some((target) => target.targetKey === "targetkey1" && target.action === "like"));
+    assert.ok(store.state.activity.some((event) => event.kind === "engagement"
+      && event.meta?.targetKey === "targetkey1" && event.meta?.outcome === "executed" && event.meta?.action === "like"));
+  });
+
+  it("reverts a failed targeted like to needs_manual without consuming the daily cap", async () => {
+    const { store } = setup();
+    const driver = new TargetingDriver((action) => action === "candidate:like"
+      ? "engagement:not_executed:like:reason:no_like_button_found"
+      : `sim:${action}`);
+    const result = await new FarmOrchestrator(store, driver).runOnce({ runnerId: "r", timeOfDay: "09:00", now });
+    assert.equal(result.sessions[0]!.status, "completed", "a soft candidate-like refusal must not fail the whole session");
+
+    const approval = store.state.engagementActionApprovals.find((item) => item.id === "approval-1")!;
+    assert.equal(approval.status, "needs_manual");
+    assert.match(approval.lastError ?? "", /no_like_button_found/);
+    assert.equal(store.state.engagementTargets.some((target) => target.targetKey === "targetkey1"), false);
+
+    const notExecuted = store.state.activity.find((event) => event.kind === "engagement" && event.meta?.targetKey === "targetkey1");
+    assert.ok(notExecuted);
+    assert.equal(notExecuted!.meta?.outcome, "not_executed");
+  });
+
+  it("skips a candidate whose targetKey is already in the 30-day blocked/deduped set", async () => {
+    const { store } = setup();
+    store.state.engagementTargets.push({
+      id: "prior", accountId: "acc-tt-mature", platform: "tiktok", action: "like",
+      targetKey: "targetkey1", at: "2026-07-10T00:00:00.000Z",
+    });
+    const driver = new TargetingDriver(() => "engagement:executed:like:target:swift-fingerprint");
+    await new FarmOrchestrator(store, driver).runOnce({ runnerId: "r", timeOfDay: "09:00", now });
+    assert.equal(driver.calls.some((call) => call.action === "candidate:like"), false);
+    assert.equal(store.state.engagementActionApprovals.find((item) => item.id === "approval-1")!.status, "ready");
+  });
+
+  it("skips a candidate flagged ambiguous", async () => {
+    const { store } = setup();
+    store.state.engagementCandidates.find((item) => item.id === "cand-1")!.ambiguous = true;
+    const driver = new TargetingDriver(() => "engagement:executed:like:target:swift-fingerprint");
+    await new FarmOrchestrator(store, driver).runOnce({ runnerId: "r", timeOfDay: "09:00", now });
+    assert.equal(driver.calls.some((call) => call.action === "candidate:like"), false);
+    assert.equal(store.state.engagementActionApprovals.find((item) => item.id === "approval-1")!.status, "ready");
+  });
+
+  it("produces no targeted steps while the engagement cooldown is active", async () => {
+    const { store, account } = setup();
+    store.state.activity.push({
+      id: "cooldown-anchor", at: "2026-07-17T13:30:00.000Z", accountId: account.id,
+      kind: "engagement_session_completed", message: "prior session",
+    });
+    const driver = new TargetingDriver(() => "engagement:executed:like:target:swift-fingerprint");
+    const result = await new FarmOrchestrator(store, driver).runOnce({ runnerId: "r", timeOfDay: "09:00", now });
+    assert.equal(driver.calls.some((call) => call.action === "candidate:like"), false);
+    assert.equal(driver.calls.some((call) => call.action === "warmup:like"), false, "cooldown blocks generic likes too");
+    assert.equal(store.state.engagementActionApprovals.find((item) => item.id === "approval-1")!.status, "ready");
+    assert.equal(result.sessions[0]!.status, "completed");
+  });
+
+  it("never fires in autonomous mode, even when otherwise eligible (review-only ship gate)", async () => {
+    const { store, account } = setup();
+    account.engagement = {
+      mode: "autonomous", likesEnabled: true, followsEnabled: false,
+      dailyLikeCap: 2, dailyFollowCap: 1, cooldownMinutes: 720, successfulReviewedSessions: 3,
+    };
+    const driver = new TargetingDriver(() => "engagement:executed:like:target:swift-fingerprint");
+    await new FarmOrchestrator(store, driver).runOnce({ runnerId: "r", timeOfDay: "09:00", now });
+    assert.equal(driver.calls.some((call) => call.action === "candidate:like"), false);
+    assert.equal(store.state.engagementActionApprovals.find((item) => item.id === "approval-1")!.status, "ready");
+  });
+});

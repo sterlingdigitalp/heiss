@@ -183,6 +183,43 @@ export function approveCandidate(input: {
   input.candidate.status = "approved"; input.approvals.push(approval); return approval;
 }
 
+/**
+ * Selects `ready` like-approvals eligible for fully automated (unattended)
+ * execution during the account's next scheduled session, bounded by the
+ * caller's remaining engagement-allowance budget.
+ *
+ * Deliberately excludes:
+ *  - anything not `status: "ready"` or already past `expiresAt` (human must
+ *    re-approve/complete via the existing assist flow),
+ *  - `action: "follow"` approvals (out of scope for this pass — see brief),
+ *  - a `targetKey` present in the caller's 30-day blocked-target set,
+ *  - a candidate flagged `ambiguous: true` (unresolved OCR handle; never
+ *    executed unattended).
+ * The caller is responsible for gating on policy mode/stage/cooldown — this
+ * function trusts `maxCount` as the already-computed remaining budget.
+ */
+export function readyLikeApprovalsForTargeting(input: {
+  approvals: EngagementActionApproval[];
+  candidates: EngagementCandidate[];
+  blockedTargetKeys: Iterable<string>;
+  accountId: string;
+  maxCount: number;
+  now: string;
+}): EngagementActionApproval[] {
+  if (input.maxCount <= 0) return [];
+  const blocked = new Set(input.blockedTargetKeys);
+  const candidateById = new Map(input.candidates.map((candidate) => [candidate.id, candidate]));
+  return input.approvals
+    .filter((approval) => approval.accountId === input.accountId
+      && approval.action === "like"
+      && approval.status === "ready"
+      && approval.expiresAt > input.now
+      && !blocked.has(approval.targetKey)
+      && candidateById.get(approval.candidateId)?.ambiguous !== true)
+    .sort((a, b) => a.approvedAt.localeCompare(b.approvedAt))
+    .slice(0, input.maxCount);
+}
+
 export function refreshCandidateQueue(candidates: EngagementCandidate[], approvals: EngagementActionApproval[], localDay: string, now: string): number {
   let ready = 0;
   for (const candidate of candidates) {

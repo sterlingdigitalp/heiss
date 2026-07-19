@@ -36,9 +36,10 @@ import {
   resumeSession,
 } from "./checkpoint.js";
 import { classifyFailure } from "./failures.js";
-import { recordDiscoveryCandidates } from "./candidates.js";
+import { readyLikeApprovalsForTargeting, recordDiscoveryCandidates, refreshCandidateQueue } from "./candidates.js";
 import type { JsonStore } from "./store.js";
 import type {
+  EngagementActionApproval,
   FarmSession,
   QueueItem,
   SessionKind,
@@ -467,11 +468,14 @@ export class FarmOrchestrator {
     this.store.state.queue[idx] = item;
 
     const session = this.createSession(account, "post", item.id, opts.timeOfDay);
-    const allowance = this.engagementFor(account, opts.now ?? new Date().toISOString());
+    const now = opts.now ?? new Date().toISOString();
+    const allowance = this.engagementFor(account, now);
     session.engagementPlan = { likes: allowance.likes, follows: allowance.follows };
     session.engagementApprovalId = allowance.approvalId;
     const content = this.store.state.contents.find((candidate) => candidate.id === item.contentId);
-    session.plannedSteps = postCycleScript(account.searchTerms, allowance, account.platform, Boolean(content?.mediaRef));
+    session.plannedSteps = this.buildEngagementScript(
+      account, "post", session.id, allowance, now, account.platform, Boolean(content?.mediaRef),
+    );
     this.store.locks.acquireDevice(account.deviceId, session.id);
     this.store.locks.acquireContent(item.id, session.id);
     this.store.save();
@@ -487,15 +491,11 @@ export class FarmOrchestrator {
     activity: string[],
   ): Promise<{ session: FarmSession; interrupted: boolean }> {
     const session = this.createSession(account, kind);
-    const allowance = this.engagementFor(account, opts.now ?? new Date().toISOString());
+    const now = opts.now ?? new Date().toISOString();
+    const allowance = this.engagementFor(account, now);
     session.engagementPlan = { likes: allowance.likes, follows: allowance.follows };
     session.engagementApprovalId = allowance.approvalId;
-    session.plannedSteps = warmupOnlyScript(
-      account.searchTerms,
-      account.trustScore,
-      session.id,
-      allowance,
-    );
+    session.plannedSteps = this.buildEngagementScript(account, kind, session.id, allowance, now, account.platform, false);
     this.store.locks.acquireDevice(account.deviceId, session.id);
     this.store.save();
     const script = session.plannedSteps!;
@@ -567,12 +567,13 @@ export class FarmOrchestrator {
     }
     this.store.save();
 
-    const allowance = this.engagementFor(account, opts.now ?? new Date().toISOString());
+    const resumeNow = opts.now ?? new Date().toISOString();
+    const allowance = this.engagementFor(account, resumeNow);
     const queueItem = s.queueItemId ? this.store.state.queue.find((item) => item.id === s.queueItemId) : undefined;
     const content = queueItem ? this.store.state.contents.find((item) => item.id === queueItem.contentId) : undefined;
-    const script = s.plannedSteps ?? (s.kind === "post"
-      ? postCycleScript(account.searchTerms, allowance, account.platform, Boolean(content?.mediaRef))
-      : warmupOnlyScript(account.searchTerms, account.trustScore, s.id, allowance));
+    const script = s.plannedSteps ?? this.buildEngagementScript(
+      account, s.kind, s.id, allowance, resumeNow, account.platform, Boolean(content?.mediaRef),
+    );
     if (!s.plannedSteps) {
       s = { ...s, plannedSteps: script, engagementPlan: { likes: allowance.likes, follows: allowance.follows }, engagementApprovalId: allowance.approvalId };
       this.replaceSession(s);
@@ -631,6 +632,11 @@ export class FarmOrchestrator {
       this.driver.runSession
       && s.kind !== "post"
       && opts.interruptAfterSteps === undefined
+      // Batched runSession sends one shared context for the whole script, so
+      // it cannot carry a per-step target handle. Targeted candidate:like
+      // steps require the non-batched loop below, which builds context
+      // per-step.
+      && !script.some((step) => step.startsWith("candidate:like:"))
       && this.hasActionCapacity(account.id, remainingSteps(script, s.checkpoint).length, runNow),
     );
     if (canBatch && this.driver.runSession) {
@@ -730,9 +736,29 @@ export class FarmOrchestrator {
         continue;
       }
 
-      const deviceAction = step === "post:publish" && s.checkpoint.publishAttempted
-        ? "post:verify_published"
-        : step;
+      // A `candidate:like:<approvalId>` step is a targeted, operator-approved
+      // like consuming the same engagement budget as the generic steps below
+      // it. The approval is re-read live (not from the frozen script) so a
+      // concurrent human action (reject/complete/expire) is respected — if
+      // it is no longer `ready`, skip without touching the device at all.
+      const targetedApproval = step.startsWith("candidate:like:")
+        ? this.store.state.engagementActionApprovals.find((item) => item.id === step.slice("candidate:like:".length))
+        : undefined;
+      if (step.startsWith("candidate:like:") && (!targetedApproval || targetedApproval.status !== "ready")) {
+        const msg = `candidate_like_skipped: approval ${step.slice("candidate:like:".length)} is no longer ready`;
+        s.activityLog.push(msg);
+        activity.push(msg);
+        s = { ...s, checkpoint: advanceCheckpoint(s.checkpoint, step), updatedAt: runNow };
+        this.replaceSession(s);
+        this.store.save();
+        continue;
+      }
+
+      const deviceAction = targetedApproval
+        ? "candidate:like"
+        : step === "post:publish" && s.checkpoint.publishAttempted
+          ? "post:verify_published"
+          : step;
       if (step === "post:publish" && !s.checkpoint.publishAttempted) {
         s = {
           ...s,
@@ -753,6 +779,7 @@ export class FarmOrchestrator {
           music: content?.music,
           mediaRef: content?.mediaRef,
           slides: content?.slides,
+          ...(targetedApproval ? { searchTerms: [`@${targetedApproval.targetHandle}`] } : {}),
         });
       } catch (error) {
         const message = `action_failed: ${deviceAction} → ${error instanceof Error ? error.message : String(error)}`;
@@ -770,8 +797,12 @@ export class FarmOrchestrator {
         deviceId: account.deviceId,
         message: line,
       });
-      this.recordEngagementOutcome(account, s.id, step, result.detail, runNow);
-      this.recordCandidateObservations(account, s.id, result.detail, runNow);
+      if (targetedApproval) {
+        this.recordTargetedLikeOutcome(account, targetedApproval, s.id, result.detail, runNow);
+      } else {
+        this.recordEngagementOutcome(account, s.id, step, result.detail, runNow);
+        this.recordCandidateObservations(account, s.id, result.detail, runNow);
+      }
 
       const extras: Parameters<typeof advanceCheckpoint>[2] = {};
       if (step === "post:publish") {
@@ -904,6 +935,103 @@ export class FarmOrchestrator {
       activity: this.store.state.activity,
       localDay,
       now,
+    });
+  }
+
+  /**
+   * Ready, unattended-eligible like-approvals for this account, bounded by
+   * the caller's remaining like allowance. Scoped to `mode: "review"` only —
+   * this is a deliberate ship gate (see brief), separate from and additive
+   * to `engagementAutonomousEligible`, which this never touches.
+   */
+  private targetedLikeApprovals(account: SocialAccount, allowanceLikes: number, now: string): EngagementActionApproval[] {
+    if (normalizeEngagementPolicy(account.engagement).mode !== "review") return [];
+    const localDay = calendarDay(now, this.store.state.settings.timeZone);
+    refreshCandidateQueue(this.store.state.engagementCandidates, this.store.state.engagementActionApprovals, localDay, now);
+    return readyLikeApprovalsForTargeting({
+      approvals: this.store.state.engagementActionApprovals,
+      candidates: this.store.state.engagementCandidates,
+      blockedTargetKeys: activeBlockedTargetKeys(this.store.state.engagementTargets, now),
+      accountId: account.id,
+      maxCount: allowanceLikes,
+      now,
+    });
+  }
+
+  /**
+   * Builds one session's step script: targeted `candidate:like:<approvalId>`
+   * steps for any ready, approved candidates first (consuming from the same
+   * allowance budget), then whatever generic engagement/warmup/post steps
+   * remain within the leftover budget. Targeted approvals are therefore
+   * always preferred over generic feed likes when the budget is scarce.
+   */
+  private buildEngagementScript(
+    account: SocialAccount,
+    kind: SessionKind,
+    sessionId: string,
+    allowance: EngagementAllowance,
+    now: string,
+    platform: SocialAccount["platform"],
+    hasMedia: boolean,
+  ): string[] {
+    const targeted = this.targetedLikeApprovals(account, allowance.likes, now);
+    const remaining: Pick<EngagementAllowance, "likes" | "follows"> = {
+      likes: Math.max(0, allowance.likes - targeted.length),
+      follows: allowance.follows,
+    };
+    const targetedSteps = targeted.map((approval) => `candidate:like:${approval.id}`);
+    const generic = kind === "post"
+      ? postCycleScript(account.searchTerms, remaining, platform, hasMedia)
+      : warmupOnlyScript(account.searchTerms, account.trustScore, sessionId, remaining);
+    return [...targetedSteps, ...generic];
+  }
+
+  /**
+   * Records the outcome of a targeted `candidate:like` device action against
+   * the specific approval it executed (never against a regex-parsed detail
+   * string — the approval's `targetKey` is already authoritative). Success
+   * completes the approval and pushes the same `engagementTargets`/activity
+   * shapes the human `candidates complete` CLI path writes, so caps and
+   * dedupe stay accurate. Any non-executed outcome — including a device-side
+   * "no button found" refusal — reverts to `needs_manual` so a human can
+   * finish it via the existing assist flow.
+   */
+  private recordTargetedLikeOutcome(
+    account: SocialAccount,
+    approval: EngagementActionApproval,
+    sessionId: string,
+    detail: string,
+    now: string,
+  ): void {
+    const stored = this.store.state.engagementActionApprovals.find((item) => item.id === approval.id) ?? approval;
+    const executed = detail.includes("engagement:executed");
+    const localDay = calendarDay(now, this.store.state.settings.timeZone);
+    stored.attemptedAt = now;
+    if (executed) {
+      stored.status = "completed";
+      stored.completedAt = now;
+      if (!this.store.state.engagementTargets.some((target) => target.targetKey === stored.targetKey)) {
+        this.store.state.engagementTargets.push({
+          id: randomUUID(), accountId: account.id, platform: account.platform,
+          action: "like", targetKey: stored.targetKey, at: now,
+        });
+      }
+      this.store.pushActivity({
+        kind: "candidate_completed", sessionId, accountId: account.id, deviceId: account.deviceId,
+        message: `like @${stored.targetHandle} completed automatically`,
+      });
+    } else {
+      stored.status = "needs_manual";
+      stored.lastError = detail;
+      this.store.pushActivity({
+        kind: "candidate_assisted", sessionId, accountId: account.id, deviceId: account.deviceId,
+        message: `Automatic like for @${stored.targetHandle} needs manual completion: ${detail}`,
+      });
+    }
+    this.store.pushActivity({
+      kind: "engagement", sessionId, accountId: account.id, deviceId: account.deviceId,
+      message: `like ${executed ? "executed" : "not_executed"} (target ${stored.targetKey.slice(0, 8)}) via approved candidate @${stored.targetHandle}`,
+      meta: { action: "like", outcome: executed ? "executed" : "not_executed", targetKey: stored.targetKey, localDay, approvalId: stored.id },
     });
   }
 

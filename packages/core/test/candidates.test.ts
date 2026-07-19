@@ -5,6 +5,7 @@ import {
   isAmbiguousCandidateHandle,
   normalizePlatformCandidateHandle,
   parseDiscoveryDetail,
+  readyLikeApprovalsForTargeting,
   recordDiscoveryCandidates,
   refreshCandidateQueue,
   type EngagementActionApproval,
@@ -112,5 +113,74 @@ describe("engagement candidate discovery", () => {
     assert.equal(approval.executeLocalDay, "2026-07-17"); assert.equal(approval.status, "ready");
     assert.equal(refreshCandidateQueue(candidates, approvals, "2026-07-17", now), 0);
     assert.equal(approval.status, "ready");
+  });
+});
+
+describe("readyLikeApprovalsForTargeting", () => {
+  function readyLikeApproval(overrides: Partial<EngagementActionApproval> & { targetHandle: string }): EngagementActionApproval {
+    return {
+      id: overrides.targetHandle, candidateId: `cand-${overrides.targetHandle}`, groupId: "person-1",
+      accountId: "a1", platform: "x", action: "like",
+      targetKey: `key-${overrides.targetHandle}`,
+      executionMode: "assisted", status: "ready", approvedAt: now,
+      executeLocalDay: "2026-07-17", expiresAt: "2026-07-20T00:00:00.000Z",
+      ...overrides,
+    };
+  }
+  function readyCandidate(handle: string, ambiguous = false): EngagementCandidate {
+    return {
+      id: `cand-${handle}`, groupId: "person-1", accountId: "a1", platform: "x",
+      actorHandle: "@actor", targetHandle: handle, targetKey: `key-${handle}`,
+      screenKey: "s", excerpt: "", searchTerms: [], relevanceScore: 50, seenCount: 1,
+      firstSeenAt: now, lastSeenAt: now, sessionId: "s1", status: "approved", ambiguous,
+    };
+  }
+
+  it("selects a ready like approval and skips one whose candidate is flagged ambiguous", () => {
+    const candidates = [readyCandidate("clean"), readyCandidate("fuzzy", true)];
+    const approvals = [readyLikeApproval({ targetHandle: "clean" }), readyLikeApproval({ targetHandle: "fuzzy" })];
+    const selected = readyLikeApprovalsForTargeting({
+      approvals, candidates, blockedTargetKeys: [], accountId: "a1", maxCount: 5, now,
+    });
+    assert.deepEqual(selected.map((approval) => approval.targetHandle), ["clean"]);
+  });
+
+  it("skips a target key present in the 30-day blocked/deduped set", () => {
+    const candidates = [readyCandidate("blocked"), readyCandidate("open")];
+    const approvals = [readyLikeApproval({ targetHandle: "blocked" }), readyLikeApproval({ targetHandle: "open" })];
+    const selected = readyLikeApprovalsForTargeting({
+      approvals, candidates, blockedTargetKeys: ["key-blocked"], accountId: "a1", maxCount: 5, now,
+    });
+    assert.deepEqual(selected.map((approval) => approval.targetHandle), ["open"]);
+  });
+
+  it("bounds selection to the remaining allowance and produces nothing when the budget is exhausted", () => {
+    const candidates = [readyCandidate("first"), readyCandidate("second"), readyCandidate("third")];
+    const approvals = [
+      readyLikeApproval({ targetHandle: "first", approvedAt: "2026-07-15T00:00:00.000Z" }),
+      readyLikeApproval({ targetHandle: "second", approvedAt: "2026-07-16T00:00:00.000Z" }),
+      readyLikeApproval({ targetHandle: "third", approvedAt: "2026-07-17T00:00:00.000Z" }),
+    ];
+    const oneSlot = readyLikeApprovalsForTargeting({
+      approvals, candidates, blockedTargetKeys: [], accountId: "a1", maxCount: 1, now,
+    });
+    assert.deepEqual(oneSlot.map((approval) => approval.targetHandle), ["first"], "oldest approval wins the single slot");
+    const noBudget = readyLikeApprovalsForTargeting({
+      approvals, candidates, blockedTargetKeys: [], accountId: "a1", maxCount: 0, now,
+    });
+    assert.deepEqual(noBudget, []);
+  });
+
+  it("excludes approvals that are not ready, are expired, or are follow actions", () => {
+    const candidates = [readyCandidate("pending"), readyCandidate("stale"), readyCandidate("followonly")];
+    const approvals = [
+      readyLikeApproval({ targetHandle: "pending", status: "approved" }),
+      readyLikeApproval({ targetHandle: "stale", expiresAt: "2026-07-01T00:00:00.000Z" }),
+      readyLikeApproval({ targetHandle: "followonly", action: "follow" }),
+    ];
+    const selected = readyLikeApprovalsForTargeting({
+      approvals, candidates, blockedTargetKeys: [], accountId: "a1", maxCount: 5, now,
+    });
+    assert.deepEqual(selected, []);
   });
 });
