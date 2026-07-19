@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.17.5"
+private let heissRunnerBuild = "heiss-runner-2026.07.19.1"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1687,10 +1687,24 @@ final class HeissRunnerUITests: XCTestCase {
         // open the native account switcher when tapped.
         _ = try recoverLateLimitedPhotosPrompt(app: app, surface: window, platform: platform)
         if platform == "tiktok" {
-            // Compact TikTok puts the chevron beside the display name. The
-            // handle one row below copies the username instead of opening the
-            // switcher, so keep this fallback centered on the chevron itself.
-            window.coordinate(withNormalizedOffset: point(command, "accountMenu", .init(dx: 0.58, dy: 0.267))).tap()
+            // Measured on a 750x1334 SE profile: the display name + chevron sit
+            // at dy ~0.238 and the @handle one row below at dy ~0.268. The old
+            // 0.267 fallback therefore landed on the handle, which *copies the
+            // username* and silently leaves us on the profile — every switch
+            // then failed as "not found in the switcher". Aim at the chevron.
+            window.coordinate(withNormalizedOffset: point(command, "accountMenu", .init(dx: 0.637, dy: 0.238))).tap()
+            Thread.sleep(forTimeInterval: 0.9)
+            // Confirm the tap opened the switcher instead of trusting it. Only
+            // the unambiguous failure signature is treated as fatal here, so an
+            // unrecognised-but-working switcher can never be rejected. This is a
+            // navigation failure, not a missing account, so it retries rather
+            // than flagging the account for a human.
+            if try screenContainsTextUsingOCR("Username copied") {
+                throw NSError(domain: "HeissRunner", code: 26, userInfo: [
+                    NSLocalizedDescriptionKey: "TikTok account switcher did not open — the tap copied the username instead",
+                    "failureKind": "app_navigation",
+                ])
+            }
         } else {
             let accountMenu = app.buttons["user-switch-title-button"]
             if accountMenu.waitForExistence(timeout: 2), accountMenu.isHittable { accountMenu.tap() }
