@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.20.1"
+private let heissRunnerBuild = "heiss-runner-2026.07.20.2"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -190,6 +190,10 @@ final class HeissRunnerUITests: XCTestCase {
         // safe, non-expanding choice before attributing alerts to this app.
         let systemUI = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         disableAutomaticInterruptionHandling(systemUI)
+        // A low-space device fires the "iPhone Storage Full" system alert over
+        // the app; clear it before anything else so it can't wedge the
+        // foreground check or later verification.
+        dismissSystemStorageAlert(systemUI)
         // TikTok defers the limited-Photos sheet until its restored Story
         // surface settles, sometimes well after XCTest reports foreground.
         let latePromptTimeout: TimeInterval = platform == "tiktok" ? 20 : 3
@@ -228,6 +232,7 @@ final class HeissRunnerUITests: XCTestCase {
             try dismissTikTokInterestsPrompt(surface: surface)
             try dismissTikTokContactsPrompt(surface: surface)
             try dismissTikTokSwipeTutorial(surface: surface)
+            try dismissTikTokPromoSheet(surface: surface)
         }
         if platform == "youtube" { try dismissYouTubeDefaultAccountPrompt(app) }
         if platform == "youtube",
@@ -1082,6 +1087,10 @@ final class HeissRunnerUITests: XCTestCase {
     private func sweepKnownOverlays(app: XCUIApplication, platform: String) throws -> Bool {
         let systemUI = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         disableAutomaticInterruptionHandling(systemUI)
+        // The "iPhone Storage Full" system alert re-fires over any app while the
+        // device is low on space and is the dominant blocker on a full device;
+        // clear it first, unconditionally, before the OCR gate.
+        dismissSystemStorageAlert(systemUI)
         // System prompts and passkey sheets are cheap SpringBoard element
         // queries; always sweep them.
         _ = try dismissStaleLimitedPhotosSystemPrompt(
@@ -1099,7 +1108,7 @@ final class HeissRunnerUITests: XCTestCase {
         let overlayMarkers = [
             "Would Like to Access", "Add to Story", "To access all photos", "change your settings",
             "Choose your interests", "Find contacts", "Sync contacts", "Swipe up",
-            "Default Account", "Save your login",
+            "Default Account", "Save your login", "Add phone", "Add email",
         ]
         let systemKeepVisible = systemUI.buttons.matching(
             NSPredicate(format: "label ==[c] %@", "Keep Current Selection")
@@ -1115,6 +1124,7 @@ final class HeissRunnerUITests: XCTestCase {
             try dismissTikTokInterestsPrompt(surface: surface)
             try dismissTikTokContactsPrompt(surface: surface)
             try dismissTikTokSwipeTutorial(surface: surface)
+            try dismissTikTokPromoSheet(surface: surface)
         }
         if platform == "youtube" { try dismissYouTubeDefaultAccountPrompt(app) }
         return relaunched
@@ -1637,6 +1647,50 @@ final class HeissRunnerUITests: XCTestCase {
         }
         if try screenContainsTextUsingOCR("Swipe up") {
             throw NSError(domain: "HeissRunner", code: 18, userInfo: [NSLocalizedDescriptionKey: "TikTok swipe tutorial did not dismiss after three gestures"])
+        }
+    }
+
+    /// iOS raises an "iPhone Storage Full" / "Storage Almost Full" system alert
+    /// over the foreground app when the device is low on space. It is a
+    /// SpringBoard alert (Not Now / Settings) that re-fires until space is freed,
+    /// so every session must be able to clear it instead of stranding on it and
+    /// escalating to the human attention queue. Only the storage alert is
+    /// touched — matched on its copy — so unrelated system alerts are left for
+    /// assertNoBlockingOverlay to surface accurately.
+    private func dismissSystemStorageAlert(_ springboard: XCUIApplication) {
+        for _ in 0..<2 {
+            let alert = springboard.alerts.firstMatch
+            guard alert.exists else { return }
+            let storageCopy = alert.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS[c] %@ OR label CONTAINS[c] %@", "Storage", "free up space")
+            ).firstMatch
+            guard storageCopy.exists else { return }
+            let notNow = alert.buttons["Not Now"]
+            guard notNow.exists, notNow.isHittable else { return }
+            notNow.tap()
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+    }
+
+    /// TikTok periodically interrupts the feed with an account-security upsell
+    /// ("Add phone", "Add email", "…phone number for extra security"). It offers
+    /// no Skip/Not-now control — only a top-right ✕ and a Continue CTA that must
+    /// never be tapped — so guard on the distinctive heading copy and tap the
+    /// stable close-glyph coordinate. OCR cannot read the ✕ itself; the copy is
+    /// the gate so feed content can never be tapped by accident.
+    private func dismissTikTokPromoSheet(surface: XCUIElement) throws {
+        let markers = ["Add phone", "Add email", "phone number for extra"]
+        func present() throws -> Bool {
+            let obs = try recognizedTextObservationsUsingOCR()
+            return markers.contains { observationContains(obs, $0) }
+        }
+        for _ in 0..<2 {
+            guard try present() else { return }
+            surface.coordinate(withNormalizedOffset: CGVector(dx: 0.925, dy: 0.214)).tap()
+            Thread.sleep(forTimeInterval: 0.8)
+        }
+        if try present() {
+            throw NSError(domain: "HeissRunner", code: 25, userInfo: [NSLocalizedDescriptionKey: "TikTok add-phone promo sheet did not dismiss"])
         }
     }
 
