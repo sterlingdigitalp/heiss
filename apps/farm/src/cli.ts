@@ -50,6 +50,8 @@ import {
   ensureAutomationRunner,
   superviseDeviceHealth,
   stopAutomationRunner,
+  classifyStorage,
+  shouldAlertStorage,
   planSigning,
   saveSigningConfig,
   resolveSigningConfig,
@@ -947,6 +949,35 @@ async function main(): Promise<void> {
         }
         const onlineUdids = new Set(store.state.devices.filter((device) => device.online).map((device) => device.udid));
         await renewExpiringRunners(onlineUdids, now);
+        // Storage watchdog. The runner reports free space on every ping; a
+        // device fills ~6-7 GB/day under 24/7 XCTest and, left unmanaged, iOS
+        // throws a storage-full alert that blocks automation. Check on a ~15min
+        // throttle (independent of warmup work, so idle stretches are covered)
+        // and warn the operator once/day/level with days of runway to spare —
+        // turning a 3 a.m. cascade into a planned backup+restore.
+        const STORAGE_CHECK_INTERVAL_MS = 15 * 60_000;
+        const lastStorageCheckMs = Date.parse(store.state.settings.notificationKeys.storageCheckedAt ?? "") || 0;
+        if (onlineUdids.size > 0 && now.getTime() - lastStorageCheckMs >= STORAGE_CHECK_INTERVAL_MS) {
+          for (const device of store.state.devices.filter((row) => row.online)) {
+            const storageHealth = await checkAutomationRunner(device.udid).catch(() => null);
+            const level = classifyStorage(storageHealth?.freeBytes);
+            if (level === "ok") continue;
+            const freeGb = ((storageHealth?.freeBytes ?? 0) / 1024 ** 3).toFixed(1);
+            if (shouldAlertStorage(level, store.state.settings.notificationKeys.storageAlert, localDayNow)) {
+              store.state.settings.notificationKeys.storageAlert = `${localDayNow}:${level}`;
+              const urgent = level === "critical";
+              notifyDesktop(
+                urgent ? "Heiss storage critically low" : "Heiss storage running low",
+                `${device.name}: ${freeGb} GB free — ${urgent
+                  ? "automation may be blocked soon; back up + restore to reclaim System Data."
+                  : "plan a backup + restore in the next few days to reclaim System Data."}`,
+              );
+              store.pushActivity({ kind: "storage", message: `${device.name} storage ${level}: ${freeGb} GB free` });
+            }
+          }
+          store.state.settings.notificationKeys.storageCheckedAt = nowIso;
+          store.save();
+        }
         if (store.state.devices.some((device) => device.online) && store.state.accounts.length > 0) {
           // Accounts gated by manual onboarding attention are not actionable;
           // excluding them keeps "has work" honest so the daemon does not

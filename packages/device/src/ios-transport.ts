@@ -75,10 +75,12 @@ export class RealUsbTransport implements IosTransport {
     const result = await this.sendCommand(udid, { action: "ping" });
     const protocolVersion = Number(result.protocolVersion ?? 0);
     const runnerBuild = String(result.runnerBuild ?? "unknown");
+    const freeBytes = result.freeBytes === undefined ? undefined : Number(result.freeBytes);
     return {
       protocolVersion,
       runnerBuild,
       compatible: protocolVersion === RUNNER_PROTOCOL_VERSION && runnerBuild === RUNNER_BUILD,
+      freeBytes,
     };
   }
 

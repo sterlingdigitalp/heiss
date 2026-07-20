@@ -33,13 +33,44 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.20.2"
+private let heissRunnerBuild = "heiss-runner-2026.07.20.3"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
 final class HeissRunnerUITests: XCTestCase {
     private let fm = FileManager.default
     private var activeHandles: [String: String] = [:]
+
+    /// Free bytes the OS would make available for important usage, read from
+    /// the app's own volume. Returns -1 when unavailable so the Mac treats it as
+    /// "unknown" rather than a false low-space alarm.
+    private func deviceFreeBytes() -> Int64 {
+        if let values = try? documents().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+           let capacity = values.volumeAvailableCapacityForImportantUsage {
+            return capacity
+        }
+        return -1
+    }
+
+    /// Bound a scratch directory two ways: keep at most `keepNewest` entries and
+    /// drop anything older than `maxAgeHours`. Newest-first so a burst of files
+    /// can't outrun the count cap and stale files can't outlast the age cap.
+    private func pruneDirectory(_ dir: URL, keepNewest: Int, maxAgeHours: Double) {
+        guard let items = try? fm.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey], options: []
+        ) else { return }
+        let now = Date()
+        let dated = items.map { url -> (URL, Date) in
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            return (url, modified ?? .distantPast)
+        }.sorted { $0.1 > $1.1 }
+        for (index, entry) in dated.enumerated() {
+            let ageHours = now.timeIntervalSince(entry.1) / 3600
+            if index >= keepNewest || ageHours > maxAgeHours {
+                try? fm.removeItem(at: entry.0)
+            }
+        }
+    }
 
     func testCommandServer() throws {
         continueAfterFailure = true
@@ -64,6 +95,13 @@ final class HeissRunnerUITests: XCTestCase {
         for stale in (try? fm.contentsOfDirectory(at: journals, includingPropertiesForKeys: nil)) ?? [] {
             try? fm.removeItem(at: stale)
         }
+        // Prune our own on-device footprint each restart. Failure screenshots
+        // were never cleaned and staged post media lingered after import — over
+        // weeks that quietly accumulates into the device's System Data. Keep a
+        // small recent window of screenshots for debugging; drop the rest and
+        // any staged media past its post window.
+        pruneDirectory(documents().appendingPathComponent("screenshots", isDirectory: true), keepNewest: 150, maxAgeHours: 48)
+        pruneDirectory(media, keepNewest: 40, maxAgeHours: 24)
         print("HEISS_COMMAND_SERVER_READY")
 
         // xcodebuild owns the runner process. It is intentionally long-lived so
@@ -91,6 +129,10 @@ final class HeissRunnerUITests: XCTestCase {
             payload["protocolVersion"] = heissRunnerProtocolVersion
             payload["runnerBuild"] = heissRunnerBuild
             payload["commandGeneration"] = generation
+            // Report free space on every reply (including ping) so the Mac-side
+            // storage watchdog can warn days before the device fills, without an
+            // extra device round-trip.
+            payload["freeBytes"] = deviceFreeBytes()
             if let data = try? JSONSerialization.data(withJSONObject: payload) {
                 try? data.write(to: outbox.appendingPathComponent(file.lastPathComponent), options: .atomic)
             }

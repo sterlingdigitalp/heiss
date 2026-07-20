@@ -35,6 +35,40 @@ export interface AutomationHealth {
   /** True ONLY when the runner answered with a version that differs. A ping
    *  timeout leaves this false — it is not evidence of a wrong build. */
   protocolMismatch: boolean;
+  /** Free bytes the runner reported. undefined when the runner did not answer
+   *  or predates free-space reporting; negative when the device could not tell. */
+  freeBytes?: number;
+}
+
+export type StorageLevel = "ok" | "warn" | "critical";
+
+/** Warn while there is still ~a week of runway (the SE fills ~6-7 GB/day under
+ *  24/7 XCTest), so the operator hears about it long before iOS throws its
+ *  storage-full alert and blocks automation. */
+export const STORAGE_WARN_BYTES = 6 * 1024 ** 3;
+/** Below this, act now: trigger the aggressive on-device cache clear and raise
+ *  an urgent alert. */
+export const STORAGE_CRITICAL_BYTES = 3 * 1024 ** 3;
+
+/** Classify reported free space. Unknown/undefined/negative → "ok" so a runner
+ *  that cannot report never produces a false low-space alarm. */
+export function classifyStorage(freeBytes: number | undefined): StorageLevel {
+  if (freeBytes === undefined || !Number.isFinite(freeBytes) || freeBytes < 0) return "ok";
+  if (freeBytes <= STORAGE_CRITICAL_BYTES) return "critical";
+  if (freeBytes <= STORAGE_WARN_BYTES) return "warn";
+  return "ok";
+}
+
+/** Alert at most once per local day per level change, so a persistently low
+ *  device does not notify every tick. Re-alerts when the level worsens the same
+ *  day (warn → critical) by keying on `${day}:${level}`. */
+export function shouldAlertStorage(
+  level: StorageLevel,
+  lastAlertKey: string | undefined,
+  today: string,
+): boolean {
+  if (level === "ok") return false;
+  return lastAlertKey !== `${today}:${level}`;
 }
 
 export type RunnerRepairAction = "none" | "relaunch" | "reinstall";
@@ -110,6 +144,7 @@ export async function checkAutomationRunner(
   let runnerBuild: string | undefined;
   let protocolCompatible = false;
   let protocolMismatch = false;
+  let freeBytes: number | undefined;
   const transport = new RealUsbTransport({ commandTimeoutMs: opts.pingTimeoutMs ?? 20_000 });
   try {
     const info = await transport.runnerInfo(udid);
@@ -120,6 +155,7 @@ export async function checkAutomationRunner(
     runnerBuild = info.runnerBuild;
     protocolCompatible = info.compatible;
     protocolMismatch = !info.compatible;
+    freeBytes = info.freeBytes;
     detail = info.compatible
       ? `xctest-ready v${info.protocolVersion}/${info.runnerBuild}`
       : `protocol mismatch: expected v${RUNNER_PROTOCOL_VERSION}/${RUNNER_BUILD}, got v${info.protocolVersion}/${info.runnerBuild}`;
@@ -130,7 +166,7 @@ export async function checkAutomationRunner(
   return {
     udid, label, jobLoaded, pingOk,
     healthy: jobLoaded && pingOk && protocolCompatible,
-    detail, protocolVersion, runnerBuild, protocolCompatible, protocolMismatch,
+    detail, protocolVersion, runnerBuild, protocolCompatible, protocolMismatch, freeBytes,
   };
 }
 

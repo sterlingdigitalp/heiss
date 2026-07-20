@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { planRunnerRepair } from "../src/runner-health.js";
+import {
+  planRunnerRepair,
+  classifyStorage,
+  shouldAlertStorage,
+  STORAGE_WARN_BYTES,
+  STORAGE_CRITICAL_BYTES,
+} from "../src/runner-health.js";
 import {
   automationRunnerLabel,
   automationPlistXml,
@@ -41,6 +47,37 @@ describe("automation runner supervision", () => {
     // Crash-loop cap: 15s let a degraded runner hammer CoreDevice 4x/minute.
     assert.match(xml, /<key>ThrottleInterval<\/key><integer>300<\/integer>/);
     assert.ok(!/<integer>15<\/integer>/.test(xml), "the old 15s throttle must be gone");
+  });
+});
+
+describe("storage watchdog", () => {
+  const GB = 1024 ** 3;
+
+  it("classifies reported free space into ok/warn/critical", () => {
+    assert.equal(classifyStorage(20 * GB), "ok");
+    assert.equal(classifyStorage(STORAGE_WARN_BYTES + 1), "ok");
+    assert.equal(classifyStorage(STORAGE_WARN_BYTES), "warn");
+    assert.equal(classifyStorage(4 * GB), "warn");
+    assert.equal(classifyStorage(STORAGE_CRITICAL_BYTES), "critical");
+    assert.equal(classifyStorage(1 * GB), "critical");
+  });
+
+  it("treats unknown/undefined/negative free space as ok, never a false alarm", () => {
+    assert.equal(classifyStorage(undefined), "ok");
+    assert.equal(classifyStorage(-1), "ok");
+    assert.equal(classifyStorage(Number.NaN), "ok");
+  });
+
+  it("alerts once per day per level, and re-alerts when severity worsens", () => {
+    // First warn of the day fires; a repeat the same day does not.
+    assert.equal(shouldAlertStorage("warn", undefined, "2026-07-20"), true);
+    assert.equal(shouldAlertStorage("warn", "2026-07-20:warn", "2026-07-20"), false);
+    // Worsening warn → critical on the same day re-alerts.
+    assert.equal(shouldAlertStorage("critical", "2026-07-20:warn", "2026-07-20"), true);
+    // A new day re-alerts even at the same level.
+    assert.equal(shouldAlertStorage("warn", "2026-07-20:warn", "2026-07-21"), true);
+    // ok never alerts.
+    assert.equal(shouldAlertStorage("ok", undefined, "2026-07-20"), false);
   });
 });
 
