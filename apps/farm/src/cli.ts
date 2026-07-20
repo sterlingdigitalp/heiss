@@ -79,7 +79,7 @@ Setup:
   heiss-farm setup status [--data DIR]
   heiss-farm setup device [--udid UDID] [--wait-ms N]
   heiss-farm runner install [--udid UDID] [--team TEAM_ID]
-  heiss-farm runner status | ensure | stop [--udid UDID]
+  heiss-farm runner status | ensure | stop | clear-cache [--udid UDID]
   heiss-farm signing show | set --team TEAM_ID | set --asc-key PATH --key-id ID --issuer ID
   heiss-farm devices list | sync [--data DIR]
   heiss-farm devices rename <deviceId> <name>
@@ -501,6 +501,19 @@ async function main(): Promise<void> {
       usb: device,
       next: "heiss-farm runner install --udid " + device.udid,
     });
+    return;
+  }
+
+  if (cmd === "runner" && args[1] === "clear-cache") {
+    const requested = getArg(args, "--udid");
+    const usb = await listUsbIphones();
+    const udid = requested ?? usb.find((d) => d.available)?.udid;
+    if (!udid) throw new Error("No USB iPhone available; connect one or pass --udid");
+    const driver = makeDriver();
+    await driver.connect(`clear-cache`, udid);
+    const r = await driver.runAction(`clear-cache`, "manual", "tiktok:clear_cache", { platform: "tiktok", handle: "" });
+    await driver.disconnect(`clear-cache`).catch(() => undefined);
+    print({ ok: true, udid, result: r.detail });
     return;
   }
 
@@ -993,6 +1006,35 @@ async function main(): Promise<void> {
               })
             : { sessions: [], activity: [], interrupted: false };
           const result = { sessions: [...posting.sessions, ...warmups.sessions], interrupted: posting.interrupted || warmups.interrupted };
+          // Daily TikTok cache maintenance. Feed scrolling caches several GB/day
+          // of video on the device (observed ~5GB/day → 35GB System Data in a
+          // week); left unmanaged it fills storage and a system alert blocks all
+          // automation. Run once per local day on an idle tick against a
+          // known-healthy runner, so it never contends with a session or blocks
+          // on a down runner. Fail-soft: the runner returns ok even if it cannot
+          // navigate, and any error here is swallowed.
+          const cacheDay = calendarDay(nowIso, store.state.settings.timeZone);
+          if (result.sessions.length === 0
+              && store.state.settings.notificationKeys.tiktokCacheClearDay !== cacheDay) {
+            const cacheAccount = store.state.accounts.find((account) =>
+              account.platform === "tiktok"
+              && (account.preflightStatus ?? "ready") === "ready"
+              && store.state.devices.some((device) => device.id === account.deviceId && device.online
+                && store.state.settings.deviceHealth[device.id]?.ok === true));
+            if (cacheAccount) {
+              const cacheDevice = store.state.devices.find((device) => device.id === cacheAccount.deviceId)!;
+              try {
+                const cacheDriver = makeDriver();
+                await cacheDriver.connect(cacheDevice.id, cacheDevice.udid);
+                const cacheResult = await cacheDriver.runAction(cacheDevice.id, cacheAccount.id, "tiktok:clear_cache", { platform: "tiktok", handle: cacheAccount.handle });
+                await cacheDriver.disconnect(cacheDevice.id).catch(() => undefined);
+                store.state.settings.notificationKeys.tiktokCacheClearDay = cacheDay;
+                console.log(JSON.stringify({ at: nowIso, tiktokCacheClear: cacheResult.detail }));
+              } catch (error) {
+                console.error(JSON.stringify({ at: nowIso, tiktokCacheClearError: error instanceof Error ? error.message : String(error) }));
+              }
+            }
+          }
           const cloud = await pushCloudCompletions(store).catch((error) => ({ warning: String(error), pushed: 0 }));
           const completed = result.sessions.filter((session) => session.status === "completed").length;
           if (completed > 0) notifyDesktop("Heiss session complete", `${completed} scheduled session${completed === 1 ? "" : "s"} completed.`);

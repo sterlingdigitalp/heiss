@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.19.1"
+private let heissRunnerBuild = "heiss-runner-2026.07.20.1"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -203,6 +203,13 @@ final class HeissRunnerUITests: XCTestCase {
             guard app.wait(for: .runningForeground, timeout: 8) else {
                 throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) did not recover after clearing a delayed system prompt"])
             }
+        }
+        // Periodic maintenance: clear TikTok's video cache. Feed scrolling caches
+        // several GB/day, which fills the device and blocks automation with a
+        // storage-full system alert. Account-agnostic, so it runs before any
+        // verification and never touches lifecycle.
+        if action == "tiktok:clear_cache" {
+            return performTikTokCacheClear(app: app)
         }
         if platform == "instagram" {
             // Instagram can present this modal over the profile immediately
@@ -1365,6 +1372,63 @@ final class HeissRunnerUITests: XCTestCase {
         // a label-edge tap while TikTok's feed player is animating.
         surface.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.95)).press(forDuration: 0.08)
         Thread.sleep(forTimeInterval: 2.0)
+    }
+
+    /// Navigate TikTok Settings → Free up space → Clear cache. Fully fail-soft:
+    /// any missing OCR target ends the attempt with ok:true and a "skipped"
+    /// note, so a TikTok UI change can never fail a session or flag an account.
+    /// Drives SpringBoard coordinates/OCR rather than TikTok's animated tree.
+    private func performTikTokCacheClear(app: XCUIApplication) -> [String: Any] {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        disableAutomaticInterruptionHandling(springboard)
+        let surface = springboard.windows.firstMatch
+        func finish(_ detail: String) -> [String: Any] {
+            // Leave TikTok closed so the next command starts from a clean launch.
+            if app.state != .notRunning { app.terminate(); Thread.sleep(forTimeInterval: 0.6) }
+            return ["ok": true, "executed": true, "detail": "xctest:tiktok:\(detail)"]
+        }
+        // A storage-full (or any) system alert may already be up — dismissing it
+        // is part of the point. Choose the non-destructive option.
+        for label in ["Not Now", "Cancel", "OK"] {
+            let button = springboard.buttons.matching(NSPredicate(format: "label ==[c] %@", label)).firstMatch
+            if button.exists, button.isHittable { button.tap(); Thread.sleep(forTimeInterval: 0.6); break }
+        }
+        do {
+            try openTikTokProfile(surface: surface)
+            // Top-right menu (☰) opens the settings entry point.
+            surface.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.06)).tap()
+            Thread.sleep(forTimeInterval: 1.0)
+            guard try tapTextUsingOCR(surface: surface, expected: "Settings and privacy") else {
+                return finish("cache_clear_skipped:settings_menu")
+            }
+            Thread.sleep(forTimeInterval: 1.2)
+            // "Free up space" sits in a scrollable settings list.
+            var reachedFreeUp = false
+            for _ in 0..<6 {
+                if try tapTextUsingOCR(surface: surface, expected: "Free up space") { reachedFreeUp = true; break }
+                surface.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80))
+                    .press(forDuration: 0.08, thenDragTo: surface.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.32)))
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+            guard reachedFreeUp else { return finish("cache_clear_skipped:free_up_space") }
+            Thread.sleep(forTimeInterval: 1.2)
+            // The Cache row exposes a "Clear" button on its trailing edge.
+            guard try tapTextUsingOCR(surface: surface, expected: "Clear") else {
+                return finish("cache_clear_skipped:clear_button")
+            }
+            Thread.sleep(forTimeInterval: 1.0)
+            // Some builds confirm with a "Clear cache" dialog carrying its own
+            // Clear/Confirm button in the lower half of the screen.
+            if try screenContainsTextUsingOCR("Clear cache", minimumVisionY: 0.15) {
+                if !(try tapTextUsingOCR(surface: surface, expected: "Clear", minimumScreenY: 0.4)) {
+                    _ = try tapTextUsingOCR(surface: surface, expected: "Confirm")
+                }
+                Thread.sleep(forTimeInterval: 1.0)
+            }
+            return finish("cache_cleared")
+        } catch {
+            return finish("cache_clear_skipped:\(error.localizedDescription)")
+        }
     }
 
     private func dismissTikTokPasskey() {
