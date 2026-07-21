@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.20.3"
+private let heissRunnerBuild = "heiss-runner-2026.07.20.4"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -2019,12 +2019,16 @@ final class HeissRunnerUITests: XCTestCase {
         // open the native account switcher when tapped.
         _ = try recoverLateLimitedPhotosPrompt(app: app, surface: window, platform: platform)
         if platform == "tiktok" {
-            // Measured on a 750x1334 SE profile: the display name + chevron sit
-            // at dy ~0.238 and the @handle one row below at dy ~0.268. The old
-            // 0.267 fallback therefore landed on the handle, which *copies the
-            // username* and silently leaves us on the profile — every switch
-            // then failed as "not found in the switcher". Aim at the chevron.
-            window.coordinate(withNormalizedOffset: point(command, "accountMenu", .init(dx: 0.637, dy: 0.238))).tap()
+            // Open the switcher by anchoring on the current @handle (OCR) and
+            // tapping the display-name row above it — layout-independent. A fixed
+            // coordinate broke when TikTok added the "What's up?" prompt bubble
+            // above the avatar (it shifts the whole header down) and for short
+            // display names (the chevron moves left), landing the tap in empty
+            // space so the switcher never opened and every switch failed as "not
+            // found". The measured coordinate stays only as a last-ditch fallback.
+            if !(try openTikTokSwitcherFromProfile(surface: window)) {
+                window.coordinate(withNormalizedOffset: point(command, "accountMenu", .init(dx: 0.637, dy: 0.238))).tap()
+            }
             Thread.sleep(forTimeInterval: 0.9)
             // Confirm the tap opened the switcher instead of trusting it. Only
             // the unambiguous failure signature is treated as fatal here, so an
@@ -2455,6 +2459,32 @@ final class HeissRunnerUITests: XCTestCase {
         ) else { return false }
         let box = match.boundingBox
         surface.coordinate(withNormalizedOffset: CGVector(dx: box.midX, dy: 1.0 - box.midY)).tap()
+        return true
+    }
+
+    /// Open TikTok's account switcher by anchoring on the current profile
+    /// @handle (always rendered on the profile) and tapping the display-name row
+    /// directly above it. Survives TikTok shifting the header down — e.g. the new
+    /// "What's up?" engagement bubble above the avatar — and short display names,
+    /// both of which broke the old fixed-coordinate tap and made every switch
+    /// fail as "not found in the switcher". Returns false when no @handle is
+    /// visible so the caller can fall back.
+    private func openTikTokSwitcherFromProfile(surface: XCUIElement) throws -> Bool {
+        let observations = try recognizedTextObservationsUsingOCR()
+        // The current @handle sits in the upper-centre of the profile; take the
+        // topmost "@…" token there.
+        let handleBox = observations
+            .filter { $0.boundingBox.midY > 0.6 }
+            .filter { ($0.topCandidates(1).first?.string ?? "").hasPrefix("@") }
+            .max(by: { $0.boundingBox.midY < $1.boundingBox.midY })?
+            .boundingBox
+        guard let box = handleBox else { return false }
+        // The display name + chevron sit one line above the handle. Vision Y
+        // increases upward, so add the row gap and tap that row's centre (the
+        // name is centred like the handle). Tapping the name opens the switcher;
+        // tapping the handle row itself would only copy the username.
+        let nameRowVisionY = min(0.99, box.midY + 0.031)
+        surface.coordinate(withNormalizedOffset: CGVector(dx: box.midX, dy: 1.0 - nameRowVisionY)).tap()
         return true
     }
 
