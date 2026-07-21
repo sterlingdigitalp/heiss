@@ -1037,35 +1037,15 @@ async function main(): Promise<void> {
               })
             : { sessions: [], activity: [], interrupted: false };
           const result = { sessions: [...posting.sessions, ...warmups.sessions], interrupted: posting.interrupted || warmups.interrupted };
-          // Daily TikTok cache maintenance. Feed scrolling caches several GB/day
-          // of video on the device (observed ~5GB/day → 35GB System Data in a
-          // week); left unmanaged it fills storage and a system alert blocks all
-          // automation. Run once per local day on an idle tick against a
-          // known-healthy runner, so it never contends with a session or blocks
-          // on a down runner. Fail-soft: the runner returns ok even if it cannot
-          // navigate, and any error here is swallowed.
-          const cacheDay = calendarDay(nowIso, store.state.settings.timeZone);
-          if (result.sessions.length === 0
-              && store.state.settings.notificationKeys.tiktokCacheClearDay !== cacheDay) {
-            const cacheAccount = store.state.accounts.find((account) =>
-              account.platform === "tiktok"
-              && (account.preflightStatus ?? "ready") === "ready"
-              && store.state.devices.some((device) => device.id === account.deviceId && device.online
-                && store.state.settings.deviceHealth[device.id]?.ok === true));
-            if (cacheAccount) {
-              const cacheDevice = store.state.devices.find((device) => device.id === cacheAccount.deviceId)!;
-              try {
-                const cacheDriver = makeDriver();
-                await cacheDriver.connect(cacheDevice.id, cacheDevice.udid);
-                const cacheResult = await cacheDriver.runAction(cacheDevice.id, cacheAccount.id, "tiktok:clear_cache", { platform: "tiktok", handle: cacheAccount.handle });
-                await cacheDriver.disconnect(cacheDevice.id).catch(() => undefined);
-                store.state.settings.notificationKeys.tiktokCacheClearDay = cacheDay;
-                console.log(JSON.stringify({ at: nowIso, tiktokCacheClear: cacheResult.detail }));
-              } catch (error) {
-                console.error(JSON.stringify({ at: nowIso, tiktokCacheClearError: error instanceof Error ? error.message : String(error) }));
-              }
-            }
-          }
+          // Removed: the automatic daily TikTok cache-clear. It was built on a
+          // misdiagnosis — the 2026-07-20 backup+restore proved the ~35 GB was
+          // iOS System Data (crash/diagnostic logs), not TikTok's ~1.5 GB cache.
+          // Worse, navigating Settings → Free up space → Clear crashed TikTok
+          // repeatedly (and each crash writes the very crash logs that fill
+          // System Data), and the failure left the daily key unset so it retried
+          // and crashed again. Storage is now managed by the free-space watchdog
+          // + on-device prune (heiss-runner-2026.07.20.3) and periodic restore.
+          // The manual `runner clear-cache` action remains for on-demand use.
           const cloud = await pushCloudCompletions(store).catch((error) => ({ warning: String(error), pushed: 0 }));
           const completed = result.sessions.filter((session) => session.status === "completed").length;
           if (completed > 0) notifyDesktop("Heiss session complete", `${completed} scheduled session${completed === 1 ? "" : "s"} completed.`);
