@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.20.4"
+private let heissRunnerBuild = "heiss-runner-2026.07.20.5"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -417,6 +417,14 @@ final class HeissRunnerUITests: XCTestCase {
                 if platform == "youtube" {
                     try openYouTubeSearch(app: app, surface: window, command: command)
                 } else {
+                    if platform == "x" {
+                        // X auto-hides the bottom tab bar (Home/Search); a gentle
+                        // short swipe down (scroll up) re-reveals it so the search
+                        // tab is findable. Harmless when already visible.
+                        window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+                            .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.58)))
+                        Thread.sleep(forTimeInterval: 0.7)
+                    }
                     let searchButtons = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search"))
                     if searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
                     else {
@@ -810,6 +818,16 @@ final class HeissRunnerUITests: XCTestCase {
             if platform == "youtube" {
                 try openYouTubeSearch(app: app, surface: window, command: command)
             } else {
+                if platform == "x" {
+                    // X auto-hides the bottom tab bar (Home/Search) after scrolling
+                    // and on a post/thread detail, so the search tab can't be found
+                    // and warmup:search fails. A gentle short swipe down (scroll up)
+                    // re-reveals the bar (user-confirmed). Harmless when it's already
+                    // visible — it just nudges the feed a touch.
+                    window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+                        .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.58)))
+                    Thread.sleep(forTimeInterval: 0.7)
+                }
                 let searchButtons = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search"))
                 if searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
                 else {
@@ -1079,6 +1097,16 @@ final class HeissRunnerUITests: XCTestCase {
             if platform == "youtube" {
                 try openYouTubeSearch(app: app, surface: window, command: command)
             } else {
+                if platform == "x" {
+                    // X auto-hides the bottom tab bar (Home/Search) after scrolling
+                    // and on a post/thread detail, so the search tab can't be found
+                    // and warmup:search fails. A gentle short swipe down (scroll up)
+                    // re-reveals the bar (user-confirmed). Harmless when it's already
+                    // visible — it just nudges the feed a touch.
+                    window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+                        .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.58)))
+                    Thread.sleep(forTimeInterval: 0.7)
+                }
                 let searchButtons = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search"))
                 if searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
                 else {
