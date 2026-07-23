@@ -824,7 +824,11 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "daemon") {
-    const intervalMs = Math.max(5_000, Number(getArg(args, "--interval-sec") ?? 30) * 1000);
+    // Idle tick cadence. Warmups/posts are time-scheduled with minutes of
+    // jitter, so a 60s tick (was 30s) still starts them on time while halving
+    // the round-the-clock USB-list/supervise chatter that iOS logs into System
+    // Data — part of stretching the SE's restore interval.
+    const intervalMs = Math.max(5_000, Number(getArg(args, "--interval-sec") ?? 60) * 1000);
     let stopping = false;
     process.once("SIGINT", () => { stopping = true; });
     process.once("SIGTERM", () => { stopping = true; });
