@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.20.5"
+private let heissRunnerBuild = "heiss-runner-2026.07.20.6"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -2499,20 +2499,32 @@ final class HeissRunnerUITests: XCTestCase {
     /// visible so the caller can fall back.
     private func openTikTokSwitcherFromProfile(surface: XCUIElement) throws -> Bool {
         let observations = try recognizedTextObservationsUsingOCR()
-        // The current @handle sits in the upper-centre of the profile; take the
-        // topmost "@…" token there.
-        let handleBox = observations
-            .filter { $0.boundingBox.midY > 0.6 }
-            .filter { ($0.topCandidates(1).first?.string ?? "").hasPrefix("@") }
-            .max(by: { $0.boundingBox.midY < $1.boundingBox.midY })?
-            .boundingBox
-        guard let box = handleBox else { return false }
-        // The display name + chevron sit one line above the handle. Vision Y
-        // increases upward, so add the row gap and tap that row's centre (the
-        // name is centred like the handle). Tapping the name opens the switcher;
-        // tapping the handle row itself would only copy the username.
-        let nameRowVisionY = min(0.99, box.midY + 0.031)
-        surface.coordinate(withNormalizedOffset: CGVector(dx: box.midX, dy: 1.0 - nameRowVisionY)).tap()
+        // The current @handle is the topmost "@…" token in the upper profile —
+        // wherever TikTok positions the header. (Their 2026-07 redesign moved it
+        // from centred to top-left and made the block taller.)
+        guard let handle = observations
+            .filter({ $0.boundingBox.midY > 0.55 })
+            .filter({ ($0.topCandidates(1).first?.string ?? "").hasPrefix("@") })
+            .max(by: { $0.boundingBox.midY < $1.boundingBox.midY }) else { return false }
+        let hb = handle.boundingBox
+        // Tap the display name — the text line directly above the handle and
+        // horizontally aligned with it. Resolving it by geometry (not a fixed
+        // offset) survives the header moving or the row gap changing; tapping the
+        // name opens the switcher, while tapping the handle itself only copies
+        // the username. Vision Y increases upward, so "above" is a larger midY.
+        let name = observations
+            .filter { $0.boundingBox.midY > hb.midY + 0.003 && $0.boundingBox.midY < hb.midY + 0.09 }
+            .filter { ($0.boundingBox.minX < hb.maxX && $0.boundingBox.maxX > hb.minX)
+                || abs($0.boundingBox.midX - hb.midX) < 0.20 }
+            .min(by: { $0.boundingBox.midY < $1.boundingBox.midY })
+        let point: CGVector
+        if let name {
+            point = CGVector(dx: name.boundingBox.midX, dy: 1.0 - name.boundingBox.midY)
+        } else {
+            // No name line resolved — fall back to a small offset above the handle.
+            point = CGVector(dx: hb.midX, dy: 1.0 - min(0.99, hb.midY + 0.035))
+        }
+        surface.coordinate(withNormalizedOffset: point).tap()
         return true
     }
 
