@@ -68,6 +68,37 @@ export interface EngagementTargetRecord {
   at: string;
 }
 
+/**
+ * An operator-curated person a persona engages with. Distinct from
+ * EngagementTargetRecord, which is the after-the-fact ledger of what was already
+ * engaged: this is the hand-picked *input* list, one per persona, edited from
+ * the dashboard's Targets page. Nothing here is auto-discovered.
+ */
+export interface CuratedTarget {
+  id: string;
+  /** Persona account that owns this list (one list per account). */
+  accountId: string;
+  /** Public @handle of the person to engage with. */
+  handle: string;
+  /** Free-form operator note — why this person is on the list. */
+  note?: string;
+  /** Paused targets stay for history but are never engaged. Used for weekly substitutions. */
+  active: boolean;
+  addedAt: string;
+  /** Set once the persona has followed this target (the week-one follow burst). */
+  followedAt?: string;
+  /** Drives the daily rotation once every target is followed. */
+  lastEngagedAt?: string;
+  /** Completed comment+like touches. */
+  engagedCount: number;
+}
+
+/**
+ * Curation cap per persona: one new follow per day sustains a seven-day week,
+ * after which the rotation engages an already-followed target instead.
+ */
+export const MAX_CURATED_TARGETS_PER_ACCOUNT = 7;
+
 export type EngagementCandidateStatus = "pending" | "approved" | "rejected" | "expired";
 export type EngagementActionStatus = "approved" | "ready" | "needs_manual" | "completed" | "skipped" | "expired" | "failed";
 

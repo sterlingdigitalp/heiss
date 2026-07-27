@@ -7,6 +7,7 @@ import type {
   EngagementActionApproval,
   EngagementCandidate,
   EngagementTargetRecord,
+  CuratedTarget,
   ContentAsset,
   Device,
   FarmSession,
@@ -36,6 +37,8 @@ export interface FarmState {
   accountGroups: AccountGroup[];
   engagementApprovals: EngagementApproval[];
   engagementTargets: EngagementTargetRecord[];
+  /** Operator-curated engagement lists, one per persona. */
+  curatedTargets: CuratedTarget[];
   engagementCandidates: EngagementCandidate[];
   engagementActionApprovals: EngagementActionApproval[];
   contents: ContentAsset[];
@@ -62,6 +65,7 @@ export function emptyState(): FarmState {
     accountGroups: [],
     engagementApprovals: [],
     engagementTargets: [],
+    curatedTargets: [],
     engagementCandidates: [],
     engagementActionApprovals: [],
     contents: [],
@@ -119,6 +123,7 @@ export class JsonStore {
     this.state.accountGroups ??= [];
     this.state.engagementApprovals ??= [];
     this.state.engagementTargets ??= [];
+    this.state.curatedTargets ??= [];
     this.state.engagementCandidates ??= [];
     this.state.engagementActionApprovals ??= [];
     this.state.warmupSchedules ??= [];

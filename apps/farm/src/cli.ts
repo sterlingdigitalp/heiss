@@ -37,6 +37,10 @@ import {
   normalizePlatformCandidateHandle,
   isAmbiguousCandidateHandle,
   candidateTargetKey,
+  curatedTargetsFor,
+  checkCuratedTargetAddition,
+  MAX_CURATED_TARGETS_PER_ACCOUNT,
+  type CuratedTarget,
 } from "@heiss/core";
 import {
   RealIosDriver,
@@ -115,6 +119,12 @@ Farm:
   heiss-farm add-slot <accountId> <HH:mm>
   heiss-farm remove-slot <slotId>
   heiss-farm warmup-schedule list | rebalance | set <accountId> <HH:mm> [--jitter N] | enable <accountId> | disable <accountId> | remove <accountId>
+  heiss-farm targets list [--account <accountId>]
+  heiss-farm targets add <accountId> @handle [--note "why this person"]
+  heiss-farm targets remove <targetId>
+  heiss-farm targets pause <targetId> | resume <targetId>
+  heiss-farm platforms focus <platform>   # pause warmups/slots on every other platform
+  heiss-farm platforms resume <platform>
   heiss-farm settings show | timezone <IANA_ZONE> | caps <farm> <account>
   heiss-farm engagement show
   heiss-farm engagement configure <accountId> --mode off|review|autonomous [--likes on|off] [--follows on|off] [--like-cap 0..5] [--follow-cap 0..2] [--cooldown-min N]
@@ -776,6 +786,7 @@ async function main(): Promise<void> {
       accountGroups: store.state.accountGroups,
       engagementApprovals: store.state.engagementApprovals,
       engagementTargets: store.state.engagementTargets.slice(-100),
+      curatedTargets: store.state.curatedTargets,
       engagementCandidates: store.state.engagementCandidates.slice(-500),
       engagementActionApprovals: store.state.engagementActionApprovals.slice(-500),
       queue: store.state.queue,
@@ -1364,6 +1375,113 @@ async function main(): Promise<void> {
     if (accounts.length === 0) throw new Error(`Account set ${group.name} has no linked accounts${platform ? ` on ${platform}` : ""}`);
     for (const account of accounts) account.searchTerms = terms;
     store.save(); print({ ok: true, group, terms, accounts: accounts.map((account) => account.id) }); return;
+  }
+
+  // ── Curated engagement targets ─────────────────────────
+  if (cmd === "targets" && args[1] === "list") {
+    const store = openStore(args);
+    const accountId = getArg(args, "--account");
+    const accounts = store.state.accounts.filter((account) =>
+      account.platform === "x" && (!accountId || account.id === accountId));
+    print({
+      ok: true,
+      max: MAX_CURATED_TARGETS_PER_ACCOUNT,
+      personas: accounts.map((account) => ({
+        accountId: account.id,
+        handle: account.handle,
+        group: store.state.accountGroups.find((g) => g.id === account.groupId)?.name,
+        niche: account.searchTerms,
+        targets: curatedTargetsFor(store.state.curatedTargets, account.id),
+      })),
+    });
+    return;
+  }
+
+  if (cmd === "targets" && args[1] === "add") {
+    const store = openStore(args);
+    const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
+    if (!account) throw new Error("Usage: targets add <accountId> @handle [--note \"...\"]");
+    if (account.platform !== "x") {
+      throw new Error(`Curated targets are X-only; ${account.handle} is ${account.platform}`);
+    }
+    const check = checkCuratedTargetAddition(store.state.curatedTargets, account.id, args[3] ?? "");
+    if (!check.ok) throw new Error(check.error);
+    const target: CuratedTarget = {
+      id: randomUUID(),
+      accountId: account.id,
+      handle: check.handle!,
+      note: getArg(args, "--note")?.trim() || undefined,
+      active: true,
+      addedAt: new Date().toISOString(),
+      engagedCount: 0,
+    };
+    store.state.curatedTargets.push(target);
+    store.pushActivity({
+      kind: "curated_target_added", accountId: account.id,
+      message: `${account.handle} will engage ${target.handle}`,
+    });
+    store.save(); print({ ok: true, target }); return;
+  }
+
+  if (cmd === "targets" && ["remove", "pause", "resume"].includes(args[1] ?? "")) {
+    const store = openStore(args);
+    const target = store.state.curatedTargets.find((candidate) => candidate.id === args[2]);
+    if (!target) throw new Error(`Usage: targets ${args[1]} <targetId>`);
+    const account = store.state.accounts.find((candidate) => candidate.id === target.accountId);
+    if (args[1] === "remove") {
+      store.state.curatedTargets = store.state.curatedTargets.filter((c) => c.id !== target.id);
+      store.pushActivity({
+        kind: "curated_target_removed", accountId: target.accountId,
+        message: `${account?.handle ?? target.accountId} dropped ${target.handle}`,
+      });
+    } else {
+      // Pausing keeps the row (and its follow history) but takes it out of the
+      // daily rotation — this is how a weekly substitution is made.
+      target.active = args[1] === "resume";
+      store.pushActivity({
+        kind: "curated_target_updated", accountId: target.accountId,
+        message: `${account?.handle ?? target.accountId} ${target.active ? "resumed" : "paused"} ${target.handle}`,
+      });
+    }
+    store.save(); print({ ok: true, target }); return;
+  }
+
+  // ── Platform focus ─────────────────────────────────────
+  if (cmd === "platforms" && ["focus", "resume"].includes(args[1] ?? "")) {
+    const store = openStore(args);
+    const platform = args[2]?.trim().toLowerCase();
+    if (!platform || !["instagram", "tiktok", "x", "youtube"].includes(platform)) {
+      throw new Error(`Usage: platforms ${args[1]} <instagram|tiktok|x|youtube>`);
+    }
+    const focusing = args[1] === "focus";
+    // Focus pauses every OTHER platform; resume re-enables the named one. Only
+    // schedule/slot `enabled` flags move, so preflight/trust/warmup history all
+    // survive and the change is fully reversible.
+    const affected = store.state.accounts.filter((account) =>
+      focusing ? account.platform !== platform : account.platform === platform);
+    const affectedIds = new Set(affected.map((account) => account.id));
+    let warmups = 0;
+    let slots = 0;
+    for (const schedule of store.state.warmupSchedules) {
+      if (affectedIds.has(schedule.accountId) && schedule.enabled === focusing) {
+        schedule.enabled = !focusing; warmups += 1;
+      }
+    }
+    for (const slot of store.state.slots) {
+      if (affectedIds.has(slot.accountId) && slot.enabled === focusing) {
+        slot.enabled = !focusing; slots += 1;
+      }
+    }
+    const message = focusing
+      ? `Focused the farm on ${platform}: paused ${warmups} warmup schedule(s) and ${slots} posting slot(s) on other platforms`
+      : `Resumed ${platform}: re-enabled ${warmups} warmup schedule(s) and ${slots} posting slot(s)`;
+    store.pushActivity({ kind: "platform_focus", message });
+    store.save();
+    print({
+      ok: true, platform, action: args[1], warmupSchedulesChanged: warmups, slotsChanged: slots,
+      message,
+    });
+    return;
   }
 
   if (cmd === "add-account-set") {
