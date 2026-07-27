@@ -3,6 +3,7 @@ export * from "./lifecycle.js";
 export * from "./engagement.js";
 export * from "./candidates.js";
 export * from "./targets.js";
+export * from "./engagement-plan.js";
 export * from "./capacity.js";
 export * from "./protocol.js";
 export * from "./locks.js";
