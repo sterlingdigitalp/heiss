@@ -134,7 +134,7 @@ export class RealUsbTransport implements IosTransport {
     udid: string,
     action: string,
     context?: DeviceActionContext,
-  ): Promise<{ ok: true; detail: string }> {
+  ): Promise<{ ok: true; detail: string; data?: Record<string, unknown> }> {
     const result = await this.sendCommand(udid, { action, ...(context ?? {}) });
     if (Number(result.protocolVersion ?? 0) !== RUNNER_PROTOCOL_VERSION
         || String(result.runnerBuild ?? "") !== RUNNER_BUILD) {
@@ -160,6 +160,10 @@ export class RealUsbTransport implements IosTransport {
     return {
       ok: true,
       detail: String(result.detail ?? `ios:${action}@${udid.slice(0, 8)}`),
+      // Observational actions (e.g. x:target_scan) report structured findings
+      // the caller needs; without this passthrough only `detail` survives and
+      // everything the runner read is silently discarded.
+      ...(result.data && typeof result.data === "object" ? { data: result.data as Record<string, unknown> } : {}),
     };
   }
 

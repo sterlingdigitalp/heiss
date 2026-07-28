@@ -44,6 +44,7 @@ import {
 } from "@heiss/core";
 import {
   RealIosDriver,
+  RealUsbTransport,
   createProductionTransport,
   listUsbIphones,
   pollUntilReady,
@@ -122,6 +123,7 @@ Farm:
   heiss-farm targets list [--account <accountId>]
   heiss-farm targets add <accountId> @handle [--note "why this person"]
   heiss-farm targets remove <targetId>
+  heiss-farm targets scan <xAccountId> @targetHandle   # read-only: what do their latest posts look like
   heiss-farm targets pause <targetId> | resume <targetId>
   heiss-farm platforms focus <platform>   # pause warmups/slots on every other platform
   heiss-farm platforms resume <platform>
@@ -1444,6 +1446,34 @@ async function main(): Promise<void> {
       });
     }
     store.save(); print({ ok: true, target }); return;
+  }
+
+  // ── Curated engagement: read-only target scan ──────────
+  if (cmd === "targets" && args[1] === "scan") {
+    const store = openStore(args);
+    const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
+    const targetHandle = args[3]?.trim();
+    if (!account || account.platform !== "x" || !targetHandle?.startsWith("@")) {
+      throw new Error("Usage: targets scan <xAccountId> @targetHandle");
+    }
+    const device = store.state.devices.find((candidate) => candidate.id === account.deviceId);
+    if (!device) throw new Error("Account device is missing");
+    // A scan switches accounts, searches, opens a profile and runs OCR, which
+    // comfortably exceeds the default per-command ceiling.
+    const driver = new RealIosDriver(new RealUsbTransport({ commandTimeoutMs: 180_000 }));
+    await driver.connect(device.id, device.udid);
+    try {
+      const result = await driver.runAction(device.id, account.id, "x:target_scan", {
+        platform: "x", handle: account.handle, displayName: account.displayName,
+        loginEmail: account.loginEmail, switcherHint: account.switcherHint,
+        searchTerms: account.searchTerms, uiProfile: store.state.uiProfiles.x,
+        targetHandle,
+      });
+      print({ ok: true, persona: account.handle, targetHandle, result });
+    } finally {
+      await driver.disconnect(device.id).catch(() => undefined);
+    }
+    return;
   }
 
   // ── Platform focus ─────────────────────────────────────

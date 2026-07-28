@@ -15,7 +15,7 @@ export interface IosTransport {
     udid: string,
     action: string,
     context?: DeviceActionContext,
-  ): Promise<{ ok: true; detail: string }>;
+  ): Promise<{ ok: true; detail: string ; data?: Record<string, unknown> }>;
   runScriptSession?(
     udid: string,
     sessionId: string,
@@ -88,7 +88,7 @@ export class RealIosDriver implements DeviceDriver {
     _accountId: string,
     action: string,
     context?: DeviceActionContext,
-  ): Promise<{ ok: true; detail: string }> {
+  ): Promise<{ ok: true; detail: string; data?: Record<string, unknown> }> {
     const udid = this.connected.get(deviceId);
     if (!udid) {
       throw new Error(`RealIosDriver: device ${deviceId} not connected`);

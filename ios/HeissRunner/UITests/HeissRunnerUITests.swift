@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.20.6"
+private let heissRunnerBuild = "heiss-runner-2026.07.28.7"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -364,6 +364,12 @@ final class HeissRunnerUITests: XCTestCase {
             // returns a non-executed result with a reason. Never taps blind.
             let detail = try performCandidateLike(app: app, window: window, platform: platform, command: command)
             return ["ok": true, "executed": true, "detail": detail]
+        } else if action == "x:target_scan" {
+            // Read-only reconnaissance for curated engagement: open a target's
+            // profile and report what their two most recent posts look like.
+            // Taps nothing but navigation, so it is safe to run against real
+            // accounts before any engagement logic is trusted.
+            return try performXTargetScan(app: app, window: window, command: command)
         } else if action.contains("like") {
             var targets = Set<String>()
             let detail = try performGuardedEngagement(
@@ -978,6 +984,176 @@ final class HeissRunnerUITests: XCTestCase {
     /// reason instead of guessing. The final Like tap in particular MUST be a
     /// verified predicate match: a blind tap on an unknown profile/post page
     /// with no human watching could hit anything.
+    /// Open an exact account from X's search results and confirm the profile
+    /// actually loaded.
+    ///
+    /// Two traps this exists to avoid. First, the search results screen shows
+    /// the target's handle, so "is the handle on screen" cannot distinguish a
+    /// results list from the profile — confirmation requires a profile-only
+    /// marker and the keyboard being gone. Second, results include lookalikes:
+    /// searching "thekuchh" also returns "@Thekuchhal", and any substring match
+    /// would open the wrong person, so rows are chosen by exact-handle match.
+    /// Returns whether the profile opened, plus a record of what was seen at
+    /// each step. The diagnostics are returned on failure too — a scan that
+    /// only says "it didn't work" forces another guess, which is exactly the
+    /// loop this action exists to break.
+    private func openXProfileFromSearchResults(
+        app: XCUIApplication,
+        normalized: String
+    ) throws -> (opened: Bool, diagnostics: [String: Any]) {
+        var diagnostics: [String: Any] = [:]
+        // Submitting a handle lands on "Top", a mixed feed of posts. Rows there
+        // are tweets, and a stranger's reply that merely mentions the target
+        // satisfies exact-handle matching — so switch to the People tab, where
+        // every row is an account, before choosing anything.
+        let peopleTab = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "People")).firstMatch
+        let peopleCell = app.cells.matching(NSPredicate(format: "label ==[c] %@", "People")).firstMatch
+        if peopleTab.exists, peopleTab.isHittable { peopleTab.tap(); diagnostics["peopleTab"] = "button" }
+        else if peopleCell.exists, peopleCell.isHittable { peopleCell.tap(); diagnostics["peopleTab"] = "cell" }
+        else { diagnostics["peopleTab"] = "not_found" }
+        Thread.sleep(forTimeInterval: 1.4)
+
+        // Prefer a real account row over X's "Go to @handle" shortcut, which is
+        // a search affordance rather than a result.
+        let rows = app.cells.allElementsBoundByIndex.filter { $0.exists }
+        diagnostics["resultRows"] = rows.prefix(8).map { row in
+            [
+                "label": row.label,
+                "hittable": row.isHittable,
+                "exactMatch": elementContainsExactHandle(row, normalized: normalized),
+            ] as [String: Any]
+        }
+        let exact = rows.first { row in
+            elementContainsExactHandle(row, normalized: normalized)
+                && !row.label.lowercased().hasPrefix("go to")
+        }
+        let fallback = rows.first { elementContainsExactHandle($0, normalized: normalized) }
+        guard let row = exact ?? fallback else {
+            diagnostics["stoppedAt"] = "no_exact_match_row"
+            return (false, diagnostics)
+        }
+        diagnostics["chosenRow"] = row.label
+        diagnostics["chosenHittable"] = row.isHittable
+        // No coordinate fallback. An unhittable row's centre is not reliably the
+        // row: on the Top tab that tap landed on X's Grok panel. If the element
+        // cannot be tapped as an element, refuse.
+        guard row.isHittable else {
+            diagnostics["stoppedAt"] = "chosen_row_not_hittable"
+            return (false, diagnostics)
+        }
+        row.tap()
+
+        // A profile is confirmed by its own furniture — the follower counters —
+        // plus the search keyboard having dismissed.
+        let deadline = Date().addingTimeInterval(12)
+        repeat {
+            let keyboardUp = app.keyboards.firstMatch.exists
+            let observations = try recognizedTextObservationsUsingOCR()
+            let followers = observationContains(observations, "Followers")
+            let following = observationContains(observations, "Following")
+            let handleSeen = try screenContainsExactHandleUsingOCR(normalized: normalized)
+            diagnostics["lastKeyboardUp"] = keyboardUp
+            diagnostics["lastFollowers"] = followers
+            diagnostics["lastFollowing"] = following
+            diagnostics["lastHandleSeen"] = handleSeen
+            if !keyboardUp, followers || following, handleSeen {
+                diagnostics["stoppedAt"] = "confirmed"
+                return (true, diagnostics)
+            }
+            Thread.sleep(forTimeInterval: 0.7)
+        } while Date() < deadline
+        diagnostics["stoppedAt"] = "profile_markers_never_appeared"
+        diagnostics["postTapScreenText"] = (try recognizedTextObservationsUsingOCR())
+            .compactMap { $0.topCandidates(1).first?.string }
+            .prefix(30)
+            .map { $0 }
+        return (false, diagnostics)
+    }
+
+    /// Open a curated target's X profile and report their two most recent
+    /// posts. Purely observational — it navigates and reads, never engages —
+    /// so the Mac-side selection rules can be validated against what the app
+    /// actually renders before anything is allowed to tap.
+    ///
+    /// Post metadata is taken from the accessibility labels of the timeline
+    /// cells rather than OCR geometry: X packs author, relative time, body and
+    /// counts into those labels, which survives layout changes that would break
+    /// coordinate or band-based reading. Raw labels are returned untouched so
+    /// the parser can be written against real output instead of a guess.
+    private func performXTargetScan(
+        app: XCUIApplication,
+        window: XCUIElement,
+        command: [String: Any]
+    ) throws -> [String: Any] {
+        let rawTarget = (command["targetHandle"] as? String) ?? ""
+        guard rawTarget.hasPrefix("@"), rawTarget.count > 1 else {
+            throw NSError(domain: "HeissRunner", code: 41, userInfo: [
+                NSLocalizedDescriptionKey: "x:target_scan requires targetHandle: \"@handle\"",
+            ])
+        }
+        let normalizedTarget = normalizedHandle(rawTarget)
+        let targetKey = stableFingerprint("x|\(normalizedTarget)")
+
+        // Bare handle: "@" is not on the letter keyboard plane the coordinate
+        // typer can reach. See performCandidateLike for the same constraint.
+        try openSearchAndType(
+            app: app, window: window, platform: "x", command: command,
+            term: String(rawTarget.dropFirst())
+        )
+        Thread.sleep(forTimeInterval: 1.5)
+        let navigation = try openXProfileFromSearchResults(app: app, normalized: normalizedTarget)
+        guard navigation.opened else {
+            // Still a successful *observation*, so the diagnostics come back
+            // rather than being thrown away as an execution failure.
+            return [
+                "ok": true, "executed": true,
+                "detail": "x:target_scan:profile_not_opened:\(targetKey)",
+                "data": ["targetHandle": normalizedTarget, "navigation": navigation.diagnostics],
+            ]
+        }
+
+        // Timeline cells, top-down. The first cells on a profile can be the
+        // header/pinned chrome rather than posts, so report more than the two
+        // wanted and let the Mac decide what is a post.
+        // The first cells are profile chrome — header, then the
+        // Posts/Replies/Reposts tab strip — so reach past them. Collect a wide
+        // window and let the Mac classify; the runner should not be deciding
+        // what counts as a post.
+        var cells: [[String: Any]] = []
+        for (index, cell) in app.cells.allElementsBoundByIndex.prefix(24).enumerated() {
+            guard cell.exists else { continue }
+            let label = cell.label
+            cells.append([
+                "index": index,
+                "label": label,
+                "identifier": cell.identifier,
+                "hittable": cell.isHittable,
+                "postKey": stableFingerprint("x|\(normalizedTarget)|\(label)"),
+            ])
+        }
+        // A screen-level OCR pass alongside the labels, so if the accessibility
+        // tree turns out to be sparse there is still real text to work from.
+        let observations = try recognizedTextObservationsUsingOCR()
+        let screenText = observations
+            .compactMap { $0.topCandidates(1).first?.string }
+            .prefix(40)
+
+        // Structured findings go under "data": the Mac transport forwards that
+        // key and drops everything else it does not recognise.
+        return [
+            "ok": true,
+            "executed": true,
+            "detail": "x:target_scan:read:\(normalizedTarget):cells:\(cells.count)",
+            "data": [
+                "targetKey": targetKey,
+                "targetHandle": normalizedTarget,
+                "cells": cells,
+                "screenText": Array(screenText),
+                "navigation": navigation.diagnostics,
+            ],
+        ]
+    }
+
     private func performCandidateLike(
         app: XCUIApplication,
         window: XCUIElement,
@@ -1003,7 +1179,15 @@ final class HeissRunnerUITests: XCTestCase {
 
         // 1) Search for the exact target handle (mirrors the generic `search`
         // action's platform navigation, but always types this one handle).
-        try openSearchAndType(app: app, window: window, platform: platform, command: command, term: rawTarget)
+        // Type the handle WITHOUT its "@": that character lives on the symbol
+        // keyboard plane, and the coordinate typer can only reach the letter
+        // plane, so including it aborts the search outright. Platform search
+        // resolves the bare handle fine; the "@" form is still what gets
+        // exact-matched in the results.
+        try openSearchAndType(
+            app: app, window: window, platform: platform, command: command,
+            term: rawTarget.hasPrefix("@") ? String(rawTarget.dropFirst()) : rawTarget
+        )
         Thread.sleep(forTimeInterval: 1.0)
 
         // 2) Open the target's profile from the search results. Only an

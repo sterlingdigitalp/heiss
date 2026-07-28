@@ -63,6 +63,8 @@ export interface DeviceActionContext {
   ownedHandles?: string[];
   /** Global recent-target denylist prevents duplicate/coordinated engagement. */
   blockedEngagementTargetKeys?: string[];
+  /** Curated engagement: the one person this action is about. */
+  targetHandle?: string;
 }
 
 export interface DeviceSessionResult {
