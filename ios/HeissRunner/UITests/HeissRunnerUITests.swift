@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.28.9"
+private let heissRunnerBuild = "heiss-runner-2026.07.28.10"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1212,9 +1212,16 @@ final class HeissRunnerUITests: XCTestCase {
                     format: "label ==[c] %@ OR label BEGINSWITH[c] %@", "Like", "Like,"
                 ))
                 if let button = likes.allElementsBoundByIndex.first(where: { $0.exists && $0.isHittable }) {
+                    report["likeButtonLabel"] = button.label
                     button.tap(); report["like"] = "liked"
                 } else {
                     report["like"] = "like_button_not_found"
+                    // Same evidence-not-guesswork rule as the follow button:
+                    // report what the post detail actually exposes.
+                    report["visibleButtons"] = app.buttons.allElementsBoundByIndex
+                        .prefix(30)
+                        .filter { $0.exists && !$0.label.isEmpty }
+                        .map { ["label": $0.label, "hittable": $0.isHittable] as [String: Any] }
                 }
             }
         }

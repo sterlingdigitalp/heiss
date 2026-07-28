@@ -1509,7 +1509,12 @@ async function main(): Promise<void> {
     }
     const shouldFollow = explicit ? !target.followedAt : plan.shouldFollow;
 
-    const driver = new RealIosDriver(new RealUsbTransport({ commandTimeoutMs: 180_000 }));
+    // Generous per-command budget: this path runs a full scan AND a full engage
+    // back to back, each of which re-navigates (account switch, search, People
+    // tab, profile, scroll). Timing out mid-action is worse than waiting — the
+    // runner keeps going regardless, so a short ceiling means the tap happens
+    // but is never recorded.
+    const driver = new RealIosDriver(new RealUsbTransport({ commandTimeoutMs: 420_000 }));
     await driver.connect(device.id, device.udid);
     const context = {
       platform: "x" as const, handle: account.handle, displayName: account.displayName,
@@ -1544,13 +1549,20 @@ async function main(): Promise<void> {
       } as never);
 
       const report = (engage.data ?? {}) as Record<string, unknown>;
-      // Only a real run records history.
+      // Record what actually happened, not merely that the run finished.
+      // Burning the day's slot on a failed like would silently skip this target
+      // until tomorrow, so only a real touch counts as engagement.
+      const followLanded = report.follow === "followed" || report.follow === "already_following";
+      const likeLanded = report.like === "liked" || report.like === "already_liked";
       if (!dryRun && report.stoppedAt === "complete") {
-        if (report.follow === "followed" || report.follow === "already_following") {
-          target.followedAt ??= nowIso;
-        }
-        target.lastEngagedAt = nowIso;
-        target.engagedCount += 1;
+        if (followLanded) target.followedAt ??= nowIso;
+        // ANY real action spends the day. Gating this on the like alone let a
+        // re-run see the previous target as already-followed and march on to
+        // the next one, following someone a day early — the daily brake has to
+        // trip on a follow too, not just on a like.
+        if (followLanded || likeLanded) target.lastEngagedAt = nowIso;
+        // engagedCount tracks meaningful touches, so it stays like-gated.
+        if (likeLanded) target.engagedCount += 1;
         store.pushActivity({
           kind: "curated_engagement", accountId: account.id, deviceId: device.id,
           message: `${account.handle} → ${target.handle}: follow=${report.follow ?? "skip"} like=${report.like ?? "skip"}`,
