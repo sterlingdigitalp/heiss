@@ -1472,13 +1472,31 @@ async function main(): Promise<void> {
         slot.enabled = !focusing; slots += 1;
       }
     }
+    // Disabling schedules only gates *new* work: runOnce resumes checkpointed
+    // sessions before any platform gating, so a leftover checkpoint on a paused
+    // platform would still run — and did, silently, the first time this shipped.
+    // Retire them so a focus actually means what it says.
+    let retired = 0;
+    if (focusing) {
+      const nowIso = new Date().toISOString();
+      for (const session of store.state.sessions) {
+        if (session.status !== "checkpointed" || !affectedIds.has(session.accountId)) continue;
+        session.status = "failed";
+        session.nextRetryAt = undefined;
+        session.lastError = `retired_by_platform_focus:${platform}`;
+        session.completedAt = nowIso;
+        session.updatedAt = nowIso;
+        retired += 1;
+      }
+    }
     const message = focusing
-      ? `Focused the farm on ${platform}: paused ${warmups} warmup schedule(s) and ${slots} posting slot(s) on other platforms`
+      ? `Focused the farm on ${platform}: paused ${warmups} warmup schedule(s) and ${slots} posting slot(s), retired ${retired} checkpointed session(s) on other platforms`
       : `Resumed ${platform}: re-enabled ${warmups} warmup schedule(s) and ${slots} posting slot(s)`;
     store.pushActivity({ kind: "platform_focus", message });
     store.save();
     print({
       ok: true, platform, action: args[1], warmupSchedulesChanged: warmups, slotsChanged: slots,
+      checkpointedSessionsRetired: retired,
       message,
     });
     return;
