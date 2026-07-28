@@ -38,6 +38,10 @@ import {
   isAmbiguousCandidateHandle,
   candidateTargetKey,
   curatedTargetsFor,
+  targetHandleKey,
+  planDailyEngagement,
+  choosePostForEngagement,
+  selectXPostPair,
   checkCuratedTargetAddition,
   MAX_CURATED_TARGETS_PER_ACCOUNT,
   type CuratedTarget,
@@ -124,6 +128,7 @@ Farm:
   heiss-farm targets add <accountId> @handle [--note "why this person"]
   heiss-farm targets remove <targetId>
   heiss-farm targets scan <xAccountId> @targetHandle   # read-only: what do their latest posts look like
+  heiss-farm targets engage <xAccountId> [@handle] [--live]   # dry run unless --live
   heiss-farm targets pause <targetId> | resume <targetId>
   heiss-farm platforms focus <platform>   # pause warmups/slots on every other platform
   heiss-farm platforms resume <platform>
@@ -1470,6 +1475,96 @@ async function main(): Promise<void> {
         targetHandle,
       });
       print({ ok: true, persona: account.handle, targetHandle, result });
+    } finally {
+      await driver.disconnect(device.id).catch(() => undefined);
+    }
+    return;
+  }
+
+  // ── Curated engagement: scan, decide, engage ───────────
+  if (cmd === "targets" && args[1] === "engage") {
+    const store = openStore(args);
+    const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
+    if (!account || account.platform !== "x") {
+      throw new Error("Usage: targets engage <xAccountId> [@handle] [--live] [--no-follow]");
+    }
+    const device = store.state.devices.find((candidate) => candidate.id === account.deviceId);
+    if (!device) throw new Error("Account device is missing");
+    // Default to a dry run: --live is required to actually follow or like.
+    const dryRun = !hasFlag(args, "--live");
+    const nowIso = new Date().toISOString();
+
+    // Pick today's target unless one was named explicitly.
+    const explicit = args[3]?.startsWith("@") ? args[3] : undefined;
+    const plan = planDailyEngagement(
+      store.state.curatedTargets, account.id, nowIso, store.state.settings.timeZone,
+    );
+    const target = explicit
+      ? curatedTargetsFor(store.state.curatedTargets, account.id)
+          .find((candidate) => targetHandleKey(candidate.handle) === targetHandleKey(explicit))
+      : plan.target;
+    if (!target) {
+      print({ ok: true, persona: account.handle, engaged: false, reason: explicit ? "not_on_curated_list" : plan.reason });
+      return;
+    }
+    const shouldFollow = explicit ? !target.followedAt : plan.shouldFollow;
+
+    const driver = new RealIosDriver(new RealUsbTransport({ commandTimeoutMs: 180_000 }));
+    await driver.connect(device.id, device.udid);
+    const context = {
+      platform: "x" as const, handle: account.handle, displayName: account.displayName,
+      loginEmail: account.loginEmail, switcherHint: account.switcherHint,
+      searchTerms: account.searchTerms, uiProfile: store.state.uiProfiles.x,
+      ownedHandles: store.state.accounts.map((candidate) => candidate.handle),
+      targetHandle: target.handle,
+    };
+    try {
+      // 1) Read the profile, 2) decide here where the rules are tested,
+      // 3) act on that one decision.
+      const scan = await driver.runAction(device.id, account.id, "x:target_scan", context);
+      const cells = ((scan.data?.cells ?? []) as Array<{ index: number; label: string }>);
+      const pair = selectXPostPair(cells);
+      const choice = choosePostForEngagement(pair.mostRecent, pair.preceding, {
+        alreadyEngagedKeys: store.state.engagementTargets
+          .filter((record) => record.accountId === account.id)
+          .map((record) => record.targetKey),
+      });
+      if (!choice.post) {
+        print({ ok: true, persona: account.handle, target: target.handle, engaged: false,
+          reason: choice.reason, postsSeen: pair.posts.length, pinnedSkipped: Boolean(pair.pinned) });
+        return;
+      }
+      const chosen = pair.posts.find((post) => post.key === choice.post!.key)!;
+      const engage = await driver.runAction(device.id, account.id, "x:target_engage", {
+        ...context,
+        postMatch: chosen.matchText,
+        follow: shouldFollow,
+        like: true,
+        dryRun,
+      } as never);
+
+      const report = (engage.data ?? {}) as Record<string, unknown>;
+      // Only a real run records history.
+      if (!dryRun && report.stoppedAt === "complete") {
+        if (report.follow === "followed" || report.follow === "already_following") {
+          target.followedAt ??= nowIso;
+        }
+        target.lastEngagedAt = nowIso;
+        target.engagedCount += 1;
+        store.pushActivity({
+          kind: "curated_engagement", accountId: account.id, deviceId: device.id,
+          message: `${account.handle} → ${target.handle}: follow=${report.follow ?? "skip"} like=${report.like ?? "skip"}`,
+        });
+        store.save();
+      }
+      print({
+        ok: true, persona: account.handle, target: target.handle, dryRun,
+        selection: { reason: choice.reason, ageHours: chosen.ageHours, likes: chosen.likes,
+          reposts: chosen.reposts, replies: chosen.replies, isQuote: chosen.isQuote,
+          pinnedSkipped: Boolean(pair.pinned), postsSeen: pair.posts.length,
+          preview: chosen.matchText },
+        shouldFollow, engage: report,
+      });
     } finally {
       await driver.disconnect(device.id).catch(() => undefined);
     }

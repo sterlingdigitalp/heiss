@@ -33,6 +33,12 @@ export interface ParsedXPost extends PostSnapshot {
   hasMedia: boolean;
   views: number;
   bodyText: string;
+  /**
+   * Distinctive slice of the body used to re-find this exact post on device.
+   * Row indexes shift the moment the target posts again, so engagement locates
+   * its target by content and refuses if it cannot find it.
+   */
+  matchText: string;
 }
 
 const AGE = /(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago/i;
@@ -80,9 +86,14 @@ export function parseXTimelineCell(cell: XTimelineCell): ParsedXPost | null {
     .replace(/\b(Image|Video)\.\s*(Duration[^.]*\.\s*)?$/i, "")
     .trim();
 
+  // Identity comes from content, never position: the row index changes as soon
+  // as the target posts again, and re-finding by index would engage whatever
+  // slid into that slot.
+  const matchText = bodyText.replace(/\s+/g, " ").trim().slice(0, 60);
   return {
     index: cell.index,
-    key: `x:${cell.index}:${label.slice(0, 64)}`,
+    key: `x:${matchText.toLowerCase()}`,
+    matchText,
     isPinned,
     isQuote,
     hasMedia,

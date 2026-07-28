@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.28.7"
+private let heissRunnerBuild = "heiss-runner-2026.07.28.9"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -364,6 +364,11 @@ final class HeissRunnerUITests: XCTestCase {
             // returns a non-executed result with a reason. Never taps blind.
             let detail = try performCandidateLike(app: app, window: window, platform: platform, command: command)
             return ["ok": true, "executed": true, "detail": detail]
+        } else if action == "x:target_engage" {
+            // Curated daily engagement: follow and/or like one specific post the
+            // Mac already chose. Every step is a verified match or a refusal —
+            // this runs unattended against real accounts.
+            return try performXTargetEngage(app: app, window: window, command: command)
         } else if action == "x:target_scan" {
             // Read-only reconnaissance for curated engagement: open a target's
             // profile and report what their two most recent posts look like.
@@ -1068,6 +1073,157 @@ final class HeissRunnerUITests: XCTestCase {
             .prefix(30)
             .map { $0 }
         return (false, diagnostics)
+    }
+
+    /// Follow and/or like one specific post on a curated target's profile.
+    ///
+    /// The Mac decides *which* post; this only executes that decision, and only
+    /// when it can prove it found the right thing. The post is located by a
+    /// distinctive slice of its own text rather than by row index, because the
+    /// index shifts the moment the target posts again — engaging "row 7" could
+    /// engage whatever slid into that slot.
+    ///
+    /// `dryRun` performs every check and every navigation but taps nothing that
+    /// changes state, so the whole path can be proven against a real account
+    /// before it is trusted unattended.
+    private func performXTargetEngage(
+        app: XCUIApplication,
+        window: XCUIElement,
+        command: [String: Any]
+    ) throws -> [String: Any] {
+        let rawTarget = (command["targetHandle"] as? String) ?? ""
+        let postMatch = (command["postMatch"] as? String) ?? ""
+        let wantFollow = (command["follow"] as? Bool) ?? false
+        let wantLike = (command["like"] as? Bool) ?? false
+        let dryRun = (command["dryRun"] as? Bool) ?? false
+        guard rawTarget.hasPrefix("@"), rawTarget.count > 1 else {
+            throw NSError(domain: "HeissRunner", code: 42, userInfo: [
+                NSLocalizedDescriptionKey: "x:target_engage requires targetHandle: \"@handle\"",
+            ])
+        }
+        let normalizedTarget = normalizedHandle(rawTarget)
+        let targetKey = stableFingerprint("x|\(normalizedTarget)")
+        var report: [String: Any] = [
+            "targetHandle": normalizedTarget, "targetKey": targetKey, "dryRun": dryRun,
+        ]
+
+        // Never engage an account we own.
+        let owned = Set((command["ownedHandles"] as? [String] ?? []).map(normalizedHandle))
+        if owned.contains(normalizedTarget) {
+            report["stoppedAt"] = "target_is_owned_account"
+            return ["ok": true, "executed": true, "detail": "x:target_engage:skipped_owned:\(targetKey)", "data": report]
+        }
+
+        try openSearchAndType(
+            app: app, window: window, platform: "x", command: command,
+            term: String(rawTarget.dropFirst())
+        )
+        Thread.sleep(forTimeInterval: 1.5)
+        let navigation = try openXProfileFromSearchResults(app: app, normalized: normalizedTarget)
+        report["navigation"] = navigation.diagnostics
+        guard navigation.opened else {
+            report["stoppedAt"] = "profile_not_opened"
+            return ["ok": true, "executed": true, "detail": "x:target_engage:profile_not_opened:\(targetKey)", "data": report]
+        }
+
+        // 1) Follow. "Following" already present means the relationship exists,
+        // which is a success, not a failure — never tap it (that unfollows).
+        if wantFollow {
+            let following = app.buttons.matching(NSPredicate(
+                format: "label BEGINSWITH[c] %@ OR label BEGINSWITH[c] %@", "Following", "Unfollow"
+            )).firstMatch
+            if following.exists {
+                report["follow"] = "already_following"
+            } else {
+                // X does not necessarily label this plainly "Follow" (it can read
+                // "Follow @handle" or similar), so accept a prefix match — while
+                // still excluding Following/Unfollow above so we never undo a
+                // relationship.
+                let follow = app.buttons.matching(NSPredicate(
+                    format: "label ==[c] %@ OR label BEGINSWITH[c] %@", "Follow", "Follow "
+                )).allElementsBoundByIndex.first { $0.exists && $0.isHittable }
+                if let follow {
+                    report["followButtonLabel"] = follow.label
+                    if dryRun { report["follow"] = "would_follow" }
+                    else { follow.tap(); Thread.sleep(forTimeInterval: 1.0); report["follow"] = "followed" }
+                } else {
+                    report["follow"] = "follow_button_not_found"
+                    // Report what IS on screen so the predicate can be fixed from
+                    // evidence rather than another guess.
+                    report["visibleButtons"] = app.buttons.allElementsBoundByIndex
+                        .prefix(30)
+                        .filter { $0.exists && !$0.label.isEmpty }
+                        .map { ["label": $0.label, "hittable": $0.isHittable] as [String: Any] }
+                }
+            }
+        }
+
+        // 2) Locate the exact post by content and open it.
+        guard !postMatch.isEmpty else {
+            report["stoppedAt"] = "no_post_match_supplied"
+            return ["ok": true, "executed": true, "detail": "x:target_engage:no_post_match:\(targetKey)", "data": report]
+        }
+        let needle = postMatch.lowercased()
+        func findPost() -> XCUIElement? {
+            app.cells.allElementsBoundByIndex.first { cell in
+                cell.exists && cell.label.lowercased().replacingOccurrences(of: "\n", with: " ").contains(needle)
+            }
+        }
+        // Timeline cells routinely report isHittable == false while sitting just
+        // off the visible area, so scroll the match into view rather than
+        // treating that as "gone". Still no coordinate guessing: if it never
+        // becomes genuinely hittable, refuse.
+        var postCell = findPost()
+        var scrolls = 0
+        while let candidate = postCell, !candidate.isHittable, scrolls < 4 {
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.72))
+                .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.42)))
+            Thread.sleep(forTimeInterval: 0.9)
+            scrolls += 1
+            postCell = findPost()
+        }
+        report["scrollsToReachPost"] = scrolls
+        guard let postCell, postCell.isHittable else {
+            // The timeline moved, or the post is gone. Refuse rather than
+            // engage a neighbour.
+            report["stoppedAt"] = postCell == nil ? "post_not_found" : "post_not_hittable"
+            return ["ok": true, "executed": true, "detail": "x:target_engage:post_not_found:\(targetKey)", "data": report]
+        }
+        report["postLabel"] = String(postCell.label.prefix(120))
+        if dryRun {
+            report["like"] = wantLike ? "would_open_and_like" : "would_open_only"
+            report["stoppedAt"] = "dry_run_complete"
+            return ["ok": true, "executed": true, "detail": "x:target_engage:dry_run:\(targetKey)", "data": report]
+        }
+        postCell.tap()
+        Thread.sleep(forTimeInterval: 1.6)
+
+        // 3) Like, with the same mandatory-predicate rule the rest of the
+        // unattended engagement path uses: no matching button means refuse,
+        // never a coordinate guess.
+        if wantLike {
+            let already = app.buttons.matching(NSPredicate(
+                format: "label BEGINSWITH[c] %@ OR label BEGINSWITH[c] %@", "Unlike", "Liked"
+            )).firstMatch
+            if already.exists {
+                report["like"] = "already_liked"
+            } else {
+                let likes = app.buttons.matching(NSPredicate(
+                    format: "label ==[c] %@ OR label BEGINSWITH[c] %@", "Like", "Like,"
+                ))
+                if let button = likes.allElementsBoundByIndex.first(where: { $0.exists && $0.isHittable }) {
+                    button.tap(); report["like"] = "liked"
+                } else {
+                    report["like"] = "like_button_not_found"
+                }
+            }
+        }
+        report["stoppedAt"] = "complete"
+        return [
+            "ok": true, "executed": true,
+            "detail": "x:target_engage:done:\(normalizedTarget):follow=\(report["follow"] ?? "skip"):like=\(report["like"] ?? "skip")",
+            "data": report,
+        ]
     }
 
     /// Open a curated target's X profile and report their two most recent
