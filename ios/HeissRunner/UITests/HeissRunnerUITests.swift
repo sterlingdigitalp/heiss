@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.28.10"
+private let heissRunnerBuild = "heiss-runner-2026.07.28.13"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1195,20 +1195,19 @@ final class HeissRunnerUITests: XCTestCase {
             report["stoppedAt"] = "dry_run_complete"
             return ["ok": true, "executed": true, "detail": "x:target_engage:dry_run:\(targetKey)", "data": report]
         }
-        postCell.tap()
-        Thread.sleep(forTimeInterval: 1.6)
-
-        // 3) Like, with the same mandatory-predicate rule the rest of the
-        // unattended engagement path uses: no matching button means refuse,
-        // never a coordinate guess.
+        // 3) Like from the timeline row itself. Tapping the cell to open the
+        // post detail did not reliably open anything (it left us on the
+        // profile), and the row already carries its own like control — so query
+        // the CELL's own descendants. That is also strictly safer than an
+        // app-wide search, which could match a neighbouring post's heart.
         if wantLike {
-            let already = app.buttons.matching(NSPredicate(
+            let alreadyInCell = postCell.buttons.matching(NSPredicate(
                 format: "label BEGINSWITH[c] %@ OR label BEGINSWITH[c] %@", "Unlike", "Liked"
             )).firstMatch
-            if already.exists {
+            if alreadyInCell.exists {
                 report["like"] = "already_liked"
             } else {
-                let likes = app.buttons.matching(NSPredicate(
+                let likes = postCell.buttons.matching(NSPredicate(
                     format: "label ==[c] %@ OR label BEGINSWITH[c] %@", "Like", "Like,"
                 ))
                 if let button = likes.allElementsBoundByIndex.first(where: { $0.exists && $0.isHittable }) {
@@ -1217,10 +1216,10 @@ final class HeissRunnerUITests: XCTestCase {
                 } else {
                     report["like"] = "like_button_not_found"
                     // Same evidence-not-guesswork rule as the follow button:
-                    // report what the post detail actually exposes.
-                    report["visibleButtons"] = app.buttons.allElementsBoundByIndex
-                        .prefix(30)
-                        .filter { $0.exists && !$0.label.isEmpty }
+                    // report the controls this post row actually exposes.
+                    report["cellButtons"] = postCell.buttons.allElementsBoundByIndex
+                        .prefix(20)
+                        .filter { $0.exists }
                         .map { ["label": $0.label, "hittable": $0.isHittable] as [String: Any] }
                 }
             }
@@ -1477,7 +1476,23 @@ final class HeissRunnerUITests: XCTestCase {
                 throw NSError(domain: "HeissRunner", code: 11, userInfo: [NSLocalizedDescriptionKey: "Search field did not receive keyboard focus"])
             }
             clearSearchFieldIfNeeded(app, surface: window, field: field)
-            try typeUsingVisibleKeyboard(app, text: term)
+            // Prefer native typing. Tapping keyboard keys one by one has to
+            // chase characters across keyboard planes, and underscores — which
+            // appear in 13 of the 35 curated handles — sit on the symbols plane
+            // and aborted the whole search. typeText handles every character in
+            // one call; the key-tapping path stays as the fallback for apps
+            // whose fields refuse it.
+            var landed = false
+            if field.exists {
+                field.typeText(term)
+                Thread.sleep(forTimeInterval: 0.4)
+                let value = ((field.value as? String) ?? "").lowercased()
+                landed = value.contains(term.lowercased())
+            }
+            if !landed {
+                clearSearchFieldIfNeeded(app, surface: window, field: field)
+                try typeUsingVisibleKeyboard(app, text: term)
+            }
             submitVisibleSearch(app, surface: window, command: command)
         }
     }
@@ -1721,14 +1736,18 @@ final class HeissRunnerUITests: XCTestCase {
             if !key.exists || !key.isHittable {
                 if character.isNumber {
                     _ = tapKeyboardMode(app, labels: ["numbers", "123", "more"])
-                } else if character == "+" {
+                } else if character.isLetter {
+                    _ = tapKeyboardMode(app, labels: ["letters", "abc"])
+                } else {
+                    // Any other punctuation — "_", "-", ".", "+" — lives off the
+                    // letter plane, usually on symbols but sometimes numbers.
+                    // Handles are full of underscores (13 of the curated 35), so
+                    // failing here blocks whole personas rather than one search.
                     _ = tapKeyboardMode(app, labels: ["numbers", "123", "more"])
                     key = app.keys[label]
                     if !key.waitForExistence(timeout: 0.5) {
                         _ = tapKeyboardMode(app, labels: ["symbols", "#+=", "more"])
                     }
-                } else if character.isLetter {
-                    _ = tapKeyboardMode(app, labels: ["letters", "abc"])
                 }
                 key = app.keys[label]
             }
