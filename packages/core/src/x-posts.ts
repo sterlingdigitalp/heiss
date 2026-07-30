@@ -85,6 +85,21 @@ export function parseXTimelineCell(cell: XTimelineCell): ParsedXPost | null {
     .replace(/^pinned\.\s*/i, "")
     .replace(/\b(Image|Video)\.\s*(Duration[^.]*\.\s*)?$/i, "")
     .trim();
+  // Strip the author preamble. The label opens with the display name, an
+  // optional "Verified", and for a quote the quoted author plus "<name> added".
+  // Leaving it in makes matchText the AUTHOR, and searching the screen for that
+  // matches the profile header — tapping it opens the profile instead of the
+  // post, which is exactly what happened live on 2026-07-30.
+  const added = bodyText.indexOf(" added ");
+  if (added >= 0) {
+    bodyText = bodyText.slice(added + " added ".length);
+  } else {
+    const verified = bodyText.search(/\bVerified\.\s*/i);
+    if (verified >= 0) {
+      bodyText = bodyText.slice(verified).replace(/^\bVerified\.\s*/i, "");
+    }
+  }
+  bodyText = bodyText.trim();
 
   // Identity comes from content, never position: the row index changes as soon
   // as the target posts again, and re-finding by index would engage whatever
