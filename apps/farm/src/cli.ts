@@ -301,7 +301,10 @@ async function runCuratedEngagementOnce(
   // lock sessions take. Without this, invoking it by hand while the farm is live
   // puts two drivers on one phone — the daemon's own call is safe because it
   // runs after sessions in the tick, but a manual run is not.
-  if (store.locks.isDeviceLocked(device.id)) {
+  // Read the PERSISTED lock table, not store.locks: a freshly loaded store
+  // starts with an empty in-memory ResourceLocks, so store.locks.isDeviceLocked
+  // answers false on every new CLI invocation and the guard never fires.
+  if ((store.state.locks?.devices ?? {})[device.id]) {
     return { ok: true, persona: account.handle, engaged: false, reason: "device_busy" };
   }
 
