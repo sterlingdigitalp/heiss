@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.30.3"
+private let heissRunnerBuild = "heiss-runner-2026.07.30.5"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1164,18 +1164,29 @@ final class HeissRunnerUITests: XCTestCase {
             return ["ok": true, "executed": true, "detail": "x:target_engage:no_post_match:\(targetKey)", "data": report]
         }
         let needle = postMatch.lowercased()
+        // Match through the query engine, never by enumerating. X's rows are
+        // aggregated elements whose labels run to thousands of characters, so
+        // `allElementsBoundByIndex` + a Swift-side label scan resolves every
+        // cell and every giant string — repeated once per scroll attempt, that
+        // is what stalled this action past a 7-minute ceiling while the runner
+        // sat on the profile never scrolling.
         func findPost() -> XCUIElement? {
-            app.cells.allElementsBoundByIndex.first { cell in
-                cell.exists && cell.label.lowercased().replacingOccurrences(of: "\n", with: " ").contains(needle)
-            }
+            let match = app.cells.matching(
+                NSPredicate(format: "label CONTAINS[c] %@", postMatch)
+            ).firstMatch
+            return match.exists ? match : nil
         }
         // Timeline cells routinely report isHittable == false while sitting just
         // off the visible area, so scroll the match into view rather than
         // treating that as "gone". Still no coordinate guessing: if it never
         // becomes genuinely hittable, refuse.
+        // Scroll when the post is MISSING as well as when it is present but
+        // unhittable. The original loop only handled "visible but unreachable",
+        // so a post below the fold — not yet in the hierarchy — skipped the loop
+        // entirely and was reported not-found without a single scroll.
         var postCell = findPost()
         var scrolls = 0
-        while let candidate = postCell, !candidate.isHittable, scrolls < 4 {
+        while (postCell == nil || postCell?.isHittable == false), scrolls < 6 {
             window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.72))
                 .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.42)))
             Thread.sleep(forTimeInterval: 0.9)

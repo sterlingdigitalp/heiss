@@ -292,7 +292,7 @@ async function runCuratedEngagementOnce(
   store: ReturnType<typeof openStore>,
   account: { id: string; handle: string; platform: string; deviceId: string;
     displayName?: string; loginEmail?: string; switcherHint?: string; searchTerms?: string[] },
-  opts: { dryRun: boolean; explicitHandle?: string; nowIso?: string },
+  opts: { dryRun: boolean; explicitHandle?: string; nowIso?: string; openPost?: boolean },
 ): Promise<Record<string, unknown>> {
   const nowIso = opts.nowIso ?? new Date().toISOString();
   const device = store.state.devices.find((candidate) => candidate.id === account.deviceId);
@@ -349,7 +349,7 @@ async function runCuratedEngagementOnce(
     const chosen = pair.posts.find((post) => post.key === choice.post!.key)!;
     const engage = await driver.runAction(device.id, account.id, "x:target_engage", {
       ...context, postMatch: chosen.matchText, follow: shouldFollow, like: true,
-      dryRun: opts.dryRun,
+      dryRun: opts.dryRun, openPost: opts.openPost ?? false,
     } as never);
     const report = (engage.data ?? {}) as Record<string, unknown>;
 
@@ -1628,6 +1628,7 @@ async function main(): Promise<void> {
     print(await runCuratedEngagementOnce(store, account, {
       dryRun: !hasFlag(args, "--live"),
       explicitHandle: args[3]?.startsWith("@") ? args[3] : undefined,
+      openPost: hasFlag(args, "--open-post"),
     }));
     return;
   }
