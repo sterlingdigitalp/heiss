@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.30.7"
+private let heissRunnerBuild = "heiss-runner-2026.07.30.8"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1259,17 +1259,23 @@ final class HeissRunnerUITests: XCTestCase {
                 _ = try tapTextUsingOCR(surface: window, expected: needle)
                 Thread.sleep(forTimeInterval: 1.8)
                 _ = attempt
-                if try screenContainsTextUsingOCR("Post your reply") {
+                // Detail-view markers, chosen from real screenshots. "Post your
+                // reply" is grey placeholder text on near-black and OCR misses
+                // it; the timestamp line's spelled-out "Views" is high-contrast
+                // white and appears ONLY on the detail (the timeline shows a
+                // bare count beside a chart icon).
+                if try screenContainsTextUsingOCR("Views")
+                    || screenContainsTextUsingOCR("Post your reply") {
                     opened = true
                     report["openedVia"] = "ocr_line:\(needle)"
                     break
                 }
                 // Landed somewhere else (an embedded quote, an author link).
                 // Retreat before retrying so taps never compound.
-                let back = app.buttons.matching(NSPredicate(
-                    format: "label ==[c] %@ OR label ==[c] %@", "Back", "Close"
-                )).firstMatch
-                if back.exists, back.isHittable { back.tap(); Thread.sleep(forTimeInterval: 1.3) }
+                // Deliberately no Back tap here. Retreating between attempts
+                // compounded taps and walked the app onto "About this account";
+                // if the post did open, a second read should see it.
+                Thread.sleep(forTimeInterval: 1.2)
             }
             report["postOpened"] = opened
             guard opened else {
