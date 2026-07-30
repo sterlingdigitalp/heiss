@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.28.13"
+private let heissRunnerBuild = "heiss-runner-2026.07.30.3"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1195,19 +1195,72 @@ final class HeissRunnerUITests: XCTestCase {
             report["stoppedAt"] = "dry_run_complete"
             return ["ok": true, "executed": true, "detail": "x:target_engage:dry_run:\(targetKey)", "data": report]
         }
-        // 3) Like from the timeline row itself. Tapping the cell to open the
-        // post detail did not reliably open anything (it left us on the
-        // profile), and the row already carries its own like control — so query
-        // the CELL's own descendants. That is also strictly safer than an
-        // app-wide search, which could match a neighbouring post's heart.
+        // 3) Open the post, then like it there.
+        //
+        // X publishes each timeline row as ONE aggregated accessibility element
+        // — which is why its label carries author, body and counts in a single
+        // string, and equally why the row exposes no child controls: querying
+        // postCell.buttons returns nothing at all. The like therefore has to
+        // happen on the post detail, where the action bar is separate elements.
+        //
+        // Tapping is done in the CELL's own coordinate space, not the screen's,
+        // so a tap is always anchored to this post. The body band is tried first
+        // because a post's centre can be an embedded quote card, which navigates
+        // to someone else entirely. Arrival is confirmed by the detail view's
+        // reply composer; anything else is backed out of and retried.
+        // Opening the post detail is OPT-IN (`openPost`) and defaults OFF.
+        // Twice now this step has failed to return inside a 7-minute ceiling
+        // while the runner kept working, and an unattended tick that holds the
+        // phone that long risks tripping the 25-minute tick watchdog. Follow-only
+        // is a known-good state; a possible hang is not. Re-enable per-command
+        // when investigating with the device in hand.
+        let mayOpenPost = (command["openPost"] as? Bool) ?? false
+        if wantLike && !mayOpenPost {
+            report["like"] = "skipped_post_open_disabled"
+            report["stoppedAt"] = "complete"
+            return [
+                "ok": true, "executed": true,
+                "detail": "x:target_engage:done:\(normalizedTarget):follow=\(report["follow"] ?? "skip"):like=skipped",
+                "data": report,
+            ]
+        }
         if wantLike {
-            let alreadyInCell = postCell.buttons.matching(NSPredicate(
+            var opened = false
+            for band in [0.30, 0.16] {
+                postCell.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: band)).tap()
+                Thread.sleep(forTimeInterval: 1.6)
+                if try screenContainsTextUsingOCR("Post your reply") {
+                    opened = true
+                    report["openedVia"] = "cell_band_\(band)"
+                    break
+                }
+                // Landed somewhere else (an embedded quote, an author link).
+                // Retreat before trying the next band so taps never compound.
+                let back = app.buttons.matching(NSPredicate(
+                    format: "label ==[c] %@ OR label ==[c] %@", "Back", "Close"
+                )).firstMatch
+                if back.exists, back.isHittable { back.tap(); Thread.sleep(forTimeInterval: 1.3) }
+            }
+            report["postOpened"] = opened
+            guard opened else {
+                report["like"] = "post_did_not_open"
+                // Deliberately no app-wide button enumeration here:
+                // allElementsBoundByIndex forces a full hierarchy snapshot and
+                // X's detail view is large enough for that to block for minutes.
+                report["stoppedAt"] = "complete"
+                return [
+                    "ok": true, "executed": true,
+                    "detail": "x:target_engage:done:\(normalizedTarget):follow=\(report["follow"] ?? "skip"):like=post_did_not_open",
+                    "data": report,
+                ]
+            }
+            let already = app.buttons.matching(NSPredicate(
                 format: "label BEGINSWITH[c] %@ OR label BEGINSWITH[c] %@", "Unlike", "Liked"
             )).firstMatch
-            if alreadyInCell.exists {
+            if already.exists {
                 report["like"] = "already_liked"
             } else {
-                let likes = postCell.buttons.matching(NSPredicate(
+                let likes = app.buttons.matching(NSPredicate(
                     format: "label ==[c] %@ OR label BEGINSWITH[c] %@", "Like", "Like,"
                 ))
                 if let button = likes.allElementsBoundByIndex.first(where: { $0.exists && $0.isHittable }) {
@@ -1217,10 +1270,7 @@ final class HeissRunnerUITests: XCTestCase {
                     report["like"] = "like_button_not_found"
                     // Same evidence-not-guesswork rule as the follow button:
                     // report the controls this post row actually exposes.
-                    report["cellButtons"] = postCell.buttons.allElementsBoundByIndex
-                        .prefix(20)
-                        .filter { $0.exists }
-                        .map { ["label": $0.label, "hittable": $0.isHittable] as [String: Any] }
+                    // See above: no full-tree enumeration on this screen.
                 }
             }
         }
