@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.30.8"
+private let heissRunnerBuild = "heiss-runner-2026.07.30.13"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1216,7 +1216,10 @@ final class HeissRunnerUITests: XCTestCase {
             return ["ok": true, "executed": true,
                     "detail": "x:target_engage:post_not_found:\(targetKey)", "data": report]
         }
-        if dryRun {
+        // A dry run stops here UNLESS openPost was asked for, in which case it
+        // continues into probe mode: open the post, report its controls, tap
+        // nothing. That is the only safe way to inspect an already-liked post.
+        if dryRun && !((command["openPost"] as? Bool) ?? false) {
             report["like"] = wantLike ? "would_open_and_like" : "would_open_only"
             report["stoppedAt"] = "dry_run_complete"
             return ["ok": true, "executed": true, "detail": "x:target_engage:dry_run:\(targetKey)", "data": report]
@@ -1290,24 +1293,79 @@ final class HeissRunnerUITests: XCTestCase {
                     "data": report,
                 ]
             }
-            let already = app.buttons.matching(NSPredicate(
-                format: "label BEGINSWITH[c] %@ OR label BEGINSWITH[c] %@", "Unlike", "Liked"
-            )).firstMatch
-            if already.exists {
+            // ONE bounded snapshot of the detail view's controls, used for both
+            // the match and the diagnostic. Enumeration is safe HERE: what
+            // stalls is app.cells on a profile timeline (a long scrollable list
+            // of aggregated rows). The post detail is a small hierarchy, and
+            // the narrow predicate query this replaces already returned
+            // promptly on this exact screen.
+            let controls = Array(app.buttons.allElementsBoundByIndex.prefix(40))
+            report["detailControls"] = controls.map {
+                "\($0.label)|\($0.identifier)|sel=\($0.isSelected)|\($0.isHittable ? "hit" : "nohit")"
+            }
+
+            // Probe mode: open the post and report its controls WITHOUT tapping.
+            // Needed because liking is not idempotent — tapping a heart that is
+            // already red UNLIKES it. Reading the liked-state signature off a
+            // known-liked post is the only safe way to learn it.
+            if dryRun {
+                report["like"] = "probed_no_tap"
+                report["stoppedAt"] = "complete"
+                return ["ok": true, "executed": true,
+                        "detail": "x:target_engage:probe:\(normalizedTarget)", "data": report]
+            }
+
+            // X labels this control inconsistently across builds and states —
+            // seen as "Like", "40 Likes", "Like. 40" — and the detail view's
+            // action row renders it as a bare glyph plus a count, so an exact
+            // "Like" match is too narrow. Match on the word, then let the
+            // liked-state words win so this can never UNLIKE an existing like.
+            func classify(_ element: XCUIElement) -> String? {
+                let text = "\(element.label) \(element.identifier)".lowercased()
+                if text.contains("unlike") || text.contains("liked") { return "liked" }
+                // Word-boundary check: "like"/"likes" but not "dislike".
+                if text.range(of: "\\blikes?\\b", options: .regularExpression) != nil { return "like" }
+                return nil
+            }
+            let liked = controls.first { classify($0) == "liked" }
+            let likeable = controls.first { classify($0) == "like" && $0.exists }
+
+            if liked != nil {
                 report["like"] = "already_liked"
-            } else {
-                let likes = app.buttons.matching(NSPredicate(
-                    format: "label ==[c] %@ OR label BEGINSWITH[c] %@", "Like", "Like,"
-                ))
-                if let button = likes.allElementsBoundByIndex.first(where: { $0.exists && $0.isHittable }) {
-                    report["likeButtonLabel"] = button.label
-                    button.tap(); report["like"] = "liked"
+            } else if let button = likeable {
+                let beforeLabel = button.label
+                let beforeIdent = button.identifier
+                let beforeSelected = button.isSelected
+                report["likeButtonLabel"] = "\(beforeLabel)|\(beforeIdent)|sel=\(beforeSelected)"
+                if button.isHittable {
+                    button.tap()
                 } else {
-                    report["like"] = "like_button_not_found"
-                    // Same evidence-not-guesswork rule as the follow button:
-                    // report the controls this post row actually exposes.
-                    // See above: no full-tree enumeration on this screen.
+                    // Tapping the CENTRE OF THIS ELEMENT'S OWN FRAME, which is
+                    // not the fixed-screen-coordinate fallback that once opened
+                    // Grok — the target is resolved, only its hittability is in
+                    // doubt (the action row sits under a translucent bar).
+                    button.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+                    report["likeTapVia"] = "element_frame"
                 }
+                Thread.sleep(forTimeInterval: 1.5)
+                // X does NOT relabel this control to "Liked"/"Unlike" after a
+                // like: verified live on 2026-07-30, where the heart turned red
+                // and the count went 4 -> 5 while the tree still classified the
+                // control exactly as before. So confirm on any observable change
+                // — the label usually carries the count, which increments — and
+                // record the raw before/after so the true signal is on file.
+                let afterLabel = button.label
+                let afterIdent = button.identifier
+                let afterSelected = button.isSelected
+                report["likeButtonAfter"] = "\(afterLabel)|\(afterIdent)|sel=\(afterSelected)"
+                let likedNow = Array(app.buttons.allElementsBoundByIndex.prefix(40))
+                    .contains { classify($0) == "liked" }
+                let changed = afterLabel != beforeLabel
+                    || afterIdent != beforeIdent
+                    || afterSelected != beforeSelected
+                report["like"] = (likedNow || changed) ? "liked" : "like_tap_unconfirmed"
+            } else {
+                report["like"] = "like_button_not_found"
             }
         }
         report["stoppedAt"] = "complete"
@@ -2322,7 +2380,8 @@ final class HeissRunnerUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.8)
             try openXDrawer(surface: window)
             var inspectedAccounts = [try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | ")]
-            if try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.72) {
+            if try drawerPublishesExactHandle(app, normalized: normalized)
+                || screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.72) {
                 window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50)).tap()
                 activeHandles[platform] = handle
                 return
@@ -2336,7 +2395,13 @@ final class HeissRunnerUITests: XCTestCase {
                 Thread.sleep(forTimeInterval: 1.0)
                 try openXDrawer(surface: window)
                 inspectedAccounts.append(try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | "))
-                if try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.72) {
+                // Re-read rather than single-shot: OCR intermittently bleeds an
+                // adjacent glyph into the handle ("@EvaAI_Lab" read as
+                // "@EvaAI_Labr", which correctly fails the exact-boundary test
+                // and aborted a whole run). Retrying costs seconds; loosening
+                // the boundary would let @thekuchh match @Thekuchhal.
+                if try drawerPublishesExactHandle(app, normalized: normalized)
+                    || waitForExactHandleUsingOCR(normalized: normalized, timeout: 3.0, minimumVisionY: 0.72) {
                     window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50)).tap()
                     activeHandles[platform] = handle
                     return
@@ -2355,14 +2420,16 @@ final class HeissRunnerUITests: XCTestCase {
                 Thread.sleep(forTimeInterval: 1.2)
                 try openXDrawer(surface: window)
                 inspectedAccounts.append(try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | "))
-                if try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.72) {
+                if try drawerPublishesExactHandle(app, normalized: normalized)
+                    || waitForExactHandleUsingOCR(normalized: normalized, timeout: 3.0, minimumVisionY: 0.72) {
                     window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50)).tap()
                     activeHandles[platform] = handle
                     return
                 }
             }
             let summary = inspectedAccounts.enumerated().map { "slot\($0.offset): \($0.element)" }.joined(separator: "; ")
-            throw NSError(domain: "HeissRunner", code: 15, userInfo: [NSLocalizedDescriptionKey: "X signed-in accounts did not verify exact handle \(handle). OCR headers: \(summary)"])
+            let tree = drawerHandleDiagnostics(app, normalized: normalized)
+            throw NSError(domain: "HeissRunner", code: 15, userInfo: [NSLocalizedDescriptionKey: "X signed-in accounts did not verify exact handle \(handle). OCR headers: \(summary). Accessibility: \(tree)"])
         }
         if platform == "youtube" {
             try ensureYouTubeAccount(app, surface: window, handle: handle, normalized: normalized, command: command)
@@ -2912,6 +2979,46 @@ final class HeissRunnerUITests: XCTestCase {
         return [element.label, element.identifier, element.value as? String ?? ""].contains { raw in
             textContainsExactHandle(raw, normalized: normalized)
         }
+    }
+
+    /// Verify the signed-in X account from the accessibility tree rather than
+    /// from pixels.
+    ///
+    /// Vision reads the drawer's "@EvaAI_Lab" as "@EvaAI_Labr" — deterministically,
+    /// on a cleanly rendered screen, on every slot and every retry. That trailing
+    /// glyph correctly fails the exact-boundary test, so a run would abort while
+    /// the RIGHT account was already active. The label is published exactly, so
+    /// ask for it directly and keep OCR only as a fallback. The boundary rule is
+    /// unchanged: exactness is still what decides, never a prefix.
+    /// Element types are tried in order of likelihood. X aggregates timeline
+    /// rows into single elements with no children, so the drawer header may
+    /// well not be a staticText — hence buttons and otherElements too.
+    private func drawerHandleQueries(_ app: XCUIApplication, normalized: String) -> [XCUIElementQuery] {
+        let predicate = NSPredicate(format: "label CONTAINS[c] %@", normalized)
+        return [
+            app.staticTexts.matching(predicate),
+            app.buttons.matching(predicate),
+            app.otherElements.matching(predicate),
+        ]
+    }
+
+    private func drawerPublishesExactHandle(_ app: XCUIApplication, normalized: String) -> Bool {
+        return drawerHandleQueries(app, normalized: normalized).contains { query in
+            query.allElementsBoundByIndex.prefix(8).contains {
+                elementContainsExactHandle($0, normalized: normalized)
+            }
+        }
+    }
+
+    /// What the tree actually publishes, for when verification fails. Bounded
+    /// per type: this runs on a failure path, not a hot one, but the drawer
+    /// overlays a full feed and an unbounded dump could stall for minutes.
+    private func drawerHandleDiagnostics(_ app: XCUIApplication, normalized: String) -> String {
+        let names = ["staticTexts", "buttons", "otherElements"]
+        return zip(names, drawerHandleQueries(app, normalized: normalized)).map { name, query in
+            let labels = query.allElementsBoundByIndex.prefix(6).map { "\"\($0.label)\"" }
+            return "\(name)[\(labels.count)]: \(labels.joined(separator: ", "))"
+        }.joined(separator: " ;; ")
     }
 
     private func textContainsExactHandle(_ raw: String, normalized: String) -> Bool {

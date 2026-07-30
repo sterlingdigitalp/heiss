@@ -108,3 +108,43 @@ describe("choosing the candidate pair from a profile", () => {
     assert.equal(pair.preceding, null);
   });
 });
+
+describe("absolute-dated posts", () => {
+  // X only renders a relative age ("2 hours ago") for very recent posts and
+  // switches to an absolute date for anything older. Reading only the relative
+  // form discarded 15 of 16 posts on a real profile and reported "no eligible
+  // post" while looking at a full timeline — the bug that stalled engagement
+  // on 2026-07-30. Labels below are trimmed from that capture.
+  const now = new Date("2026-07-30T19:00:00Z");
+  const dated = [
+    cell(0, "Posts"),
+    cell(1, "Barto. Verified. Working from a cafe in NYC hits different - I wouldn't have said that before. Image. June 9, 2026. 3 Likes. 118 Views"),
+    cell(2, "Barto. Verified quoted Moto. A first glimpse of our new website. Video. Duration 11 seconds. Barto added Get ready for Moto 2.0. July 27, 2026. 1 Repost. 4 Likes. 137 Views"),
+  ];
+
+  it("parses an absolute date instead of discarding the post", () => {
+    const pair = selectXPostPair(dated, { now });
+    assert.equal(pair.posts.length, 2);
+    assert.equal(pair.posts.every((post) => post.hasReadableText), true);
+  });
+
+  it("dates the age from the timestamp, not from the row position", () => {
+    const pair = selectXPostPair(dated, { now });
+    const july = pair.posts.find((post) => post.index === 2)!;
+    // July 27 → July 30 is ~3 days; absolute dates carry no clock time, so
+    // this is accurate to within a day by construction.
+    assert.ok(july.ageHours > 60 && july.ageHours < 96, `got ${july.ageHours}`);
+  });
+
+  it("still rejects chrome rows that carry no timestamp at all", () => {
+    const pair = selectXPostPair([cell(0, "Posts"), cell(1, "Replies")], { now });
+    assert.equal(pair.posts.length, 0);
+  });
+
+  it("takes the LAST date, so a date quoted in the body cannot win", () => {
+    const pair = selectXPostPair([cell(0,
+      "Barto. Verified. Mark your calendar for March 1, 2026 — tickets open then. July 27, 2026. 4 Likes. 137 Views",
+    )], { now });
+    assert.ok(pair.mostRecent!.ageHours < 96, `got ${pair.mostRecent!.ageHours}`);
+  });
+});

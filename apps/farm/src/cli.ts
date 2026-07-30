@@ -42,6 +42,7 @@ import {
   planDailyEngagement,
   choosePostForEngagement,
   selectXPostPair,
+  type ParsedXPost,
   checkCuratedTargetAddition,
   MAX_CURATED_TARGETS_PER_ACCOUNT,
   type CuratedTarget,
@@ -336,15 +337,31 @@ async function runCuratedEngagementOnce(
   try {
     const scan = await driver.runAction(device.id, account.id, "x:target_scan", context);
     const cells = (scan.data?.cells ?? []) as Array<{ index: number; label: string }>;
-    const pair = selectXPostPair(cells);
+    // Ages are derived against the run's own clock, not wall time at parse, so
+    // a slow run cannot drift the freshness window mid-decision.
+    const pair = selectXPostPair(cells, { now: new Date(nowIso) });
     const choice = choosePostForEngagement(pair.mostRecent, pair.preceding, {
       alreadyEngagedKeys: store.state.engagementTargets
         .filter((record) => record.accountId === account.id)
         .map((record) => record.targetKey),
     });
     if (!choice.post) {
+      // Report WHY, not just that. A bare "no_eligible_post" sends you back to
+      // the phone to guess which rule rejected the post; the candidates below
+      // name the failing field directly.
+      const explain = (post: ParsedXPost | null) => post && {
+        ageHours: post.ageHours, likes: post.likes, isPinned: post.isPinned,
+        isQuote: post.isQuote, hasMedia: post.hasMedia,
+        bodyLength: post.bodyText.length, hasReadableText: post.hasReadableText,
+        alreadyEngaged: store.state.engagementTargets.some(
+          (record) => record.accountId === account.id && record.targetKey === post.key),
+        preview: post.matchText,
+      };
       return { ok: true, persona: account.handle, target: target.handle, engaged: false,
-        reason: choice.reason, postsSeen: pair.posts.length };
+        reason: choice.reason, postsSeen: pair.posts.length,
+        candidates: { mostRecent: explain(pair.mostRecent), preceding: explain(pair.preceding),
+          pinnedSkipped: explain(pair.pinned) },
+        rawCells: cells.map((cell) => cell.label.slice(0, 140)).slice(0, 8) };
     }
     const chosen = pair.posts.find((post) => post.key === choice.post!.key)!;
     const engage = await driver.runAction(device.id, account.id, "x:target_engage", {

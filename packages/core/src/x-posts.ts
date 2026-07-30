@@ -46,6 +46,35 @@ const AGE_HOURS: Record<string, number> = {
   second: 1 / 3600, minute: 1 / 60, hour: 1, day: 24, week: 168, month: 730, year: 8760,
 };
 
+/**
+ * X renders a relative age ("2 hours ago") only for very recent posts and
+ * switches to an absolute date ("July 27, 2026.") for anything older. Reading
+ * only the relative form silently discarded EVERY post on a profile whose
+ * newest was a few days old — the profile parsed as one post instead of twelve,
+ * and engagement reported "no eligible post" while staring at a full timeline.
+ */
+const MONTHS = ["january", "february", "march", "april", "may", "june",
+  "july", "august", "september", "october", "november", "december"];
+const ABSOLUTE_DATE = new RegExp(`\\b(${MONTHS.join("|")})\\s+(\\d{1,2}),\\s*(\\d{4})\\b`, "gi");
+
+/**
+ * Age from an absolute date, or null. The LAST match wins: a body can quote a
+ * date ("shipping March 1, 2026"), while the timestamp always sits in the tail
+ * just before the engagement counts.
+ */
+function absoluteAge(label: string, now: Date): { ageHours: number; index: number } | null {
+  const matches = [...label.matchAll(ABSOLUTE_DATE)];
+  const last = matches[matches.length - 1];
+  if (!last) return null;
+  const month = MONTHS.indexOf(last[1]!.toLowerCase());
+  const posted = new Date(Date.UTC(Number(last[3]), month, Number(last[2]), 12));
+  if (Number.isNaN(posted.getTime())) return null;
+  // Absolute dates carry no clock time, so this is accurate to within a day —
+  // fine for ordering and for the "is it stale" question. The 6-hour freshness
+  // rule only ever applies to posts new enough to still show a relative age.
+  return { ageHours: Math.max(0, (now.getTime() - posted.getTime()) / 3_600_000), index: last.index! };
+}
+
 /** Counts read "10 Replies", "1 Reply", "25K Views"; absent means zero. */
 function metric(label: string, singular: string, plural: string): number {
   const match = label.match(new RegExp(`([0-9][0-9.,]*\\s*[KMB]?)\\s+(?:${plural}|${singular})\\b`, "i"));
@@ -57,29 +86,35 @@ function metric(label: string, singular: string, plural: string): number {
  * header, the Posts/Replies tab strip, "Show more", and empty spacer rows all
  * appear as cells and must not be mistaken for content.
  */
-export function parseXTimelineCell(cell: XTimelineCell): ParsedXPost | null {
+export function parseXTimelineCell(
+  cell: XTimelineCell,
+  opts: { now?: Date } = {},
+): ParsedXPost | null {
   const label = (cell.label ?? "").trim();
   if (!label) return null;
+  const now = opts.now ?? new Date();
   const ageMatch = label.match(AGE);
+  const absolute = ageMatch ? null : absoluteAge(label, now);
   const views = metric(label, "View", "Views");
   const likes = metric(label, "Like", "Likes");
   const replies = metric(label, "Reply", "Replies");
   const reposts = metric(label, "Repost", "Reposts");
-  // A real post always carries a relative age plus at least one metric.
-  // Chrome rows ("Posts", "Show more") carry neither.
-  if (!ageMatch && views === 0 && likes === 0 && replies === 0) return null;
-  if (!ageMatch) return null;
+  // A real post always carries a timestamp — relative OR absolute — plus at
+  // least one metric. Chrome rows ("Posts", "Replies", "Show more") carry
+  // neither, which is what keeps the tab strip out of the results.
+  if (!ageMatch && !absolute) return null;
+  if (views === 0 && likes === 0 && replies === 0 && reposts === 0) return null;
 
-  const amount = Number(ageMatch[1]);
-  const unit = ageMatch[2]!.toLowerCase();
-  const ageHours = amount * (AGE_HOURS[unit] ?? 1);
+  const ageHours = ageMatch
+    ? Number(ageMatch[1]) * (AGE_HOURS[ageMatch[2]!.toLowerCase()] ?? 1)
+    : absolute!.ageHours;
 
   const isPinned = /^pinned\b/i.test(label);
   const isQuote = /\bquoted\b/i.test(label);
   const hasMedia = /\b(Image|Video|GIF)\b\.?/i.test(label);
 
   // Body is everything before the media/age tail, minus the author preamble.
-  const tailIndex = label.search(AGE);
+  const tailIndex = ageMatch ? label.search(AGE) : absolute!.index;
   let bodyText = tailIndex > 0 ? label.slice(0, tailIndex) : label;
   bodyText = bodyText
     .replace(/^pinned\.\s*/i, "")
@@ -140,9 +175,9 @@ export interface XPostPair {
  * but must never be mistaken for the newest post, which is exactly the error a
  * naive "first row wins" would make.
  */
-export function selectXPostPair(cells: XTimelineCell[]): XPostPair {
+export function selectXPostPair(cells: XTimelineCell[], opts: { now?: Date } = {}): XPostPair {
   const parsed = cells
-    .map(parseXTimelineCell)
+    .map((cell) => parseXTimelineCell(cell, opts))
     .filter((post): post is ParsedXPost => post !== null);
   const pinned = parsed.find((post) => post.isPinned) ?? null;
   const posts = parsed.filter((post) => !post.isPinned);
