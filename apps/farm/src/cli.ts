@@ -279,6 +279,106 @@ async function pushCloudCompletions(store: JsonStore, licenseOverride?: string) 
   return { pushed };
 }
 
+/**
+ * One persona's curated engagement for the day: read the target's profile,
+ * decide here (where the rules are unit-tested), then have the runner execute
+ * that single decision.
+ *
+ * Shared by the `targets engage` command and the daemon tick so the two can
+ * never drift — an unattended path that differs from the one used for manual
+ * testing is a path nobody has actually tested.
+ */
+async function runCuratedEngagementOnce(
+  store: ReturnType<typeof openStore>,
+  account: { id: string; handle: string; platform: string; deviceId: string;
+    displayName?: string; loginEmail?: string; switcherHint?: string; searchTerms?: string[] },
+  opts: { dryRun: boolean; explicitHandle?: string; nowIso?: string },
+): Promise<Record<string, unknown>> {
+  const nowIso = opts.nowIso ?? new Date().toISOString();
+  const device = store.state.devices.find((candidate) => candidate.id === account.deviceId);
+  if (!device) return { ok: false, reason: "device_missing" };
+  // Engagement drives the device directly, so it must respect the same device
+  // lock sessions take. Without this, invoking it by hand while the farm is live
+  // puts two drivers on one phone — the daemon's own call is safe because it
+  // runs after sessions in the tick, but a manual run is not.
+  if (store.locks.isDeviceLocked(device.id)) {
+    return { ok: true, persona: account.handle, engaged: false, reason: "device_busy" };
+  }
+
+  const plan = planDailyEngagement(
+    store.state.curatedTargets, account.id, nowIso, store.state.settings.timeZone,
+  );
+  const target = opts.explicitHandle
+    ? curatedTargetsFor(store.state.curatedTargets, account.id)
+        .find((candidate) => targetHandleKey(candidate.handle) === targetHandleKey(opts.explicitHandle!))
+    : plan.target;
+  if (!target) {
+    return { ok: true, persona: account.handle, engaged: false,
+      reason: opts.explicitHandle ? "not_on_curated_list" : plan.reason };
+  }
+  const shouldFollow = opts.explicitHandle ? !target.followedAt : plan.shouldFollow;
+
+  // Generous budget: this runs a full scan AND a full engage back to back, each
+  // re-navigating. Timing out mid-action is worse than waiting — the runner
+  // keeps going regardless, so a short ceiling means the tap lands unrecorded.
+  const driver = new RealIosDriver(new RealUsbTransport({ commandTimeoutMs: 420_000 }));
+  await driver.connect(device.id, device.udid);
+  const context = {
+    platform: "x" as const, handle: account.handle, displayName: account.displayName,
+    loginEmail: account.loginEmail, switcherHint: account.switcherHint,
+    searchTerms: account.searchTerms, uiProfile: store.state.uiProfiles.x,
+    ownedHandles: store.state.accounts.map((candidate) => candidate.handle),
+    targetHandle: target.handle,
+  };
+  try {
+    const scan = await driver.runAction(device.id, account.id, "x:target_scan", context);
+    const cells = (scan.data?.cells ?? []) as Array<{ index: number; label: string }>;
+    const pair = selectXPostPair(cells);
+    const choice = choosePostForEngagement(pair.mostRecent, pair.preceding, {
+      alreadyEngagedKeys: store.state.engagementTargets
+        .filter((record) => record.accountId === account.id)
+        .map((record) => record.targetKey),
+    });
+    if (!choice.post) {
+      return { ok: true, persona: account.handle, target: target.handle, engaged: false,
+        reason: choice.reason, postsSeen: pair.posts.length };
+    }
+    const chosen = pair.posts.find((post) => post.key === choice.post!.key)!;
+    const engage = await driver.runAction(device.id, account.id, "x:target_engage", {
+      ...context, postMatch: chosen.matchText, follow: shouldFollow, like: true,
+      dryRun: opts.dryRun,
+    } as never);
+    const report = (engage.data ?? {}) as Record<string, unknown>;
+
+    // Record what actually landed, not merely that the run finished. Gating the
+    // day on the like alone once let a re-run advance to the next target and
+    // follow someone early, so ANY real action spends the day.
+    const followLanded = report.follow === "followed" || report.follow === "already_following";
+    const likeLanded = report.like === "liked" || report.like === "already_liked";
+    if (!opts.dryRun && report.stoppedAt === "complete") {
+      if (followLanded) target.followedAt ??= nowIso;
+      if (followLanded || likeLanded) target.lastEngagedAt = nowIso;
+      if (likeLanded) target.engagedCount += 1;
+      store.pushActivity({
+        kind: "curated_engagement", accountId: account.id, deviceId: device.id,
+        message: `${account.handle} → ${target.handle}: follow=${report.follow ?? "skip"} like=${report.like ?? "skip"}`,
+      });
+      store.save();
+    }
+    return {
+      ok: true, persona: account.handle, target: target.handle, dryRun: opts.dryRun,
+      engaged: !opts.dryRun && (followLanded || likeLanded),
+      selection: { reason: choice.reason, ageHours: chosen.ageHours, likes: chosen.likes,
+        reposts: chosen.reposts, replies: chosen.replies, isQuote: chosen.isQuote,
+        pinnedSkipped: Boolean(pair.pinned), postsSeen: pair.posts.length,
+        preview: chosen.matchText },
+      shouldFollow, engage: report,
+    };
+  } finally {
+    await driver.disconnect(device.id).catch(() => undefined);
+  }
+}
+
 /** Production driver only — real USB transport, never simulator. */
 function makeDriver(): RealIosDriver {
   return new RealIosDriver(createProductionTransport({
@@ -1068,6 +1168,38 @@ async function main(): Promise<void> {
           // and crashed again. Storage is now managed by the free-space watchdog
           // + on-device prune (heiss-runner-2026.07.20.3) and periodic restore.
           // The manual `runner clear-cache` action remains for on-demand use.
+
+          // Curated X engagement: at most one persona per idle tick, at most one
+          // target per persona per local day (enforced inside the planner). Runs
+          // only when nothing else used the device this tick, so it never
+          // contends with a warmup, and only against a runner we just saw
+          // healthy. Fail-soft: an error here must not break the tick.
+          if (result.sessions.length === 0) {
+            const engageDevice = store.state.devices.find((row) => row.online
+              && store.state.settings.deviceHealth[row.id]?.ok === true);
+            if (engageDevice) {
+              const persona = store.state.accounts.find((candidate) =>
+                candidate.platform === "x"
+                && candidate.deviceId === engageDevice.id
+                && (candidate.preflightStatus ?? "ready") === "ready"
+                && planDailyEngagement(
+                  store.state.curatedTargets, candidate.id, nowIso, store.state.settings.timeZone,
+                ).target !== null);
+              if (persona) {
+                try {
+                  const outcome = await runCuratedEngagementOnce(store, persona, { dryRun: false, nowIso });
+                  console.log(JSON.stringify({ at: nowIso, curatedEngagement: outcome }));
+                  if (outcome.engaged) {
+                    notifyDesktop("Heiss engaged a target",
+                      `${persona.handle} → ${String((outcome as { target?: string }).target ?? "")}`);
+                  }
+                } catch (error) {
+                  console.error(JSON.stringify({ at: nowIso,
+                    curatedEngagementError: error instanceof Error ? error.message : String(error) }));
+                }
+              }
+            }
+          }
           const cloud = await pushCloudCompletions(store).catch((error) => ({ warning: String(error), pushed: 0 }));
           const completed = result.sessions.filter((session) => session.status === "completed").length;
           if (completed > 0) notifyDesktop("Heiss session complete", `${completed} scheduled session${completed === 1 ? "" : "s"} completed.`);
@@ -1486,100 +1618,14 @@ async function main(): Promise<void> {
     const store = openStore(args);
     const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
     if (!account || account.platform !== "x") {
-      throw new Error("Usage: targets engage <xAccountId> [@handle] [--live] [--no-follow]");
+      throw new Error("Usage: targets engage <xAccountId> [@handle] [--live] ");
     }
-    const device = store.state.devices.find((candidate) => candidate.id === account.deviceId);
-    if (!device) throw new Error("Account device is missing");
-    // Default to a dry run: --live is required to actually follow or like.
-    const dryRun = !hasFlag(args, "--live");
-    const nowIso = new Date().toISOString();
-
-    // Pick today's target unless one was named explicitly.
-    const explicit = args[3]?.startsWith("@") ? args[3] : undefined;
-    const plan = planDailyEngagement(
-      store.state.curatedTargets, account.id, nowIso, store.state.settings.timeZone,
-    );
-    const target = explicit
-      ? curatedTargetsFor(store.state.curatedTargets, account.id)
-          .find((candidate) => targetHandleKey(candidate.handle) === targetHandleKey(explicit))
-      : plan.target;
-    if (!target) {
-      print({ ok: true, persona: account.handle, engaged: false, reason: explicit ? "not_on_curated_list" : plan.reason });
-      return;
-    }
-    const shouldFollow = explicit ? !target.followedAt : plan.shouldFollow;
-
-    // Generous per-command budget: this path runs a full scan AND a full engage
-    // back to back, each of which re-navigates (account switch, search, People
-    // tab, profile, scroll). Timing out mid-action is worse than waiting — the
-    // runner keeps going regardless, so a short ceiling means the tap happens
-    // but is never recorded.
-    const driver = new RealIosDriver(new RealUsbTransport({ commandTimeoutMs: 420_000 }));
-    await driver.connect(device.id, device.udid);
-    const context = {
-      platform: "x" as const, handle: account.handle, displayName: account.displayName,
-      loginEmail: account.loginEmail, switcherHint: account.switcherHint,
-      searchTerms: account.searchTerms, uiProfile: store.state.uiProfiles.x,
-      ownedHandles: store.state.accounts.map((candidate) => candidate.handle),
-      targetHandle: target.handle,
-    };
-    try {
-      // 1) Read the profile, 2) decide here where the rules are tested,
-      // 3) act on that one decision.
-      const scan = await driver.runAction(device.id, account.id, "x:target_scan", context);
-      const cells = ((scan.data?.cells ?? []) as Array<{ index: number; label: string }>);
-      const pair = selectXPostPair(cells);
-      const choice = choosePostForEngagement(pair.mostRecent, pair.preceding, {
-        alreadyEngagedKeys: store.state.engagementTargets
-          .filter((record) => record.accountId === account.id)
-          .map((record) => record.targetKey),
-      });
-      if (!choice.post) {
-        print({ ok: true, persona: account.handle, target: target.handle, engaged: false,
-          reason: choice.reason, postsSeen: pair.posts.length, pinnedSkipped: Boolean(pair.pinned) });
-        return;
-      }
-      const chosen = pair.posts.find((post) => post.key === choice.post!.key)!;
-      const engage = await driver.runAction(device.id, account.id, "x:target_engage", {
-        ...context,
-        postMatch: chosen.matchText,
-        follow: shouldFollow,
-        like: true,
-        dryRun,
-      } as never);
-
-      const report = (engage.data ?? {}) as Record<string, unknown>;
-      // Record what actually happened, not merely that the run finished.
-      // Burning the day's slot on a failed like would silently skip this target
-      // until tomorrow, so only a real touch counts as engagement.
-      const followLanded = report.follow === "followed" || report.follow === "already_following";
-      const likeLanded = report.like === "liked" || report.like === "already_liked";
-      if (!dryRun && report.stoppedAt === "complete") {
-        if (followLanded) target.followedAt ??= nowIso;
-        // ANY real action spends the day. Gating this on the like alone let a
-        // re-run see the previous target as already-followed and march on to
-        // the next one, following someone a day early — the daily brake has to
-        // trip on a follow too, not just on a like.
-        if (followLanded || likeLanded) target.lastEngagedAt = nowIso;
-        // engagedCount tracks meaningful touches, so it stays like-gated.
-        if (likeLanded) target.engagedCount += 1;
-        store.pushActivity({
-          kind: "curated_engagement", accountId: account.id, deviceId: device.id,
-          message: `${account.handle} → ${target.handle}: follow=${report.follow ?? "skip"} like=${report.like ?? "skip"}`,
-        });
-        store.save();
-      }
-      print({
-        ok: true, persona: account.handle, target: target.handle, dryRun,
-        selection: { reason: choice.reason, ageHours: chosen.ageHours, likes: chosen.likes,
-          reposts: chosen.reposts, replies: chosen.replies, isQuote: chosen.isQuote,
-          pinnedSkipped: Boolean(pair.pinned), postsSeen: pair.posts.length,
-          preview: chosen.matchText },
-        shouldFollow, engage: report,
-      });
-    } finally {
-      await driver.disconnect(device.id).catch(() => undefined);
-    }
+    // Dry run unless --live, and it delegates to the same function the daemon
+    // uses so manual testing exercises the unattended path itself.
+    print(await runCuratedEngagementOnce(store, account, {
+      dryRun: !hasFlag(args, "--live"),
+      explicitHandle: args[3]?.startsWith("@") ? args[3] : undefined,
+    }));
     return;
   }
 
