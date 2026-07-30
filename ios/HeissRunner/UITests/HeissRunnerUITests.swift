@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.30.5"
+private let heissRunnerBuild = "heiss-runner-2026.07.30.6"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1163,44 +1163,59 @@ final class HeissRunnerUITests: XCTestCase {
             report["stoppedAt"] = "no_post_match_supplied"
             return ["ok": true, "executed": true, "detail": "x:target_engage:no_post_match:\(targetKey)", "data": report]
         }
-        let needle = postMatch.lowercased()
-        // Match through the query engine, never by enumerating. X's rows are
-        // aggregated elements whose labels run to thousands of characters, so
-        // `allElementsBoundByIndex` + a Swift-side label scan resolves every
-        // cell and every giant string — repeated once per scroll attempt, that
-        // is what stalled this action past a 7-minute ceiling while the runner
-        // sat on the profile never scrolling.
-        func findPost() -> XCUIElement? {
-            let match = app.cells.matching(
-                NSPredicate(format: "label CONTAINS[c] %@", postMatch)
-            ).firstMatch
-            return match.exists ? match : nil
+        // Locate the post WITHOUT touching X's accessibility tree.
+        //
+        // Any app.cells query against a profile stalls — established live on
+        // 2026-07-30 across three builds: the runner reached the profile and
+        // never scrolled, because the lookup preceding the scroll never
+        // returned. X publishes each row as one aggregated element whose label
+        // runs to thousands of characters, and asking for those rows at all is
+        // what hangs, however the query is phrased.
+        //
+        // So do what finally worked against TikTok's animated tree: drive the
+        // screen with OCR and window coordinates only. Scroll blind, read the
+        // rendered text, tap the matching line.
+        //
+        // OCR returns one observation per rendered LINE, so a 60-character body
+        // slice will never match as a unit. Try progressively shorter needles.
+        let body = postMatch.replacingOccurrences(of: "\n", with: " ")
+        let words = body.split(separator: " ").map(String.init)
+        var needles: [String] = []
+        if words.count >= 4 { needles.append(words.prefix(4).joined(separator: " ")) }
+        if words.count >= 3 { needles.append(words.prefix(3).joined(separator: " ")) }
+        if let longest = words.filter({ $0.count >= 6 }).max(by: { $0.count < $1.count }) {
+            needles.append(longest)
         }
-        // Timeline cells routinely report isHittable == false while sitting just
-        // off the visible area, so scroll the match into view rather than
-        // treating that as "gone". Still no coordinate guessing: if it never
-        // becomes genuinely hittable, refuse.
-        // Scroll when the post is MISSING as well as when it is present but
-        // unhittable. The original loop only handled "visible but unreachable",
-        // so a post below the fold — not yet in the hierarchy — skipped the loop
-        // entirely and was reported not-found without a single scroll.
-        var postCell = findPost()
+        needles = needles.filter { $0.count >= 4 }
+        report["needles"] = needles
+        guard !needles.isEmpty else {
+            report["stoppedAt"] = "no_usable_needle"
+            return ["ok": true, "executed": true,
+                    "detail": "x:target_engage:no_needle:\(targetKey)", "data": report]
+        }
+
+        var foundNeedle: String?
         var scrolls = 0
-        while (postCell == nil || postCell?.isHittable == false), scrolls < 6 {
-            window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.72))
-                .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.42)))
-            Thread.sleep(forTimeInterval: 0.9)
+        while scrolls <= 6 {
+            if let hit = try needles.first(where: { try screenContainsTextUsingOCR($0) }) {
+                foundNeedle = hit
+                break
+            }
+            // Blind scroll through SpringBoard coordinates — no element queries.
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
+                .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35)))
+            Thread.sleep(forTimeInterval: 1.1)
             scrolls += 1
-            postCell = findPost()
         }
         report["scrollsToReachPost"] = scrolls
-        guard let postCell, postCell.isHittable else {
-            // The timeline moved, or the post is gone. Refuse rather than
-            // engage a neighbour.
-            report["stoppedAt"] = postCell == nil ? "post_not_found" : "post_not_hittable"
-            return ["ok": true, "executed": true, "detail": "x:target_engage:post_not_found:\(targetKey)", "data": report]
+        report["foundNeedle"] = foundNeedle ?? ""
+        guard let needle = foundNeedle else {
+            report["stoppedAt"] = "post_not_found_on_screen"
+            report["screenText"] = (try recognizedTextObservationsUsingOCR())
+                .compactMap { $0.topCandidates(1).first?.string }.prefix(24).map { $0 }
+            return ["ok": true, "executed": true,
+                    "detail": "x:target_engage:post_not_found:\(targetKey)", "data": report]
         }
-        report["postLabel"] = String(postCell.label.prefix(120))
         if dryRun {
             report["like"] = wantLike ? "would_open_and_like" : "would_open_only"
             report["stoppedAt"] = "dry_run_complete"
@@ -1237,16 +1252,20 @@ final class HeissRunnerUITests: XCTestCase {
         }
         if wantLike {
             var opened = false
-            for band in [0.30, 0.16] {
-                postCell.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: band)).tap()
-                Thread.sleep(forTimeInterval: 1.6)
+            // Tap the matched line itself, wherever OCR found it on screen —
+            // that is inside the post's own body, so it opens that post rather
+            // than an embedded quote card or an author link.
+            for attempt in 0..<2 {
+                _ = try tapTextUsingOCR(surface: window, expected: needle)
+                Thread.sleep(forTimeInterval: 1.8)
+                _ = attempt
                 if try screenContainsTextUsingOCR("Post your reply") {
                     opened = true
-                    report["openedVia"] = "cell_band_\(band)"
+                    report["openedVia"] = "ocr_line:\(needle)"
                     break
                 }
                 // Landed somewhere else (an embedded quote, an author link).
-                // Retreat before trying the next band so taps never compound.
+                // Retreat before retrying so taps never compound.
                 let back = app.buttons.matching(NSPredicate(
                     format: "label ==[c] %@ OR label ==[c] %@", "Back", "Close"
                 )).firstMatch
