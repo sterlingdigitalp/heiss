@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.30.13"
+private let heissRunnerBuild = "heiss-runner-2026.07.31.2"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1315,55 +1315,78 @@ final class HeissRunnerUITests: XCTestCase {
                         "detail": "x:target_engage:probe:\(normalizedTarget)", "data": report]
             }
 
-            // X labels this control inconsistently across builds and states —
-            // seen as "Like", "40 Likes", "Like. 40" — and the detail view's
-            // action row renders it as a bare glyph plus a count, so an exact
-            // "Like" match is too narrow. Match on the word, then let the
-            // liked-state words win so this can never UNLIKE an existing like.
-            func classify(_ element: XCUIElement) -> String? {
-                let text = "\(element.label) \(element.identifier)".lowercased()
-                if text.contains("unlike") || text.contains("liked") { return "liked" }
-                // Word-boundary check: "like"/"likes" but not "dislike".
-                if text.range(of: "\\blikes?\\b", options: .regularExpression) != nil { return "like" }
-                return nil
+            // Ground truth, from probing a known-liked post on 2026-07-31. X
+            // gives the detail view's action row stable identifiers and encodes
+            // like STATE in the label — never in isSelected, which reads false
+            // for every control on the screen:
+            //
+            //   Reply|StatusReplyButton        Repost|StatusRetweetButton
+            //   Bookmark|StatusBookmarkButton  Share|StatusShareOptionsButton
+            //   Like|StatusFavoriteButton      <- not yet liked
+            //   Undo like|StatusFavoriteButton <- already liked
+            //
+            // This replaces a word-matching heuristic that was actively unsafe:
+            // "Undo like" contains neither "unlike" nor "liked", so it scored an
+            // ALREADY-LIKED post as likeable and would have tapped the heart a
+            // second time, silently undoing the like. Liking is not idempotent,
+            // so state has to be read exactly, never inferred.
+            func favoriteButton() -> XCUIElement? {
+                return app.buttons
+                    .matching(NSPredicate(format: "identifier == %@", "StatusFavoriteButton"))
+                    .allElementsBoundByIndex.first { $0.exists }
             }
-            let liked = controls.first { classify($0) == "liked" }
-            let likeable = controls.first { classify($0) == "like" && $0.exists }
+            func showsLiked(_ element: XCUIElement) -> Bool {
+                return element.label.lowercased().contains("undo")
+            }
 
-            if liked != nil {
-                report["like"] = "already_liked"
-            } else if let button = likeable {
-                let beforeLabel = button.label
-                let beforeIdent = button.identifier
-                let beforeSelected = button.isSelected
-                report["likeButtonLabel"] = "\(beforeLabel)|\(beforeIdent)|sel=\(beforeSelected)"
-                if button.isHittable {
-                    button.tap()
+            // On a long post the action row sits below the fold: every
+            // Status*Button reports nohit, and tapping an off-screen element's
+            // frame centre lands on whatever IS on screen instead. Observed
+            // live on 2026-07-31 — the same code that liked a short post did
+            // nothing at all on a long one. Scroll until the control is
+            // genuinely hittable, and refuse rather than tap blind.
+            var button = favoriteButton()
+            var likeScrolls = 0
+            while let candidate = button, !candidate.isHittable, likeScrolls < 4 {
+                window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.70))
+                    .press(forDuration: 0.1,
+                           thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.40)))
+                Thread.sleep(forTimeInterval: 1.0)
+                button = favoriteButton()
+                likeScrolls += 1
+            }
+            report["likeScrolls"] = likeScrolls
+
+            if let target = button {
+                report["likeButtonLabel"] = "\(target.label)|\(target.identifier)|\(target.isHittable ? "hit" : "nohit")"
+                if showsLiked(target) {
+                    report["like"] = "already_liked"
+                } else if !target.isHittable {
+                    // The blind coordinate tap this replaces is the same class of
+                    // mistake that once opened X's Grok panel: a resolved element
+                    // that cannot be hit is not a licence to tap where it claims
+                    // to be.
+                    report["like"] = "like_button_not_hittable"
                 } else {
-                    // Tapping the CENTRE OF THIS ELEMENT'S OWN FRAME, which is
-                    // not the fixed-screen-coordinate fallback that once opened
-                    // Grok — the target is resolved, only its hittability is in
-                    // doubt (the action row sits under a translucent bar).
-                    button.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-                    report["likeTapVia"] = "element_frame"
+                    target.tap()
+                    // Poll for the label to flip "Like" -> "Undo like" rather
+                    // than reading once: the tree does not always refresh within
+                    // a fixed sleep, and a stale read would report a real like
+                    // as unconfirmed.
+                    var confirmed = false
+                    for _ in 0..<6 {
+                        Thread.sleep(forTimeInterval: 0.7)
+                        if let after = favoriteButton(), showsLiked(after) {
+                            report["likeButtonAfter"] = "\(after.label)|\(after.identifier)"
+                            confirmed = true
+                            break
+                        }
+                    }
+                    if !confirmed {
+                        report["likeButtonAfter"] = favoriteButton().map { "\($0.label)|\($0.identifier)" } ?? ""
+                    }
+                    report["like"] = confirmed ? "liked" : "like_tap_unconfirmed"
                 }
-                Thread.sleep(forTimeInterval: 1.5)
-                // X does NOT relabel this control to "Liked"/"Unlike" after a
-                // like: verified live on 2026-07-30, where the heart turned red
-                // and the count went 4 -> 5 while the tree still classified the
-                // control exactly as before. So confirm on any observable change
-                // — the label usually carries the count, which increments — and
-                // record the raw before/after so the true signal is on file.
-                let afterLabel = button.label
-                let afterIdent = button.identifier
-                let afterSelected = button.isSelected
-                report["likeButtonAfter"] = "\(afterLabel)|\(afterIdent)|sel=\(afterSelected)"
-                let likedNow = Array(app.buttons.allElementsBoundByIndex.prefix(40))
-                    .contains { classify($0) == "liked" }
-                let changed = afterLabel != beforeLabel
-                    || afterIdent != beforeIdent
-                    || afterSelected != beforeSelected
-                report["like"] = (likedNow || changed) ? "liked" : "like_tap_unconfirmed"
             } else {
                 report["like"] = "like_button_not_found"
             }

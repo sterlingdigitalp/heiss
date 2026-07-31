@@ -1207,7 +1207,15 @@ async function main(): Promise<void> {
                 ).target !== null);
               if (persona) {
                 try {
-                  const outcome = await runCuratedEngagementOnce(store, persona, { dryRun: false, nowIso });
+                  // openPost drives the like, and stayed off while the like was
+                  // unreliable — a possible hang against the 25-minute tick
+                  // watchdog was worse than a follow-only day. It is on now
+                  // that the runner scrolls the action row into reach, reads
+                  // like state exactly ("Like" vs "Undo like"), and refuses to
+                  // tap a control it cannot hit.
+                  const outcome = await runCuratedEngagementOnce(store, persona, {
+                    dryRun: false, nowIso, openPost: true,
+                  });
                   console.log(JSON.stringify({ at: nowIso, curatedEngagement: outcome }));
                   if (outcome.engaged) {
                     notifyDesktop("Heiss engaged a target",
