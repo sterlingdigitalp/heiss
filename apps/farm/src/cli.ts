@@ -1149,7 +1149,20 @@ async function main(): Promise<void> {
                 return account && accountActionable(account);
               }),
           );
-          if (dueWarmupIds.length > 0 || retryDue || claimable) {
+          // Curated engagement needs a FRESH health verdict, not just warmups.
+          // Without this the farm deadlocks: the X-only pivot disables every
+          // warmup schedule, so with no warmup due nothing re-checks the runner,
+          // deviceHealth.ok stays false from whatever transient failure set it,
+          // and engagement — which requires ok === true — can never run again.
+          // Observed 2026-08-01: the runner died overnight, recovered by
+          // morning, and the farm still sat idle for hours because the stale
+          // flag was never revisited.
+          const curatedDue = store.state.accounts.some((candidate) =>
+            candidate.platform === "x"
+            && planDailyEngagement(
+              store.state.curatedTargets, candidate.id, nowIso, store.state.settings.timeZone,
+            ).target !== null);
+          if (dueWarmupIds.length > 0 || retryDue || claimable || curatedDue) {
             const onlineDevices = store.state.devices.filter((row) => row.online);
             // Restarting the shared CoreDevice service would disrupt every
             // attached iPhone; only permit it when this is the sole online one.
