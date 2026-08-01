@@ -380,13 +380,25 @@ async function runCuratedEngagementOnce(
     // follow someone early, so ANY real action spends the day.
     const followLanded = report.follow === "followed" || report.follow === "already_following";
     const likeLanded = report.like === "liked" || report.like === "already_liked";
-    if (!opts.dryRun && report.stoppedAt === "complete") {
-      if (followLanded) target.followedAt ??= nowIso;
-      if (followLanded || likeLanded) target.lastEngagedAt = nowIso;
-      if (likeLanded) target.engagedCount += 1;
+    if (!opts.dryRun) {
+      // The runner rendered a verdict, so the persona has had its turn — record
+      // that even when nothing landed. Recording only on "complete" meant a
+      // target the runner could not finish was retried on EVERY idle tick,
+      // forever: on 2026-08-01 @rbts4all reattempted the same quote tweet in a
+      // loop at ~6 minutes a go and three other personas never got a turn.
+      // A driver throw is different and deliberately excluded — that never
+      // reaches here, so infrastructure faults still retry.
+      target.lastAttemptedAt = nowIso;
+      if (report.stoppedAt === "complete") {
+        if (followLanded) target.followedAt ??= nowIso;
+        if (followLanded || likeLanded) target.lastEngagedAt = nowIso;
+        if (likeLanded) target.engagedCount += 1;
+      }
       store.pushActivity({
         kind: "curated_engagement", accountId: account.id, deviceId: device.id,
-        message: `${account.handle} → ${target.handle}: follow=${report.follow ?? "skip"} like=${report.like ?? "skip"}`,
+        message: report.stoppedAt === "complete"
+          ? `${account.handle} → ${target.handle}: follow=${report.follow ?? "skip"} like=${report.like ?? "skip"}`
+          : `${account.handle} → ${target.handle}: attempt spent, stopped at ${report.stoppedAt ?? "unknown"}`,
       });
       store.save();
     }

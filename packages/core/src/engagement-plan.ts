@@ -136,10 +136,15 @@ export function planDailyEngagement(
     return { target: null, shouldFollow: false, reason: "no_active_targets" };
   }
   const today = calendarDay(nowIso, timeZone);
-  const engagedToday = active.some(
-    (target) => target.lastEngagedAt && calendarDay(target.lastEngagedAt, timeZone) === today,
-  );
-  if (engagedToday) {
+  // An ATTEMPT ends the persona's day, not just a success. A target the runner
+  // cannot finish (post not found, detail will not open) fails identically on
+  // every retry, so retrying it costs a full navigation each idle tick and
+  // starves every other persona. One try per persona per day, win or lose.
+  const touchedToday = active.some((target) =>
+    [target.lastEngagedAt, target.lastAttemptedAt].some(
+      (stamp) => stamp && calendarDay(stamp, timeZone) === today,
+    ));
+  if (touchedToday) {
     return { target: null, shouldFollow: false, reason: "already_engaged_today" };
   }
   // activeCuratedTargetsFor is already oldest-added first, so this walks the

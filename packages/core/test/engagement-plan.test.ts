@@ -207,3 +207,47 @@ describe("planning the daily target", () => {
     assert.equal(planDailyEngagement(targets, "persona-1", now, TZ).reason, "no_active_targets");
   });
 });
+
+describe("a failed attempt still spends the day", () => {
+  // Recording only on success meant a target the runner could not finish was
+  // retried on every idle tick forever. On 2026-08-01 @rbts4all reattempted
+  // the same quote tweet in a loop at ~6 minutes per attempt, and three other
+  // personas never got a turn all day.
+  const tz = "America/Chicago";
+  const now = "2026-08-01T20:30:00.000Z"; // 15:30 local
+  const base = {
+    id: "t1", accountId: "acct-1", handle: "@someone",
+    active: true, addedAt: "2026-07-01T00:00:00.000Z", engagedCount: 0,
+    followedAt: "2026-07-02T00:00:00.000Z",
+  };
+
+  it("does not re-offer a target already attempted today", () => {
+    const plan = planDailyEngagement(
+      [{ ...base, lastAttemptedAt: "2026-08-01T20:05:00.000Z" }],
+      "acct-1", now, tz,
+    );
+    assert.equal(plan.target, null);
+    assert.equal(plan.reason, "already_engaged_today");
+  });
+
+  it("offers it again the next day", () => {
+    const plan = planDailyEngagement(
+      [{ ...base, lastAttemptedAt: "2026-08-01T20:05:00.000Z" }],
+      "acct-1", "2026-08-02T14:00:00.000Z", tz,
+    );
+    assert.equal(plan.target?.handle, "@someone");
+  });
+
+  it("still blocks on a successful engagement, as before", () => {
+    const plan = planDailyEngagement(
+      [{ ...base, lastEngagedAt: "2026-08-01T20:05:00.000Z" }],
+      "acct-1", now, tz,
+    );
+    assert.equal(plan.target, null);
+  });
+
+  it("an untouched persona is still offered a turn", () => {
+    const plan = planDailyEngagement([base], "acct-1", now, tz);
+    assert.equal(plan.target?.handle, "@someone");
+  });
+});

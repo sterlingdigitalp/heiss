@@ -89,6 +89,14 @@ export interface CuratedTarget {
   followedAt?: string;
   /** Drives the daily rotation once every target is followed. */
   lastEngagedAt?: string;
+  /**
+   * When the runner last rendered a verdict on this target, whether or not
+   * anything landed. A failed attempt still spends the persona's day: without
+   * this, a target the runner cannot finish is retried on every idle tick
+   * forever, which on 2026-08-01 burned ~6 minutes per attempt in a loop and
+   * starved three other personas of their turn.
+   */
+  lastAttemptedAt?: string;
   /** Completed comment+like touches. */
   engagedCount: number;
   /**
