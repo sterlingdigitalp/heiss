@@ -88,7 +88,7 @@ function metric(label: string, singular: string, plural: string): number {
  */
 export function parseXTimelineCell(
   cell: XTimelineCell,
-  opts: { now?: Date } = {},
+  opts: { now?: Date; authorPrefix?: string } = {},
 ): ParsedXPost | null {
   const label = (cell.label ?? "").trim();
   if (!label) return null;
@@ -125,6 +125,12 @@ export function parseXTimelineCell(
   // Leaving it in makes matchText the AUTHOR, and searching the screen for that
   // matches the profile header — tapping it opens the profile instead of the
   // post, which is exactly what happened live on 2026-07-30.
+  // Strip the preamble learned from the profile's other rows first; the
+  // narrower rules below still run, and still catch the quote-tweet case.
+  const prefix = opts.authorPrefix ?? "";
+  if (prefix && bodyText.toLowerCase().startsWith(prefix.toLowerCase())) {
+    bodyText = bodyText.slice(prefix.length).trim();
+  }
   const added = bodyText.indexOf(" added ");
   if (added >= 0) {
     bodyText = bodyText.slice(added + " added ".length);
@@ -175,9 +181,45 @@ export interface XPostPair {
  * but must never be mistaken for the newest post, which is exactly the error a
  * naive "first row wins" would make.
  */
+/**
+ * Every row on one profile opens with the same author preamble, so the longest
+ * prefix shared by the post rows IS that preamble — no need to be told the
+ * display name.
+ *
+ * The narrower rules ("Verified.", "<name> added") miss an unverified author
+ * whose display name is a tagline. Live on 2026-08-01, @onfly_design's rows
+ * left matchText as "Onfly | Site in 24hrs. Typography is sexy." — the needle
+ * then matched the PROFILE HEADER, the tap hit the header instead of a post,
+ * and the like failed with post_did_not_open.
+ */
+function sharedAuthorPrefix(labels: string[]): string {
+  const cleaned = labels.map((label) => label.replace(/^pinned\.\s*/i, ""));
+  if (cleaned.length < 2) return "";
+  let prefix = cleaned[0]!;
+  for (const label of cleaned.slice(1)) {
+    let i = 0;
+    while (i < prefix.length && i < label.length && prefix[i] === label[i]) i += 1;
+    prefix = prefix.slice(0, i);
+    if (!prefix) return "";
+  }
+  // Cut back to a sentence boundary: without this, two posts that happen to
+  // open with the same word would strip half of a real sentence.
+  const cut = prefix.lastIndexOf(". ");
+  if (cut < 0) return "";
+  const trimmed = prefix.slice(0, cut + 2);
+  // A preamble is a name and maybe a badge. Anything long is shared body text.
+  return trimmed.length <= 80 ? trimmed : "";
+}
+
 export function selectXPostPair(cells: XTimelineCell[], opts: { now?: Date } = {}): XPostPair {
-  const parsed = cells
-    .map((cell) => parseXTimelineCell(cell, opts))
+  // Two passes: identify the post rows, learn the author preamble from them,
+  // then re-parse with it stripped.
+  const firstPass = cells
+    .map((cell) => ({ cell, post: parseXTimelineCell(cell, opts) }))
+    .filter((row) => row.post !== null);
+  const authorPrefix = sharedAuthorPrefix(firstPass.map((row) => row.cell.label ?? ""));
+  const parsed = firstPass
+    .map((row) => parseXTimelineCell(row.cell, { ...opts, authorPrefix }))
     .filter((post): post is ParsedXPost => post !== null);
   const pinned = parsed.find((post) => post.isPinned) ?? null;
   const posts = parsed.filter((post) => !post.isPinned);

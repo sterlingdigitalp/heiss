@@ -148,3 +148,42 @@ describe("absolute-dated posts", () => {
     assert.ok(pair.mostRecent!.ageHours < 96, `got ${pair.mostRecent!.ageHours}`);
   });
 });
+
+describe("author preamble on an unverified account", () => {
+  // Every row on one profile opens with the same author preamble, so the
+  // longest shared prefix IS that preamble. The narrower "Verified." and
+  // "<name> added" rules miss an unverified author whose display name reads
+  // like body text. Live on 2026-08-01, @onfly_design left matchText as
+  // "Onfly | Site in 24hrs. Typography is sexy." — the needle matched the
+  // PROFILE HEADER, the tap hit the header, and the like failed with
+  // post_did_not_open.
+  const now = new Date("2026-08-01T15:00:00Z");
+  const rows = [
+    cell(0, "Posts"),
+    cell(1, "Onfly | Site in 24hrs. Typography is sexy. Image. July 31, 2026. 3 Likes. 88 Views"),
+    cell(2, "Onfly | Site in 24hrs. We shipped a landing page overnight. July 29, 2026. 1 Reply. 5 Likes. 120 Views"),
+    cell(3, "Onfly | Site in 24hrs. Three things we learned building fast. July 26, 2026. 2 Likes. 64 Views"),
+  ];
+
+  it("strips a display name that looks like a sentence", () => {
+    const pair = selectXPostPair(rows, { now });
+    assert.equal(pair.mostRecent?.matchText, "Typography is sexy.");
+    assert.equal(pair.posts.every((post) => !post.matchText.startsWith("Onfly")), true);
+  });
+
+  it("does not strip shared words that are not a preamble", () => {
+    // Both open with "The" but share no sentence boundary, so nothing is cut.
+    const pair = selectXPostPair([
+      cell(0, "The quick brown fox jumped. July 31, 2026. 1 Like. 10 Views"),
+      cell(1, "The quiet bear slept. July 30, 2026. 2 Likes. 20 Views"),
+    ], { now });
+    assert.equal(pair.mostRecent?.matchText, "The quick brown fox jumped.");
+  });
+
+  it("leaves a single-post profile untouched", () => {
+    const pair = selectXPostPair([
+      cell(0, "Solo. Verified. Only ever posted once here. July 31, 2026. 1 Like. 9 Views"),
+    ], { now });
+    assert.equal(pair.mostRecent?.matchText, "Only ever posted once here.");
+  });
+});
