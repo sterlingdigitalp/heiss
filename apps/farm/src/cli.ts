@@ -43,6 +43,10 @@ import {
   choosePostForEngagement,
   selectXPostPair,
   type ParsedXPost,
+  planFegosImport,
+  applyFegosImport,
+  type FegosFleetAccount,
+  type FegosWatchList,
   checkCuratedTargetAddition,
   MAX_CURATED_TARGETS_PER_ACCOUNT,
   type CuratedTarget,
@@ -126,6 +130,7 @@ Farm:
   heiss-farm remove-slot <slotId>
   heiss-farm warmup-schedule list | rebalance | set <accountId> <HH:mm> [--jitter N] | enable <accountId> | disable <accountId> | remove <accountId>
   heiss-farm targets list [--account <accountId>]
+  heiss-farm targets import [--from ~/FEGOS] [--apply]   # dry run unless --apply
   heiss-farm targets add <accountId> @handle [--note "why this person"]
   heiss-farm targets remove <targetId>
   heiss-farm targets scan <xAccountId> @targetHandle   # read-only: what do their latest posts look like
@@ -1573,6 +1578,69 @@ async function main(): Promise<void> {
         niche: account.searchTerms,
         targets: curatedTargetsFor(store.state.curatedTargets, account.id),
       })),
+    });
+    return;
+  }
+
+  // ── Import the source graph from FEGOS ─────────────────
+  // FEGOS is the system of record: research happens there, Heiss consumes the
+  // result. Dry run unless --apply, because this replaces most of the list.
+  if (cmd === "targets" && args[1] === "import") {
+    const store = openStore(args);
+    const root = (getArg(args, "--from") ?? `${homedir()}/FEGOS`).replace(/\/$/, "");
+    const configDir = `${root}/data/config`;
+    const readJson = (relative: string): unknown => {
+      const path = `${configDir}/${relative}`;
+      if (!existsSync(path)) throw new Error(`FEGOS config not found: ${path}`);
+      return JSON.parse(readFileSync(path, "utf8"));
+    };
+    const fleet = (readJson("fleet.json") as { accounts: Record<string, FegosFleetAccount> }).accounts;
+    // Cohort files carry the same shape; a persona lives in exactly one of them.
+    const watchLists = [
+      ...(readJson("watch_lists.json") as { watch_lists: FegosWatchList[] }).watch_lists,
+      ...(readJson("cohort2/watch_lists.json") as { watch_lists: FegosWatchList[] }).watch_lists,
+    ];
+    const plan = planFegosImport({
+      fleet,
+      watchLists,
+      accounts: store.state.accounts
+        .filter((account) => account.platform === "x")
+        .map((account) => ({ id: account.id, handle: account.handle })),
+      existing: store.state.curatedTargets,
+    });
+    const apply = hasFlag(args, "--apply");
+    if (apply) {
+      applyFegosImport(store.state.curatedTargets, plan, new Date().toISOString(), randomUUID);
+      store.pushActivity({
+        kind: "curated_targets_imported",
+        message: `Imported FEGOS source graph: ${plan.personas
+          .filter((persona) => !persona.problem)
+          .map((persona) => `${persona.accountHandle}(${persona.changes.filter((c) => c.kind === "add").length}+/${persona.changes.filter((c) => c.kind === "retire").length}-)`)
+          .join(" ")}`,
+      });
+      store.save();
+    }
+    print({
+      ok: true,
+      source: configDir,
+      applied: apply,
+      // Legacy FEGOS entries with no Heiss persona are reported, never applied.
+      unmatchedFleet: plan.unmatchedFleet,
+      personas: plan.personas.map((persona) => ({
+        account: persona.accountHandle,
+        personaId: persona.personaId,
+        niche: persona.niche,
+        ...(persona.problem ? { problem: persona.problem } : {}),
+        keep: persona.changes.filter((c) => c.kind === "keep").map((c) => c.handle),
+        add: persona.changes.filter((c) => c.kind === "add")
+          .map((c) => `${c.handle} (p${(c as { priority: number }).priority})`),
+        retire: persona.changes.filter((c) => c.kind === "retire")
+          .map((c) => {
+            const row = c as { handle: string; followed: boolean; engagedCount: number };
+            return `${row.handle}${row.followed ? " [followed]" : ""}${row.engagedCount ? ` [${row.engagedCount} engaged]` : ""}`;
+          }),
+      })),
+      ...(apply ? {} : { hint: "dry run — re-run with --apply to write" }),
     });
     return;
   }

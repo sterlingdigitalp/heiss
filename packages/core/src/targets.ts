@@ -43,9 +43,18 @@ export function curatedTargetsFor(
   targets: CuratedTarget[],
   accountId: string,
 ): CuratedTarget[] {
+  // Imported targets carry FEGOS's research ranking, and that ranking IS the
+  // intended day order — priority 1 gets followed first. Anything unranked
+  // (hand-added) sorts after the ranked set, still oldest-added first, so
+  // addedAt stays an honest record of when rather than a smuggled ordering.
   return targets
     .filter((target) => target.accountId === accountId)
-    .sort((left, right) => left.addedAt.localeCompare(right.addedAt));
+    .sort((left, right) => {
+      const leftRank = left.priority ?? Number.POSITIVE_INFINITY;
+      const rightRank = right.priority ?? Number.POSITIVE_INFINITY;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return left.addedAt.localeCompare(right.addedAt);
+    });
 }
 
 /** Only active targets are ever engaged; paused ones stay for history. */

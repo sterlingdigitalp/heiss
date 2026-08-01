@@ -5,6 +5,7 @@ export * from "./candidates.js";
 export * from "./targets.js";
 export * from "./engagement-plan.js";
 export * from "./x-posts.js";
+export * from "./fegos-import.js";
 export * from "./capacity.js";
 export * from "./protocol.js";
 export * from "./locks.js";

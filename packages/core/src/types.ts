@@ -91,6 +91,15 @@ export interface CuratedTarget {
   lastEngagedAt?: string;
   /** Completed comment+like touches. */
   engagedCount: number;
+  /**
+   * FEGOS research rank (1 = highest), present only on imported targets. This
+   * IS the intended day order — priority 1 is followed first — so it sorts
+   * ahead of addedAt and leaves addedAt an honest record of when, not a
+   * smuggled ordering. Absent on hand-added targets, which sort after.
+   */
+  priority?: number;
+  /** FEGOS's stated reason this source is ranked where it is. */
+  sourceRole?: string;
 }
 
 /**
