@@ -251,3 +251,53 @@ describe("a failed attempt still spends the day", () => {
     assert.equal(plan.target?.handle, "@someone");
   });
 });
+
+describe("engagement holds until the persona's own hour", () => {
+  // Without a scheduled time the engagement fires on the first idle tick after
+  // the calendar day rolls over — all five personas inside half an hour of
+  // midnight, every night, which is a pattern no human has.
+  const tz = "America/Chicago";
+  const base = {
+    id: "t1", accountId: "acct-1", handle: "@someone",
+    active: true, addedAt: "2026-07-01T00:00:00.000Z", engagedCount: 0,
+  };
+  const at = (localHour: string) => `2026-08-02T${localHour}:00:00.000Z`;
+
+  it("withholds a target before the scheduled time", () => {
+    // 06:00Z = 01:00 local, well before a 10:00 local slot.
+    const plan = planDailyEngagement([base], "acct-1", at("06"), tz,
+      { timeOfDay: "10:00", jitterMinutes: 0 });
+    assert.equal(plan.target, null);
+    assert.equal(plan.reason, "before_scheduled_time");
+  });
+
+  it("releases it once the time has passed", () => {
+    // 17:00Z = 12:00 local, past the 10:00 slot.
+    const plan = planDailyEngagement([base], "acct-1", at("17"), tz,
+      { timeOfDay: "10:00", jitterMinutes: 0 });
+    assert.equal(plan.target?.handle, "@someone");
+  });
+
+  it("still runs late in the day if the slot was missed", () => {
+    // Catch-up matters: a phone unplugged at 10:00 must not lose the day.
+    const plan = planDailyEngagement([base], "acct-1", at("23"), tz,
+      { timeOfDay: "10:00", jitterMinutes: 0 });
+    assert.equal(plan.target?.handle, "@someone");
+  });
+
+  it("behaves as before when no time is configured", () => {
+    const plan = planDailyEngagement([base], "acct-1", at("06"), tz);
+    assert.equal(plan.target?.handle, "@someone");
+  });
+
+  it("jitter varies the effective time by day but stays bounded", () => {
+    const days = ["2026-08-02", "2026-08-03", "2026-08-04", "2026-08-05"];
+    const released = days.map((day) =>
+      planDailyEngagement([base], "acct-1", `${day}T14:58:00.000Z`, tz,
+        { timeOfDay: "10:00", jitterMinutes: 8 }).target !== null);
+    // 14:58Z = 09:58 local — inside the +/-8 minute band (09:52-10:04), so some
+    // days release and some do not. Identical every day would mean no jitter.
+    assert.equal(released.some(Boolean) && released.some((r) => !r), true,
+      `expected mixed results across days, got ${JSON.stringify(released)}`);
+  });
+});

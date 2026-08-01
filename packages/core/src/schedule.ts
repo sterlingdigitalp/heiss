@@ -73,12 +73,27 @@ export function createWarmupSchedule(
   return { id: randomUUID(), accountId, timeOfDay, jitterMinutes, enabled };
 }
 
-export function effectiveWarmupTime(schedule: WarmupSchedule, localDay: string): string {
-  const base = timeToMinutes(schedule.timeOfDay);
-  const radius = Math.max(0, schedule.jitterMinutes);
+/**
+ * A daily time with deterministic per-day variation, so a persona does not act
+ * at exactly the same minute every day while still being reproducible from the
+ * seed. Shared by warmups and curated engagement — two schedules that drift
+ * apart would be two ways to look scripted.
+ */
+export function effectiveDailyTime(
+  seedKey: string,
+  timeOfDay: string,
+  jitterMinutes: number,
+  localDay: string,
+): string {
+  const base = timeToMinutes(timeOfDay);
+  const radius = Math.max(0, jitterMinutes);
   const span = radius * 2 + 1;
-  const offset = span === 1 ? 0 : stableHash(`${schedule.accountId}:${localDay}`) % span - radius;
+  const offset = span === 1 ? 0 : stableHash(`${seedKey}:${localDay}`) % span - radius;
   return minutesToTime(Math.max(0, Math.min(23 * 60 + 59, base + offset)));
+}
+
+export function effectiveWarmupTime(schedule: WarmupSchedule, localDay: string): string {
+  return effectiveDailyTime(schedule.accountId, schedule.timeOfDay, schedule.jitterMinutes, localDay);
 }
 
 export function warmupScheduleIsDue(

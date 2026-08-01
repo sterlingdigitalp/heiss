@@ -1,6 +1,6 @@
 import type { CuratedTarget } from "./types.js";
 import { activeCuratedTargetsFor } from "./targets.js";
-import { calendarDay } from "./schedule.js";
+import { calendarDay, effectiveDailyTime, localTimeOfDay, timeToMinutes } from "./schedule.js";
 
 /**
  * The daily X engagement decision: which curated target a persona touches
@@ -114,7 +114,8 @@ export interface DailyEngagementPlan {
     | "first_follow"
     | "rotation"
     | "no_active_targets"
-    | "already_engaged_today";
+    | "already_engaged_today"
+    | "before_scheduled_time";
 }
 
 /**
@@ -130,6 +131,7 @@ export function planDailyEngagement(
   accountId: string,
   nowIso: string,
   timeZone: string,
+  schedule?: { timeOfDay?: string; jitterMinutes?: number; seedKey?: string },
 ): DailyEngagementPlan {
   const active = activeCuratedTargetsFor(targets, accountId);
   if (active.length === 0) {
@@ -146,6 +148,19 @@ export function planDailyEngagement(
     ));
   if (touchedToday) {
     return { target: null, shouldFollow: false, reason: "already_engaged_today" };
+  }
+  // Hold until this persona's own hour. Without a scheduled time the engagement
+  // fires on the first idle tick after the calendar day rolls over, so every
+  // persona acts within half an hour of midnight, every night — a pattern no
+  // human has. The check is "past the time", never "at the time", so a run
+  // missed because the phone was unplugged still happens later that day.
+  if (schedule?.timeOfDay) {
+    const due = effectiveDailyTime(
+      schedule.seedKey ?? accountId, schedule.timeOfDay, schedule.jitterMinutes ?? 0, today,
+    );
+    if (timeToMinutes(localTimeOfDay(nowIso, timeZone)) < timeToMinutes(due)) {
+      return { target: null, shouldFollow: false, reason: "before_scheduled_time" };
+    }
   }
   // activeCuratedTargetsFor is already oldest-added first, so this walks the
   // curated day order during the follow burst.

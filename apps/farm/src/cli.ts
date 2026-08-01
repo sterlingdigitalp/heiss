@@ -131,6 +131,7 @@ Farm:
   heiss-farm warmup-schedule list | rebalance | set <accountId> <HH:mm> [--jitter N] | enable <accountId> | disable <accountId> | remove <accountId>
   heiss-farm targets list [--account <accountId>]
   heiss-farm targets import [--from ~/FEGOS] [--apply]   # dry run unless --apply
+  heiss-farm targets schedule <xAccountId> <HH:mm> [--jitter N]   # when this persona engages
   heiss-farm targets add <accountId> @handle [--note "why this person"]
   heiss-farm targets remove <targetId>
   heiss-farm targets scan <xAccountId> @targetHandle   # read-only: what do their latest posts look like
@@ -1178,6 +1179,8 @@ async function main(): Promise<void> {
             candidate.platform === "x"
             && planDailyEngagement(
               store.state.curatedTargets, candidate.id, nowIso, store.state.settings.timeZone,
+              { timeOfDay: candidate.curatedEngagementAt,
+                jitterMinutes: candidate.curatedEngagementJitterMinutes ?? 8 },
             ).target !== null);
           if (dueWarmupIds.length > 0 || retryDue || claimable || curatedDue) {
             const onlineDevices = store.state.devices.filter((row) => row.online);
@@ -1234,6 +1237,8 @@ async function main(): Promise<void> {
                 && (candidate.preflightStatus ?? "ready") === "ready"
                 && planDailyEngagement(
                   store.state.curatedTargets, candidate.id, nowIso, store.state.settings.timeZone,
+                  { timeOfDay: candidate.curatedEngagementAt,
+                    jitterMinutes: candidate.curatedEngagementJitterMinutes ?? 8 },
                 ).target !== null);
               if (persona) {
                 try {
@@ -1654,6 +1659,30 @@ async function main(): Promise<void> {
       })),
       ...(apply ? {} : { hint: "dry run — re-run with --apply to write" }),
     });
+    return;
+  }
+
+  // Per-persona engagement hour. Staggered so the five personas do not act as
+  // one batch, and jittered daily so none acts at the same minute every day.
+  if (cmd === "targets" && args[1] === "schedule") {
+    const store = openStore(args);
+    const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
+    if (!account || account.platform !== "x") {
+      throw new Error("Usage: targets schedule <xAccountId> <HH:mm> [--jitter N]");
+    }
+    const time = (args[3] ?? "").trim();
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) {
+      throw new Error(`Expected HH:mm in ${store.state.settings.timeZone}, got "${time}"`);
+    }
+    const jitter = Number(getArg(args, "--jitter") ?? account.curatedEngagementJitterMinutes ?? 8);
+    if (!Number.isInteger(jitter) || jitter < 0 || jitter > 60) {
+      throw new Error("--jitter must be an integer from 0 to 60");
+    }
+    account.curatedEngagementAt = time;
+    account.curatedEngagementJitterMinutes = jitter;
+    store.save();
+    print({ ok: true, account: account.handle, curatedEngagementAt: time,
+      jitterMinutes: jitter, timeZone: store.state.settings.timeZone });
     return;
   }
 

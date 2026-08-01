@@ -252,6 +252,16 @@ export interface SocialAccount {
   searchTerms: string[];
   createdAt: string;
   lastWarmupAt?: string;
+  /**
+   * Local HH:mm this persona does its curated follow+like. Without it the
+   * engagement fires on the first idle tick after the calendar day rolls over
+   * — i.e. all five personas inside half an hour of midnight, every night,
+   * which is the opposite of the human pacing the warming depends on.
+   * Staggered per persona and jittered daily, exactly like warmups.
+   */
+  curatedEngagementAt?: string;
+  /** Daily variation around curatedEngagementAt; mirrors WarmupSchedule.jitterMinutes. */
+  curatedEngagementJitterMinutes?: number;
   /** Distinct local calendar days with a completed warmup. */
   warmupLocalDays?: string[];
   lastPostAt?: string;
