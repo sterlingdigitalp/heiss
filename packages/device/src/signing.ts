@@ -103,9 +103,16 @@ export function resolveSigningConfig(
 export function buildXcodeSignArgs(config: SigningConfig): SignResult {
   const bundleId = config.bundleId ?? DEFAULT_BUNDLE;
   const notes: string[] = [];
+  // Deliberately NOT setting PRODUCT_BUNDLE_IDENTIFIER here. An xcodebuild
+  // command-line setting applies to EVERY target, so it silently rewrote the
+  // UI-test target's identifier to the app's, making its generated runner
+  // "so.heiss.runner.xctrunner" instead of "so.heiss.runner.uitests.xctrunner".
+  // Xcode's own builds honour the per-target identifiers in the project, so the
+  // GUI and the CLI produced different bundles — and profiles issued through
+  // Xcode could never match what the CLI asked for. The project already carries
+  // the correct identifier for each target; let it.
   const args: string[] = [
     "CODE_SIGN_STYLE=Automatic",
-    `PRODUCT_BUNDLE_IDENTIFIER=${bundleId}`,
   ];
   if (config.teamId) {
     args.push(`DEVELOPMENT_TEAM=${config.teamId}`);

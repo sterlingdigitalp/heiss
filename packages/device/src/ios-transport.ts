@@ -55,7 +55,12 @@ export class RealUsbTransport implements IosTransport {
   private lastDevices: UsbIphone[] = [];
 
   constructor(opts: RealUsbTransportOptions = {}) {
-    this.bundleId = opts.bundleId ?? `${RUNNER_BUNDLE_ID}.xctrunner`;
+    // XCTest names the generated runner "<ui-test bundle id>.xctrunner", and the
+    // UI-test target is RUNNER_BUNDLE_ID + ".uitests" — so the runner app is
+    // ".uitests.xctrunner". This previously read ".xctrunner" only because a
+    // command-line PRODUCT_BUNDLE_IDENTIFIER override flattened both targets
+    // onto the app's identifier. See signing.ts.
+    this.bundleId = opts.bundleId ?? `${RUNNER_BUNDLE_ID}.uitests.xctrunner`;
     this.commandTimeoutMs = opts.commandTimeoutMs ?? 45_000;
     this.onProgress = opts.onProgress;
   }
