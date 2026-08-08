@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.07.31.2"
+private let heissRunnerBuild = "heiss-runner-2026.08.08.1"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -89,11 +89,26 @@ final class HeissRunnerUITests: XCTestCase {
         for stale in (try? fm.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil)) ?? [] {
             try? fm.removeItem(at: stale)
         }
-        // Session journals from a prior host must never let a reused sessionId
-        // report recovered progress against a stale plan.
+        // Session journals deliberately SURVIVE a restart. Deleting them here
+        // silently disabled resume: a warmup batch that exceeds the Mac's
+        // 15-minute ceiling is checkpointed for retry, but the runner is
+        // relaunched in between, and wiping the journal sent the retry back to
+        // step 0 — so a batch too slow to finish in one window could never
+        // finish at all. That is the 2026-08-08 stall, where warmups sat at
+        // "0 of 17" forever while single-command engagements were unaffected.
+        //
+        // The stale-plan risk this guarded against is already handled precisely
+        // in performWarmupSession, which only trusts a journal whose
+        // plannedSteps match the incoming plan exactly. Age is the only thing
+        // worth pruning here, so the on-device footprint stays bounded.
         let journals = documents().appendingPathComponent("journals", isDirectory: true)
-        for stale in (try? fm.contentsOfDirectory(at: journals, includingPropertiesForKeys: nil)) ?? [] {
-            try? fm.removeItem(at: stale)
+        try? fm.createDirectory(at: journals, withIntermediateDirectories: true)
+        let journalCutoff = Date().addingTimeInterval(-24 * 60 * 60)
+        for stale in (try? fm.contentsOfDirectory(
+            at: journals, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
+            let modified = (try? stale.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            if modified < journalCutoff { try? fm.removeItem(at: stale) }
         }
         // Prune our own on-device footprint each restart. Failure screenshots
         // were never cleaned and staged post media lingered after import — over
@@ -683,10 +698,26 @@ final class HeissRunnerUITests: XCTestCase {
                         throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) lost foreground re-verifying account at step \(completed + 1)"])
                     }
                 }
+                // Record the step BEFORE running it. The journal was only
+                // written on completion, so a step that hung left no trace at
+                // all — the Mac saw "0 of 17" and could not tell a slow batch
+                // from a wedged one, which is why 2026-08-08 took a week to
+                // diagnose. An in-flight marker makes the culprit obvious.
+                stepDetails[completed] = "running:\(step)@\(isoTimestamp())"
+                writeSessionJournal(
+                    journalURL, sessionId: sessionId, platform: platform, handle: handle,
+                    commandGeneration: commandGeneration, status: "running",
+                    completedSteps: completed, plannedSteps: plannedSteps,
+                    stepDetails: stepDetails, error: nil
+                )
+                let stepStarted = Date()
                 stepDetails[completed] = try performWarmupStep(
                     step, app: app, window: window, platform: platform,
                     command: command, engagedTargetKeys: &engagedTargetKeys
                 )
+                // Duration per step is what turns "the batch is slow" into
+                // "this step is slow" without another week of guessing.
+                stepDetails[completed] += " [\(Int(Date().timeIntervalSince(stepStarted)))s]"
                 completed += 1
                 writeSessionJournal(
                     journalURL, sessionId: sessionId, platform: platform, handle: handle,
