@@ -15,3 +15,7 @@ apps/web/.next/
 apps/farm/data/
 scratch/
 *.tsbuildinfo
+
+# Apple signing credentials — never commit
+docs/data.md
+*.p8

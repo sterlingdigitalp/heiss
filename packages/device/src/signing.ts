@@ -156,10 +156,25 @@ export function buildAscSignPlan(config: SigningConfig): SignResult {
   }
   notes.push("App Store Connect API key present — paid Apple Developer path");
   notes.push("Certificate validity ~1 year with automatic re-sign support");
+  // The whole point of the ASC path is that xcodebuild authenticates WITHOUT a
+  // signed-in Xcode. Storing the key in config was not enough — these flags are
+  // what actually hand it to xcodebuild. Without them it reports
+  // "No Accounts: Add a new account in Accounts settings" even with a perfectly
+  // valid key configured, which is exactly what happened on 2026-08-13 and is
+  // indistinguishable from having no credentials at all.
   const args = [
     "CODE_SIGN_STYLE=Automatic",
-    `PRODUCT_BUNDLE_IDENTIFIER=${bundleId}`,
+    "-authenticationKeyPath", config.ascKeyPath,
+    "-authenticationKeyID", config.ascKeyId,
+    "-authenticationKeyIssuerID", config.ascIssuerId,
   ];
+  // Deliberately NOT setting PRODUCT_BUNDLE_IDENTIFIER — a command-line build
+  // setting applies to EVERY target and flattens the UI-test target onto the
+  // app's identifier, so XCTest generates "so.heiss.runner.xctrunner" instead
+  // of "so.heiss.runner.uitests.xctrunner". Same fault fixed in the Xcode path
+  // on 2026-08-04 (cf032d8); it survived here because this branch was unused
+  // until the paid account landed. The project carries the right identifier
+  // for each target already.
   if (config.teamId) args.push(`DEVELOPMENT_TEAM=${config.teamId}`);
   return {
     method: "asc",
