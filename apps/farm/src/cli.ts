@@ -363,6 +363,20 @@ async function runCuratedEngagementOnce(
           (record) => record.accountId === account.id && record.targetKey === post.key),
         preview: post.matchText,
       };
+      // A scan is a full device pass — account switch, search, profile, read —
+      // so it spends the persona's day exactly like an engagement does. The
+      // Aug 1 fix recorded lastAttemptedAt only AFTER the engage action, so
+      // this earlier return slipped through and the daemon retried every idle
+      // tick: on 2026-08-14 @AI4Operators reattempted @nateherk nine times in
+      // half an hour, and nothing else could use the device meanwhile.
+      if (!opts.dryRun) {
+        target.lastAttemptedAt = nowIso;
+        store.pushActivity({
+          kind: "curated_engagement", accountId: account.id, deviceId: device.id,
+          message: `${account.handle} → ${target.handle}: attempt spent, ${choice.reason}`,
+        });
+        store.save();
+      }
       return { ok: true, persona: account.handle, target: target.handle, engaged: false,
         reason: choice.reason, postsSeen: pair.posts.length,
         candidates: { mostRecent: explain(pair.mostRecent), preceding: explain(pair.preceding),
