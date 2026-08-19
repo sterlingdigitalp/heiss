@@ -157,7 +157,6 @@ Farm:
   heiss-farm drop --accounts ID,ID --caption TEXT --media REF [--music M]
   heiss-farm drop --accounts ID,ID --caption TEXT --carousel --slides a.jpg,b.jpg
   heiss-farm start-warmups [--time HH:mm] [--data DIR]   # alias: run after setup
-  heiss-farm serve-api [--port 8787]
 
 Env:
   HEISS_DATA          Data directory (default ~/.heiss/live)
@@ -2364,135 +2363,19 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (cmd === "serve-api") {
-    const { createServer } = await import("node:http");
-    const port = Number(getArg(args, "--port") ?? 8787);
-    const dataDir = getArg(args, "--data") ?? defaultDataDir();
-
-    const server = createServer(async (req, res) => {
-      const store = new JsonStore(farmStatePath(dataDir));
-      const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-      res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-      if (req.method === "OPTIONS") {
-        res.writeHead(204);
-        res.end();
-        return;
-      }
-      const body = await readBody(req);
-      const json = body ? safeJson(body) : null;
-      try {
-        if (url.pathname === "/health") {
-          send(res, 200, { ok: true, service: "heiss-farm", simulator: false });
-          return;
-        }
-        if (url.pathname === "/api/setup/status" && req.method === "GET") {
-          const status = await getSetupStatus({
-            hasRegisteredDevice: store.state.devices.length > 0,
-            hasAccount: store.state.accounts.length > 0,
-            hasWarmupSession: store.state.sessions.length > 0,
-          });
-          send(res, 200, status);
-          return;
-        }
-        if (url.pathname === "/api/devices/usb" && req.method === "GET") {
-          send(res, 200, { devices: await listUsbIphones() });
-          return;
-        }
-        if (url.pathname === "/api/signup" && req.method === "POST") {
-          const email = String(json?.email ?? "");
-          const password = String(json?.password ?? "");
-          if (store.state.users.some((u) => u.email === email.toLowerCase())) {
-            send(res, 409, { error: "User exists" });
-            return;
-          }
-          const user = createUser(email, password);
-          store.state.users.push(user);
-          store.save();
-          send(res, 200, {
-            ok: true,
-            user: { id: user.id, email: user.email },
-            token: issueSessionToken(user.id),
-          });
-          return;
-        }
-        if (url.pathname === "/api/login" && req.method === "POST") {
-          const email = String(json?.email ?? "").toLowerCase();
-          const password = String(json?.password ?? "");
-          const user = store.state.users.find((u) => u.email === email);
-          if (!user || !verifyPassword(password, user.passwordHash)) {
-            send(res, 401, { error: "Invalid credentials" });
-            return;
-          }
-          send(res, 200, {
-            ok: true,
-            user: { id: user.id, email: user.email },
-            token: issueSessionToken(user.id),
-          });
-          return;
-        }
-        if (url.pathname === "/api/accounts" && req.method === "GET") {
-          send(res, 200, { accounts: store.state.accounts });
-          return;
-        }
-        if (url.pathname === "/api/drop" && req.method === "POST") {
-          const auth = req.headers.authorization?.replace(/^Bearer\s+/i, "") ?? "";
-          const session = parseSessionToken(auth);
-          const { content, queueItem } = dropContent({
-            kind: (json?.kind as "video" | "carousel") ?? "video",
-            mediaRef: String(json?.mediaRef ?? "upload.bin"),
-            slides: json?.slides as string[] | undefined,
-            caption: String(json?.caption ?? ""),
-            music: json?.music ? String(json.music) : undefined,
-            accountIds: (json?.accountIds as string[]) ?? [],
-            createdBy: session?.userId ?? "anonymous",
-          });
-          store.state.contents.push(content);
-          store.state.queue.push(queueItem);
-          store.save();
-          send(res, 200, {
-            ok: true,
-            content,
-            queueItem,
-            claimable: true,
-            linkedAccountIds: queueItem.accountIds,
-          });
-          return;
-        }
-        if (url.pathname === "/api/overview" && req.method === "GET") {
-          send(res, 200, {
-            devices: store.state.devices,
-            accounts: store.state.accounts,
-            queue: store.state.queue,
-            activity: store.state.activity.slice(-50),
-            sessions: store.state.sessions.slice(-20),
-            simulator: false,
-          });
-          return;
-        }
-        if (url.pathname === "/api/run" && req.method === "POST") {
-          const driver = makeDriver();
-          const orch = new FarmOrchestrator(store, driver);
-          const time = String(json?.timeOfDay ?? "09:00");
-          const result = await orch.runOnce({
-            runnerId: "api-farm",
-            timeOfDay: time,
-          });
-          send(res, 200, { ok: true, ...result, simulator: false });
-          return;
-        }
-        send(res, 404, { error: "not found" });
-      } catch (e) {
-        send(res, 400, { error: e instanceof Error ? e.message : String(e) });
-      }
-    });
-
-    server.listen(port, "127.0.0.1", () => {
-      print({ ok: true, listening: `http://127.0.0.1:${port}`, dataDir, simulator: false });
-    });
-    return;
-  }
+  // `serve-api` deleted 2026-08-19. It was an unauthenticated control plane
+  // (Access-Control-Allow-Origin: *, anonymous drops, an unauthenticated
+  // /api/run) that any page the operator visited could POST to.
+  //
+  // Worse, it is a MUTATING command, so it was forwarded to the controller
+  // socket and run inside SerialCommandAuthority — but server.listen() never
+  // closes, so that promise never settled and the daemon's command queue died
+  // permanently: no warmups, no engagement, no recovery, with the process still
+  // alive so launchd KeepAlive never restarted it. Running it once would have
+  // silently halted the farm for good.
+  //
+  // Nothing referenced it and it was absent from the README. apps/web is the
+  // real, authenticated API.
 
   // Remove seed demo path that used fake devices — redirect
   if (cmd === "seed") {

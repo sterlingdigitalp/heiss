@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createConnection, createServer, type Server } from "node:net";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 export const AUTHORIZED_MUTATION_ENV = "HEISS_AUTHORIZED_MUTATION";
@@ -66,6 +66,38 @@ export async function forwardToController(
   });
 }
 
+/**
+ * Commands the controller socket will run. Anything else is refused.
+ *
+ * The socket spawns the CLI with HEISS_AUTHORIZED_MUTATION=1 — the flag that
+ * bypasses the "forward to the controller" check — so whatever it accepts runs
+ * with full authority over the farm. It previously accepted ANY argv from any
+ * local process that could open the socket.
+ *
+ * Regenerate with:
+ *   grep -oE 'cmd === "[a-z][a-z0-9-]*"' apps/farm/src/cli.ts | sed 's/.*"\(.*\)"/\1/' | sort -u
+ */
+const ALLOWED_COMMANDS = new Set([
+  "account", "account-set", "add-account", "add-account-set", "add-slot",
+  "cancel", "candidates", "cloud", "daemon", "data", "devices", "drop",
+  "engagement", "license", "maintenance", "platforms", "preflight",
+  "proxies", "register-device", "remove-account", "remove-slot", "resume",
+  "run", "runner", "safety", "seed", "settings", "setup", "signing",
+  "start-warmups", "status", "targets", "warmup-schedule",
+]);
+
+/** A controller command is a few short tokens; anything larger is not one. */
+const MAX_REQUEST_BYTES = 64 * 1024;
+
+/**
+ * Hard ceiling on a forwarded command. `serve-api` proved the failure mode:
+ * a child that never exits pins SerialCommandAuthority forever, and with it
+ * every warmup, engagement and recovery — silently, with the process alive so
+ * launchd never restarts it. Generous enough for `runner install` and a full
+ * scan+engage, far below anything that should run through this socket.
+ */
+const MAX_CHILD_MS = 20 * 60_000;
+
 export function startCommandAuthorityServer(
   dataDir: string,
   authority: SerialCommandAuthority,
@@ -77,13 +109,32 @@ export function startCommandAuthorityServer(
   // long-running canaries can return their complete JSON response.
   const server = createServer({ allowHalfOpen: true }, (socket) => {
     let raw = "";
+    let oversized = false;
     socket.setEncoding("utf8");
-    socket.on("data", (chunk) => { raw += chunk; });
+    socket.on("data", (chunk) => {
+      if (oversized) return;
+      raw += chunk;
+      if (raw.length > MAX_REQUEST_BYTES) {
+        oversized = true;
+        socket.end(JSON.stringify({ code: 2, stdout: "", stderr: "Controller command too large" }));
+      }
+    });
     socket.on("end", () => {
+      if (oversized) return;
       void authority.run(async () => {
         let args: string[] = [];
         try { args = (JSON.parse(raw.trim()) as { args: string[] }).args; }
         catch { socket.end(JSON.stringify({ code: 2, stdout: "", stderr: "Invalid controller command" })); return; }
+        // Refuse anything that is not a known command. Without this the socket
+        // ran arbitrary argv with mutation authority for any local process.
+        if (!Array.isArray(args) || args.some((a) => typeof a !== "string")
+            || !args[0] || !ALLOWED_COMMANDS.has(args[0])) {
+          socket.end(JSON.stringify({
+            code: 2, stdout: "",
+            stderr: `Refused: ${args?.[0] ? `unknown command ${args[0]}` : "no command"}`,
+          }));
+          return;
+        }
         const invocation = [...process.execArgv, process.argv[1]!, ...args];
         const child = spawn(process.execPath, invocation, {
           env: { ...process.env, [AUTHORIZED_MUTATION_ENV]: "1" },
@@ -93,14 +144,26 @@ export function startCommandAuthorityServer(
         child.stdout.on("data", (chunk) => { stdout += String(chunk); });
         child.stderr.on("data", (chunk) => { stderr += String(chunk); });
         const code = await new Promise<number>((resolve) => {
-          child.on("error", (error) => { stderr += error.message; resolve(1); });
-          child.on("close", (value) => resolve(value ?? 1));
+          let settled = false;
+          const finish = (value: number) => { if (settled) return; settled = true; clearTimeout(timer); resolve(value); };
+          const timer = setTimeout(() => {
+            child.kill("SIGKILL");
+            stderr += `\nController command exceeded ${MAX_CHILD_MS}ms and was killed`;
+            finish(1);
+          }, MAX_CHILD_MS);
+          child.on("error", (error) => { stderr += error.message; finish(1); });
+          child.on("close", (value) => finish(value ?? 1));
         });
         socket.end(JSON.stringify({ code, stdout, stderr }));
       });
     });
   });
-  server.listen(socketPath);
+  server.listen(socketPath, () => {
+    // 0600 so only this user can hand the controller a command. The socket was
+    // created with the default umask, and anything that can write to it runs
+    // with mutation authority.
+    try { chmodSync(socketPath, 0o600); } catch { /* best effort; the parent dir is already user-owned */ }
+  });
   server.on("close", () => rmSync(socketPath, { force: true }));
   return server;
 }

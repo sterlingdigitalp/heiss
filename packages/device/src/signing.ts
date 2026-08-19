@@ -51,7 +51,9 @@ export function saveSigningConfig(
   configPath = join(homedir(), ".heiss", "signing.json"),
 ): void {
   mkdirSync(dirname(configPath), { recursive: true });
-  writeFileSync(configPath, JSON.stringify(config, null, 2));
+  // 0600: signing.json records the App Store Connect key id, issuer and the
+  // path to the .p8 private key. Not the key itself, but enough to locate it.
+  writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
 }
 
 /** Prefer ASC when key env is set; else Xcode team. */

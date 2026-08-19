@@ -255,6 +255,7 @@ export class JsonStore {
     this.locks = new ResourceLocks();
     this.locks.restore(locks);
     pruneActivity(this.state);
+    pruneSessions(this.state);
   }
 
   save(): void {
@@ -272,7 +273,11 @@ export class JsonStore {
     mkdirSync(dirname(this.path), { recursive: true });
     const temp = `${this.path}.tmp-${process.pid}-${Date.now()}`;
     try {
-      writeFileSync(temp, JSON.stringify(this.state, null, 2), "utf8");
+      // 0600: farm.json holds license keys, password hashes and proxy
+      // passwords. It was written world-readable, which on a shared or backed-up
+      // Mac hands those to any local account. Set on the temp file so the
+      // rename is atomic and the permissive window never exists.
+      writeFileSync(temp, JSON.stringify(this.state, null, 2), { encoding: "utf8", mode: 0o600 });
       renameSync(temp, this.path);
       this.loadedRevision = this.state.revision;
     } finally {
@@ -315,6 +320,37 @@ export function pruneActivity(state: FarmState, now: string = new Date().toISOSt
     return !Number.isFinite(at) || at >= cutoff;
   });
   return before - state.activity.length;
+}
+
+/**
+ * Terminal sessions are history; only live ones are state.
+ *
+ * Activity was pruned at 45 days but sessions never were, so farm.json grew
+ * without bound — 278 sessions and 6,881 activity rows by 2026-08-19, a 4.4 MB
+ * document that the orchestrator rewrites in full after EVERY device step and
+ * scans twice per step for daily caps. The cost lands directly on step latency.
+ *
+ * Sessions still checkpointed or running are never pruned regardless of age:
+ * they are resumable work, not history. A session still holding a lock is also
+ * kept, so pruning can never orphan a device.
+ */
+export function pruneSessions(state: FarmState, now: string = new Date().toISOString()): number {
+  const cutoff = new Date(now).getTime() - ACTIVITY_RETENTION_DAYS * 86_400_000;
+  if (!Number.isFinite(cutoff)) return 0;
+  const held = new Set<string>([
+    ...Object.values(state.locks?.devices ?? {}),
+    ...Object.values(state.locks?.content ?? {}),
+  ]);
+  const terminal = new Set(["completed", "failed", "retired", "interrupted"]);
+  const before = state.sessions.length;
+  state.sessions = state.sessions.filter((session) => {
+    if (!terminal.has(session.status)) return true;
+    if (held.has(session.id)) return true;
+    const at = new Date(session.updatedAt).getTime();
+    // Keep anything undateable rather than silently dropping it.
+    return !Number.isFinite(at) || at >= cutoff;
+  });
+  return before - state.sessions.length;
 }
 
 function localDay(iso: string, timeZone: string): string {
