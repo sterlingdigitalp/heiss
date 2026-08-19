@@ -536,7 +536,23 @@ export class FarmOrchestrator {
   ): Promise<{ session: FarmSession; interrupted: boolean }> {
     const account = this.store.state.accounts.find((a) => a.id === session.accountId);
     if (!account) {
-      throw new Error(`Account ${session.accountId} missing for session ${session.id}`);
+      // Retire the orphan instead of throwing. The resume loop has no try/catch,
+      // so one checkpoint whose account was deleted aborted the ENTIRE tick —
+      // every other device included — and stayed that way until someone edited
+      // farm.json. The comment above runOnce already argues that a single
+      // account's failure must not stop the farm; this path did not honour it.
+      const orphaned: FarmSession = {
+        ...session,
+        status: "failed",
+        requiresAttention: false,
+        updatedAt: new Date().toISOString(),
+      };
+      this.replaceSession(orphaned);
+      this.store.locks.releaseDevice(session.deviceId, session.id);
+      if (session.queueItemId) this.store.locks.releaseContent(session.queueItemId, session.id);
+      activity.push(`retired session ${session.id}: account ${session.accountId} no longer exists`);
+      this.store.save();
+      return { session: orphaned, interrupted: false };
     }
     const deviceHolder = this.store.locks.holderOfDevice(account.deviceId);
     const contentHolder = session.queueItemId

@@ -212,11 +212,21 @@ function cloudCredentials(store: JsonStore, args: string[]) {
   return { url, license };
 }
 
+/**
+ * Every cloud call is bounded. The daemon calls this on each tick, and fetch
+ * has no default timeout — so a hung or half-open peer parked the controller
+ * until launchd's 25-minute watchdog SIGKILLed it, potentially mid-session on
+ * the phone. A cloud sync failing is harmless; a wedged tick is not.
+ */
+const CLOUD_TIMEOUT_MS = 20_000;
+const CLOUD_MEDIA_TIMEOUT_MS = 120_000;
+
 async function cloudJson(url: string, license: string, path: string, body: unknown) {
   const response = await fetch(`${url}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${license}` },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(CLOUD_TIMEOUT_MS),
   });
   const json = await response.json() as Record<string, any>;
   if (!response.ok) throw new Error(String(json.error ?? `Cloud request failed (${response.status})`));
@@ -249,7 +259,11 @@ async function syncCloudDrop(store: JsonStore, args: string[]) {
   const cloudDir = join(dirname(store.path), "cloud-drop"); mkdirSync(cloudDir, { recursive: true });
   const localRefs: string[] = [];
   for (const [index, ref] of refs.entries()) {
-    const response = await fetch(new URL(ref, url), { headers: { Authorization: `Bearer ${license}` } });
+    // Media pulls are larger than a JSON call but still must not park the tick.
+    const response = await fetch(new URL(ref, url), {
+      headers: { Authorization: `Bearer ${license}` },
+      signal: AbortSignal.timeout(CLOUD_MEDIA_TIMEOUT_MS),
+    });
     if (!response.ok) throw new Error(`Cloud media download failed (${response.status})`);
     const safe = basename(names[index] ?? `media-${index}.bin`).replace(/[^a-zA-Z0-9._-]/g, "-");
     const localPath = join(cloudDir, `${remoteItem.id}-${index}-${safe}`);
@@ -304,16 +318,24 @@ async function runCuratedEngagementOnce(
   const nowIso = opts.nowIso ?? new Date().toISOString();
   const device = store.state.devices.find((candidate) => candidate.id === account.deviceId);
   if (!device) return { ok: false, reason: "device_missing" };
-  // Engagement drives the device directly, so it must respect the same device
-  // lock sessions take. Without this, invoking it by hand while the farm is live
-  // puts two drivers on one phone — the daemon's own call is safe because it
-  // runs after sessions in the tick, but a manual run is not.
-  // Read the PERSISTED lock table, not store.locks: a freshly loaded store
-  // starts with an empty in-memory ResourceLocks, so store.locks.isDeviceLocked
-  // answers false on every new CLI invocation and the guard never fires.
-  if ((store.state.locks?.devices ?? {})[device.id]) {
+  // Engagement drives the device directly, so it must hold the same device lock
+  // sessions take — for the whole scan+engage window, not just check it once.
+  //
+  // Reading the table without acquiring only detects a device that was ALREADY
+  // busy; it cannot stop a session starting while this runs. On 2026-08-13 a
+  // manual engage collided with a daemon warmup exactly that way: two drivers
+  // on one phone, and the session that lost died with zero steps completed.
+  //
+  // (The previous comment here claimed a freshly loaded store has empty
+  // in-memory locks. It does not — load() calls locks.restore(), store.ts:256 —
+  // so the real API is safe to use and is what persists on save.)
+  const lockHolder = `curated-${randomUUID()}`;
+  try {
+    store.locks.acquireDevice(device.id, lockHolder);
+  } catch {
     return { ok: true, persona: account.handle, engaged: false, reason: "device_busy" };
   }
+  store.save();
 
   const plan = planDailyEngagement(
     store.state.curatedTargets, account.id, nowIso, store.state.settings.timeZone,
@@ -332,7 +354,9 @@ async function runCuratedEngagementOnce(
   // re-navigating. Timing out mid-action is worse than waiting — the runner
   // keeps going regardless, so a short ceiling means the tap lands unrecorded.
   const driver = new RealIosDriver(new RealUsbTransport({ commandTimeoutMs: 420_000 }));
-  await driver.connect(device.id, device.udid);
+  // connect() must be INSIDE the try: it is the most likely thing to fail
+  // (wedged CoreDevice, phone unplugged mid-run), and a throw here with the
+  // lock already held would strand the device.
   const context = {
     platform: "x" as const, handle: account.handle, displayName: account.displayName,
     loginEmail: account.loginEmail, switcherHint: account.switcherHint,
@@ -341,6 +365,7 @@ async function runCuratedEngagementOnce(
     targetHandle: target.handle,
   };
   try {
+    await driver.connect(device.id, device.udid);
     const scan = await driver.runAction(device.id, account.id, "x:target_scan", context);
     const cells = (scan.data?.cells ?? []) as Array<{ index: number; label: string }>;
     // Ages are derived against the run's own clock, not wall time at parse, so
@@ -428,6 +453,13 @@ async function runCuratedEngagementOnce(
     };
   } finally {
     await driver.disconnect(device.id).catch(() => undefined);
+    // Release even when the run threw, or a crashed engage would leave the
+    // phone locked until someone edited farm.json by hand — which is exactly
+    // the cleanup we did on 2026-08-07 and again on 08-13.
+    try {
+      store.locks.releaseDevice(device.id, lockHolder);
+      store.save();
+    } catch { /* a concurrent write owns the file; the lock is orphan-swept on load */ }
   }
 }
 

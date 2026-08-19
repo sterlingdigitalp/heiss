@@ -187,3 +187,43 @@ describe("skeptic regressions (shipped orchestrator path)", () => {
     assert.equal(store2.locks.isDeviceLocked(sess.deviceId), false);
   });
 });
+
+describe("orphaned checkpoint does not abort the tick", () => {
+  // continueSession threw when a checkpoint's account no longer existed, and
+  // the resume loop has no try/catch — so one stale row stopped EVERY device
+  // for that tick and stayed that way until farm.json was hand-edited.
+  it("retires the orphan and still runs the other accounts", async () => {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    const survivor = store.state.accounts[0]!;
+    const ghostDeviceId = store.state.devices[0]!.id;
+
+    store.state.sessions.push({
+      id: "orphan-1",
+      accountId: "account-that-no-longer-exists",
+      deviceId: ghostDeviceId,
+      kind: "warmup",
+      status: "checkpointed",
+      startedAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+      checkpoint: { stepIndex: 3, posted: false },
+      activityLog: [],
+    } as never);
+    store.save();
+
+    const orch = new FarmOrchestrator(store, new RecordingDriver());
+    const result = await orch.runOnce({
+      runnerId: "r1",
+      timeOfDay: "09:00",
+      maxSessions: 5,
+      now: "2026-08-19T14:00:00.000Z",
+    });
+
+    const orphan = store.state.sessions.find((s) => s.id === "orphan-1")!;
+    assert.equal(orphan.status, "failed", "orphan should be retired, not left checkpointed");
+    assert.equal(result.interrupted, false, "one orphan must not interrupt the tick");
+    // The device the orphan claimed must be free for real work afterwards.
+    assert.equal(store.state.locks?.devices?.[ghostDeviceId] ?? null, null);
+    assert.ok(survivor, "other accounts remain intact");
+  });
+});
