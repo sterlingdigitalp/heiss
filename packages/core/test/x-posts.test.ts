@@ -187,3 +187,78 @@ describe("author preamble on an unverified account", () => {
     assert.equal(pair.mostRecent?.matchText, "Only ever posted once here.");
   });
 });
+
+describe("a brand-new post with no engagement yet", () => {
+  // X omits zero counts rather than rendering "0", so a post published minutes
+  // ago carries a timestamp and nothing else. Requiring a non-zero metric threw
+  // away exactly the posts "engage the most recent" exists to find: on
+  // 2026-08-14 @nateherk returned no_eligible_post on every attempt and the
+  // daemon retried it nine times in half an hour.
+  const now = new Date("2026-08-19T15:00:00Z");
+
+  it("keeps a post that has a timestamp but no counts at all", () => {
+    const pair = selectXPostPair([
+      cell(0, "Nate. Verified. just shipped the thing. 4 minutes ago"),
+    ], { now });
+    assert.equal(pair.mostRecent?.matchText, "just shipped the thing.");
+    assert.equal(pair.mostRecent?.likes, 0);
+  });
+
+  it("prefers the brand-new post over an older one that has counts", () => {
+    const pair = selectXPostPair([
+      cell(0, "Nate. Verified. brand new. 4 minutes ago"),
+      cell(1, "Nate. Verified. yesterday's post. 1 day ago. 3 Replies. 40 Likes. 2K Views"),
+    ], { now });
+    assert.equal(pair.mostRecent?.matchText, "brand new.");
+    assert.equal(pair.preceding?.matchText, "yesterday's post.");
+  });
+
+  it("still rejects chrome, which has no timestamp of any kind", () => {
+    const pair = selectXPostPair([
+      cell(0, "Posts"), cell(1, "Replies"), cell(2, "Show more"), cell(3, ""),
+    ], { now });
+    assert.equal(pair.posts.length, 0);
+  });
+});
+
+describe("ordering by age rather than row position", () => {
+  const now = new Date("2026-08-19T15:00:00Z");
+
+  it("picks the newest even when the rows arrive out of order", () => {
+    const pair = selectXPostPair([
+      cell(0, "Nate. Verified. six hours old. 6 hours ago. 2 Likes"),
+      cell(1, "Nate. Verified. ten minutes old. 10 minutes ago"),
+      cell(2, "Nate. Verified. two days old. 2 days ago. 9 Likes"),
+    ], { now });
+    assert.equal(pair.mostRecent?.matchText, "ten minutes old.");
+    assert.equal(pair.preceding?.matchText, "six hours old.");
+  });
+
+  it("keeps X's own order when ages tie, since the sort is stable", () => {
+    const pair = selectXPostPair([
+      cell(0, "Nate. Verified. first of the pair. 3 hours ago. 1 Like"),
+      cell(1, "Nate. Verified. second of the pair. 3 hours ago. 1 Like"),
+    ], { now });
+    assert.equal(pair.mostRecent?.matchText, "first of the pair.");
+  });
+
+  it("never lets a same-day absolute date outrank a relative-aged post", () => {
+    // An absolute date has no clock time; without a floor it computes as 0
+    // hours and would masquerade as newer than a post X still renders as "2
+    // hours ago". X only falls back to absolute once a post is not recent.
+    const pair = selectXPostPair([
+      cell(0, "Nate. Verified. dated today. August 19, 2026. 5 Likes"),
+      cell(1, "Nate. Verified. actually newest. 2 hours ago"),
+    ], { now });
+    assert.equal(pair.mostRecent?.matchText, "actually newest.");
+  });
+
+  it("still sorts pinned out regardless of its age", () => {
+    const pair = selectXPostPair([
+      cell(0, "Pinned. Nate. Verified. pinned and ancient. 2 years ago. 900 Likes"),
+      cell(1, "Nate. Verified. the real newest. 5 minutes ago"),
+    ], { now });
+    assert.equal(pair.pinned?.matchText, "pinned and ancient.");
+    assert.equal(pair.mostRecent?.matchText, "the real newest.");
+  });
+});

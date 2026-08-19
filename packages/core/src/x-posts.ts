@@ -69,10 +69,13 @@ function absoluteAge(label: string, now: Date): { ageHours: number; index: numbe
   const month = MONTHS.indexOf(last[1]!.toLowerCase());
   const posted = new Date(Date.UTC(Number(last[3]), month, Number(last[2]), 12));
   if (Number.isNaN(posted.getTime())) return null;
-  // Absolute dates carry no clock time, so this is accurate to within a day —
-  // fine for ordering and for the "is it stale" question. The 6-hour freshness
-  // rule only ever applies to posts new enough to still show a relative age.
-  return { ageHours: Math.max(0, (now.getTime() - posted.getTime()) / 3_600_000), index: last.index! };
+  // Absolute dates carry no clock time, so this is accurate to within a day.
+  // The floor matters now that posts are ordered by age: X only falls back to
+  // an absolute date once a post is no longer recent, so an absolute-dated post
+  // must never sort ahead of one X still renders relatively. Without the floor
+  // a same-day date computes as 0 hours and would masquerade as the newest post.
+  const raw = (now.getTime() - posted.getTime()) / 3_600_000;
+  return { ageHours: Math.max(24, raw), index: last.index! };
 }
 
 /** Counts read "10 Replies", "1 Reply", "25K Views"; absent means zero. */
@@ -99,11 +102,17 @@ export function parseXTimelineCell(
   const likes = metric(label, "Like", "Likes");
   const replies = metric(label, "Reply", "Replies");
   const reposts = metric(label, "Repost", "Reposts");
-  // A real post always carries a timestamp — relative OR absolute — plus at
-  // least one metric. Chrome rows ("Posts", "Replies", "Show more") carry
-  // neither, which is what keeps the tab strip out of the results.
+  // A timestamp — relative OR absolute — is what makes a row a post. Chrome
+  // rows ("Posts", "Replies", "Show more", the tab strip) carry none, which is
+  // what keeps them out of the results.
+  //
+  // Metrics are deliberately NOT required. X omits zero counts rather than
+  // rendering "0", so a post published minutes ago has a timestamp and nothing
+  // else — and requiring a non-zero metric discarded exactly the posts the
+  // "engage the most recent" rule exists to find. On 2026-08-14 that made
+  // @nateherk return no_eligible_post on every attempt, which the daemon then
+  // retried nine times in half an hour.
   if (!ageMatch && !absolute) return null;
-  if (views === 0 && likes === 0 && replies === 0 && reposts === 0) return null;
 
   const ageHours = ageMatch
     ? Number(ageMatch[1]) * (AGE_HOURS[ageMatch[2]!.toLowerCase()] ?? 1)
@@ -222,7 +231,17 @@ export function selectXPostPair(cells: XTimelineCell[], opts: { now?: Date } = {
     .map((row) => parseXTimelineCell(row.cell, { ...opts, authorPrefix }))
     .filter((post): post is ParsedXPost => post !== null);
   const pinned = parsed.find((post) => post.isPinned) ?? null;
-  const posts = parsed.filter((post) => !post.isPinned);
+  // Order by age, not by the order the accessibility tree happened to return.
+  // X lists a profile reverse-chronologically so the two usually agree, and the
+  // sort is stable so equal ages keep X's own order — but "most recent" is the
+  // rule engagement actually depends on, and it should be derived from the
+  // timestamp we already parse rather than assumed from row position.
+  const posts = parsed
+    .filter((post) => !post.isPinned)
+    .sort((left, right) =>
+      // An unknown age sorts LAST, never first: a row we could not date must
+      // not be able to claim it is the most recent post.
+      (left.ageHours ?? Number.POSITIVE_INFINITY) - (right.ageHours ?? Number.POSITIVE_INFINITY));
   return {
     mostRecent: posts[0] ?? null,
     preceding: posts[1] ?? null,
