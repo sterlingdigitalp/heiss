@@ -130,7 +130,7 @@ Farm:
   heiss-farm remove-slot <slotId>
   heiss-farm warmup-schedule list | rebalance | set <accountId> <HH:mm> [--jitter N] | enable <accountId> | disable <accountId> | remove <accountId>
   heiss-farm targets list [--account <accountId>]
-  heiss-farm targets import [--from ~/FEGOS] [--apply]   # dry run unless --apply
+  heiss-farm targets import [--from ~/fleet-config] [--apply]   # dry run unless --apply
   heiss-farm targets schedule <xAccountId> <HH:mm> [--jitter N]   # when this persona engages
   heiss-farm targets add <accountId> @handle [--note "why this person"]
   heiss-farm targets remove <targetId>
@@ -1651,23 +1651,31 @@ async function main(): Promise<void> {
     return;
   }
 
-  // ── Import the source graph from FEGOS ─────────────────
-  // FEGOS is the system of record: research happens there, Heiss consumes the
-  // result. Dry run unless --apply, because this replaces most of the list.
+  // ── Import the source graph from fleet-config ─────────
+  // The fleet's canonical config lives in ~/fleet-config (fleet.json +
+  // watch_lists.json). This used to read from FEGOS (data/config/...);
+  // FEGOS is retired, so the default now points at fleet-config. The
+  // legacy {root}/data/config layout is still accepted via --from for
+  // archived FEGOS. Dry run unless --apply, because this replaces most
+  // of the list.
   if (cmd === "targets" && args[1] === "import") {
     const store = openStore(args);
-    const root = (getArg(args, "--from") ?? `${homedir()}/FEGOS`).replace(/\/$/, "");
-    const configDir = `${root}/data/config`;
+    const root = (getArg(args, "--from") ?? `${homedir()}/fleet-config`).replace(/\/$/, "");
+    // fleet-config is flat; the retired FEGOS layout nested under data/config.
+    const configDir = existsSync(`${root}/data/config`) ? `${root}/data/config` : root;
     const readJson = (relative: string): unknown => {
       const path = `${configDir}/${relative}`;
-      if (!existsSync(path)) throw new Error(`FEGOS config not found: ${path}`);
+      if (!existsSync(path)) throw new Error(`fleet config not found: ${path}`);
       return JSON.parse(readFileSync(path, "utf8"));
     };
     const fleet = (readJson("fleet.json") as { accounts: Record<string, FegosFleetAccount> }).accounts;
     // Cohort files carry the same shape; a persona lives in exactly one of them.
+    // cohort2 is optional — fleet-config does not ship it.
     const watchLists = [
       ...(readJson("watch_lists.json") as { watch_lists: FegosWatchList[] }).watch_lists,
-      ...(readJson("cohort2/watch_lists.json") as { watch_lists: FegosWatchList[] }).watch_lists,
+      ...(existsSync(`${configDir}/cohort2/watch_lists.json`)
+        ? (readJson("cohort2/watch_lists.json") as { watch_lists: FegosWatchList[] }).watch_lists
+        : []),
     ];
     const plan = planFegosImport({
       fleet,
@@ -1682,7 +1690,7 @@ async function main(): Promise<void> {
       applyFegosImport(store.state.curatedTargets, plan, new Date().toISOString(), randomUUID);
       store.pushActivity({
         kind: "curated_targets_imported",
-        message: `Imported FEGOS source graph: ${plan.personas
+        message: `Imported fleet source graph: ${plan.personas
           .filter((persona) => !persona.problem)
           .map((persona) => `${persona.accountHandle}(${persona.changes.filter((c) => c.kind === "add").length}+/${persona.changes.filter((c) => c.kind === "retire").length}-)`)
           .join(" ")}`,

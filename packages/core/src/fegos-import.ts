@@ -3,17 +3,20 @@ import { MAX_CURATED_TARGETS_PER_ACCOUNT } from "./types.js";
 import { curatedTargetsFor, normalizeTargetHandle, targetHandleKey } from "./targets.js";
 
 /**
- * Import curated targets from FEGOS, which is the system of record for the
- * source graph. Research happens there; Heiss consumes the result.
+ * Import curated targets from the fleet's canonical config (~/fleet-config),
+ * which is the system of record for the source graph. Research happens there
+ * (Hermes missions); Heiss consumes the result. FEGOS was retired; the
+ * import format is unchanged.
  *
- * The mapping is deliberately narrow: FEGOS ranks ten primaries per persona,
- * Heiss engages one target per persona per day, and the cap is seven — so the
- * top seven by priority become the week's rotation and the rest are ignored.
+ * The mapping is deliberately narrow: the config ranks ten primaries per
+ * persona, Heiss engages one target per persona per day, and the cap is
+ * seven — so the top seven by priority become the week's rotation and the
+ * rest are ignored.
  * Raising the cap would slow every target's turn, so the cap wins and the
  * ranking decides who makes the cut.
  *
  * This is pure: no filesystem, no clock beyond what the caller passes. The CLI
- * reads FEGOS's JSON and applies the plan; everything decided here is testable.
+ * reads the JSON and applies the plan; everything decided here is testable.
  */
 
 export interface FegosWatchListAccount {
