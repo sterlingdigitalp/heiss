@@ -79,7 +79,6 @@ export function emptyState(): FarmState {
       accountDailyActionCap: 25,
       platformOrder: ["x", "tiktok", "instagram", "youtube"],
       platformScheduleVersion: 2,
-      requireHumanEngagement: true,
       deviceStates: {},
       notificationKeys: {},
       maintenance: { mode: "running" },
@@ -134,7 +133,6 @@ export class JsonStore {
     this.state.settings.accountDailyActionCap ??= 25;
     this.state.settings.platformOrder ??= ["x", "tiktok", "instagram", "youtube"];
     this.state.settings.platformScheduleVersion ??= 0;
-    this.state.settings.requireHumanEngagement ??= true;
     this.state.settings.deviceStates ??= {};
     this.state.settings.notificationKeys ??= {};
     this.state.settings.maintenance ??= { mode: "running" };

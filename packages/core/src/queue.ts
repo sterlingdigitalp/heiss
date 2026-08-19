@@ -164,7 +164,3 @@ export function ensureNotDoublePost(item: QueueItem): void {
     throw new QueueError(`Queue item ${item.id} already posted to ${item.assignedAccountId}`);
   }
 }
-
-export function isClaimable(status: QueueItemStatus): boolean {
-  return status === "queued";
-}

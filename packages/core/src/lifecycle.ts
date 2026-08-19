@@ -39,15 +39,6 @@ export function supportsAutoPost(platform: Platform): boolean {
   return POSTING_PLATFORMS.includes(platform);
 }
 
-/** Daily warmup script actions (human-like). */
-export function defaultWarmupActions(searchTerms: string[] = []): WarmupAction[] {
-  const actions: WarmupAction[] = ["scroll", "like", "follow", "search"];
-  if (searchTerms.length === 0) {
-    return actions;
-  }
-  return actions;
-}
-
 /**
  * Apply a completed warmup session: raise trust and advance stage.
  * Fresh → Warmed Up once any warmup completes; → Matured at threshold.

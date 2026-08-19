@@ -761,8 +761,15 @@ async function main(): Promise<void> {
     }
     print({
       ...result,
+      // Do NOT tell the operator to open "Heiss Runner". That app is a status
+      // shell whose ControlServer refuses every action; the tap engine is the
+      // XCTest target so.heiss.runner.uitests.xctrunner, which launchd starts.
+      // The Trust step is also conditional — a paid team provisions the device
+      // directly and shows nothing to trust, which sent the operator to an
+      // empty Settings screen on 2026-08-13.
       humanNext:
-        "On iPhone: Settings → General → VPN & Device Management → Trust developer. Open Heiss Runner. Then add-account.",
+        "If iOS prompts, trust the developer: Settings → General → VPN & Device Management. "
+        + "Nothing to open on the phone — the runner is launched by launchd. Then add-account.",
     });
     return;
   }
@@ -2353,8 +2360,8 @@ async function main(): Promise<void> {
       device,
       install,
       humanNext: [
-        "Trust developer certificate on the iPhone",
-        "Open Heiss Runner app",
+        "If prompted, trust the developer certificate on the iPhone",
+        "Nothing to open on the phone — launchd starts the XCTest runner",
         "Log into each social platform on the phone",
         "heiss-farm add-account <deviceId> tiktok @you",
         "heiss-farm start-warmups",

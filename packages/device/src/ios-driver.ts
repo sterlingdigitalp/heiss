@@ -98,18 +98,10 @@ export class RealIosDriver implements DeviceDriver {
       return this.transport.runScriptAction(udid, action, context);
     }
 
-    if (action.includes("scroll") && this.transport.swipe) {
-      await this.transport.swipe(udid, 200, 700, 200, 220);
-      return { ok: true, detail: `ios swipe scroll on ${udid.slice(0, 8)}` };
-    }
-    if (this.transport.tap) {
-      const point = coordinateForAction(action);
-      await this.transport.tap(udid, point.x, point.y);
-      return {
-        ok: true,
-        detail: `ios tap (${point.x},${point.y}) for ${action} on ${udid.slice(0, 8)}`,
-      };
-    }
+    // No coordinate fallback. RealUsbTransport always implements
+    // runScriptAction, so the old swipe/tap path with hardcoded portrait points
+    // was unreachable — and blind coordinate taps are how X's Grok panel got
+    // opened on 2026-07-30. A transport that cannot script must fail loudly.
     throw new Error(
       `RealIosDriver: transport cannot perform ${action}. Install HeissRunner on the device.`,
     );
@@ -162,17 +154,3 @@ export class RealIosDriver implements DeviceDriver {
   }
 }
 
-/** Rough human-like coordinates for common social UI regions (portrait points). */
-function coordinateForAction(action: string): { x: number; y: number } {
-  if (action.includes("like")) return { x: 340, y: 520 };
-  if (action.includes("follow")) return { x: 340, y: 480 };
-  if (action.includes("search")) return { x: 200, y: 80 };
-  if (action.includes("publish")) return { x: 360, y: 100 };
-  if (action.includes("caption")) return { x: 200, y: 700 };
-  if (action.includes("upload") || action.includes("music"))
-    return { x: 200, y: 750 };
-  return { x: 195, y: 420 };
-}
-
-/** @deprecated Use RealIosDriver — simulator path removed from production. */
-export { RealIosDriver as ProductionIosDriver };

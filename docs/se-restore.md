@@ -15,7 +15,12 @@ Budget ~45–60 minutes, most of it unattended.
 
 ## Before you start
 
-- Farm must be **paused** (`heiss-farm maintenance status` → `"mode": "active"`).
+- Farm must be **paused**: `heiss-farm maintenance enter`, then confirm
+  `heiss-farm maintenance status` shows `"mode": "active"`.
+  Note the naming is inverted and easy to get backwards: **`"running"`
+  means the farm is LIVE**, `"active"` means maintenance is active i.e.
+  paused. With a session still in flight `enter` reports `"draining"`
+  until it finishes.
 - Phone **unplugged** until Part 5.
 - Know the Apple ID password (the erase asks for it, to clear Activation Lock).
 - **Do not press Reattach in the Heiss app** at any point — it un-pauses the

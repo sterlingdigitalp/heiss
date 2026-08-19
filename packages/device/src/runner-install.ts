@@ -79,6 +79,26 @@ export async function ensureRunnerSources(repoRoot?: string): Promise<string> {
   return dest;
 }
 
+
+/**
+ * Stamp DEVELOPMENT_TEAM into every build configuration of the copied project.
+ *
+ * Anchored on PRODUCT_BUNDLE_IDENTIFIER because every signable configuration
+ * has one, and an existing team is replaced rather than duplicated so repeated
+ * installs converge instead of appending.
+ */
+function writeDevelopmentTeam(sourceDir: string, teamId: string): void {
+  const pbxproj = join(sourceDir, "HeissRunner.xcodeproj", "project.pbxproj");
+  if (!existsSync(pbxproj)) return;
+  const before = readFileSync(pbxproj, "utf8");
+  const cleaned = before.replace(/\s*DEVELOPMENT_TEAM = [^;]*;/g, "");
+  const after = cleaned.replace(
+    /(\s*)PRODUCT_BUNDLE_IDENTIFIER = /g,
+    `$1DEVELOPMENT_TEAM = ${teamId};$1PRODUCT_BUNDLE_IDENTIFIER = `,
+  );
+  if (after !== before) writeFileSync(pbxproj, after, "utf8");
+}
+
 /**
  * Build HeissRunner.app with xcodebuild + automatic signing.
  */
@@ -90,6 +110,15 @@ export async function buildRunner(
   const plan = planSigning(signing);
   const derived = join(runnerWorkDir(), "DerivedData");
   mkdirSync(derived, { recursive: true });
+  // The copied project carries no DEVELOPMENT_TEAM (the repo one has none), and
+  // xcodebuild is fine because the team is passed on the command line. Xcode is
+  // NOT: opening the generated project shows signing unset, so the operator
+  // selects a team by hand and the next `runner install` silently discards it —
+  // it re-copies the repo project over the top. Seen 2026-08-04 and again
+  // 2026-08-19. Writing it in keeps the GUI honest and, because it is sourced
+  // from the signing plan, it can never drift from what the CLI actually builds
+  // with.
+  if (plan.teamId) writeDevelopmentTeam(sourceDir, plan.teamId);
 
   // Prefer xcodeproj; if only project.yml, try xcodegen when available
   let projectArg: string[] = [];
@@ -102,9 +131,15 @@ export async function buildRunner(
   } else if (existsSync(join(sourceDir, "project.yml"))) {
     try {
       await execFileAsync("xcodegen", ["generate"], { cwd: sourceDir });
-    } catch {
-      // generate minimal xcodeproj via swift package style fallback
-      await generateMinimalXcodeproj(sourceDir, plan.bundleId);
+    } catch (error) {
+      // Fail rather than fabricate. The old fallback generated a project whose
+      // app was a gesture stub with no UITests — it built and installed
+      // cleanly and then could not automate anything, which is a far worse
+      // outcome than a loud error at install time.
+      throw new Error(
+        `xcodegen failed for ${sourceDir} and there is no HeissRunner.xcodeproj to fall back to: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     projectArg = [
       "-project",
@@ -113,7 +148,10 @@ export async function buildRunner(
       RUNNER_APP_NAME,
     ];
   } else {
-    await generateMinimalXcodeproj(sourceDir, plan.bundleId);
+    throw new Error(
+      `No HeissRunner.xcodeproj, .xcworkspace or project.yml under ${sourceDir}. `
+      + "Ensure ios/HeissRunner is present in the repo; a generated stub cannot automate.",
+    );
     projectArg = [
       "-project",
       join(sourceDir, "HeissRunner.xcodeproj"),
@@ -531,122 +569,8 @@ export function isRunnerInstalled(udid: string): boolean {
   return Boolean(records[udid]);
 }
 
-/**
- * Generate a minimal Xcode project when xcodegen is unavailable.
- * Uses a pbxproj template for a single-target iOS app.
- */
-async function generateMinimalXcodeproj(
-  sourceDir: string,
-  bundleId: string,
-): Promise<void> {
-  const projDir = join(sourceDir, "HeissRunner.xcodeproj");
-  mkdirSync(projDir, { recursive: true });
-  // Ensure sources exist
-  const appDir = join(sourceDir, "Sources");
-  mkdirSync(appDir, { recursive: true });
-  if (!existsSync(join(appDir, "App.swift"))) {
-    writeFileSync(join(appDir, "App.swift"), SWIFT_APP);
-  }
-  if (!existsSync(join(appDir, "ControlServer.swift"))) {
-    writeFileSync(join(appDir, "ControlServer.swift"), SWIFT_CONTROL);
-  }
-  if (!existsSync(join(appDir, "Info.plist"))) {
-    writeFileSync(join(appDir, "Info.plist"), INFO_PLIST(bundleId));
-  }
-  writeFileSync(join(projDir, "project.pbxproj"), PBXPROJ(bundleId));
-  // shared scheme
-  const schemeDir = join(projDir, "xcshareddata", "xcschemes");
-  mkdirSync(schemeDir, { recursive: true });
-  writeFileSync(join(schemeDir, "HeissRunner.xcscheme"), SCHEME);
-}
 
-const SWIFT_APP = `import SwiftUI
 
-@main
-struct HeissRunnerApp: App {
-    @StateObject private var server = ControlServer.shared
-    var body: some Scene {
-        WindowGroup {
-            VStack(spacing: 16) {
-                Text("Heiss Runner").font(.largeTitle.bold())
-                Text(server.statusText).font(.body).foregroundStyle(.secondary)
-                Text("The Mac launches the signed XCTest automation runner.")
-                    .font(.caption).multilineTextAlignment(.center).padding()
-            }
-            .padding()
-            .onAppear { server.start() }
-        }
-    }
-}
-`;
-
-const SWIFT_CONTROL = `import Foundation
-import UIKit
-
-/// Local control channel: watches Documents/inbox for command JSON from the Mac (USB file drop).
-final class ControlServer: ObservableObject {
-    static let shared = ControlServer()
-    @Published var statusText = "Starting…"
-    private var timer: Timer?
-
-    func start() {
-        statusText = "Ready — waiting for Mac commands"
-        let inbox = Self.inboxURL()
-        try? FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
-        timer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
-            self?.drainInbox()
-        }
-    }
-
-    private func drainInbox() {
-        let inbox = Self.inboxURL()
-        guard let files = try? FileManager.default.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil) else { return }
-        for file in files where file.pathExtension == "json" {
-            guard let data = try? Data(contentsOf: file),
-                  let cmd = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                try? FileManager.default.removeItem(at: file)
-                continue
-            }
-            let action = cmd["action"] as? String ?? "unknown"
-            let result = Self.perform(action: action, cmd: cmd)
-            let out = Self.outboxURL().appendingPathComponent(file.lastPathComponent)
-            try? FileManager.default.createDirectory(at: Self.outboxURL(), withIntermediateDirectories: true)
-            if let outData = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted]) {
-                try? outData.write(to: out)
-            }
-            try? FileManager.default.removeItem(at: file)
-            DispatchQueue.main.async {
-                self.statusText = "Last: \\(action) → \\(result["detail"] as? String ?? "")"
-            }
-        }
-    }
-
-    static func perform(action: String, cmd: [String: Any]) -> [String: Any] {
-        // Human-like gestures via coordinate taps when host supplies points.
-        // Real social-app navigation uses on-device UI; never unofficial platform APIs.
-        if action.contains("scroll") || action.contains("swipe") {
-            return ["ok": false, "executed": false, "detail": "XCTest automation runner required for \\(action)"]
-        }
-        if action.contains("tap") || action.contains("like") || action.contains("follow")
-            || action.contains("search") || action.contains("post") || action.contains("warmup") {
-            return ["ok": false, "executed": false, "detail": "XCTest automation runner required for \\(action)"]
-        }
-        if action == "ping" {
-            return ["ok": true, "detail": "pong", "ts": ISO8601DateFormatter().string(from: Date())]
-        }
-        return ["ok": true, "detail": "ack \\(action)"]
-    }
-
-    static func inboxURL() -> URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("inbox", isDirectory: true)
-    }
-    static func outboxURL() -> URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("outbox", isDirectory: true)
-    }
-}
-`;
 
 function INFO_PLIST(bundleId: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?>

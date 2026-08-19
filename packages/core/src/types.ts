@@ -338,7 +338,6 @@ export interface FarmSettings {
   /** One-time migration marker for platform-major default warmup times. */
   platformScheduleVersion: number;
   /** Likes/follows and other engagement are omitted unless a human enables them. */
-  requireHumanEngagement: boolean;
   /** Last observed state is persisted so disconnect alerts fire once per transition. */
   deviceStates: Record<string, "online" | "offline">;
   /** Notification fingerprints already delivered by the persistent controller. */
