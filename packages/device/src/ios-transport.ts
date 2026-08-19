@@ -36,6 +36,22 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Ceiling for a single speculative poll copy.
+ *
+ * Outbox and journal reads run in a loop against a file that usually does not
+ * exist yet, and both call sites swallow the error and poll again — so timing
+ * out early costs nothing and simply means "not ready".
+ *
+ * These used to inherit commandTimeoutMs, which curated engagement sets to
+ * SEVEN MINUTES for the whole action. One wedged `devicectl copy` therefore
+ * blocked the poll loop for seven minutes while the runner may already have
+ * finished, against a 25-minute tick watchdog. Capping the copy — not the
+ * action — keeps a stuck CoreDevice from consuming the tick, and incidentally
+ * throttles polling during a wedge instead of hammering it every 400ms.
+ */
+const POLL_COPY_TIMEOUT_MS = 20_000;
+
 export interface RealUsbTransportOptions {
   /** App group container path pattern — uses AFC/devicectl copy when available */
   bundleId?: string;
@@ -332,7 +348,7 @@ export class RealUsbTransport implements IosTransport {
       if (remoteJournal && localJournal && this.onProgress && Date.now() >= nextJournalPoll) {
         nextJournalPoll = Date.now() + 5_000;
         try {
-          await this.copyFromDevice(udid, remoteJournal, localJournal);
+          await this.copyFromDevice(udid, remoteJournal, localJournal, POLL_COPY_TIMEOUT_MS);
           const progress = JSON.parse(readFileSync(localJournal, "utf8")) as Record<string, unknown>;
           if (progress.commandGeneration !== id) continue;
           const completed = Number(progress.completedSteps ?? -1);
@@ -343,7 +359,7 @@ export class RealUsbTransport implements IosTransport {
         } catch { /* journal is created only after account verification */ }
       }
       try {
-        await this.copyFromDevice(udid, remoteOut, localOut);
+        await this.copyFromDevice(udid, remoteOut, localOut, POLL_COPY_TIMEOUT_MS);
         if (existsSync(localOut)) {
           const result = JSON.parse(readFileSync(localOut, "utf8")) as Record<
             string,
@@ -390,8 +406,9 @@ export class RealUsbTransport implements IosTransport {
     udid: string,
     remotePath: string,
     localPath: string,
+    timeoutMs?: number,
   ): Promise<void> {
-    return this.copyWithTimeout("from", udid, remotePath, localPath);
+    return this.copyWithTimeout("from", udid, remotePath, localPath, timeoutMs);
   }
 
   private copyWithTimeout(
@@ -399,6 +416,7 @@ export class RealUsbTransport implements IosTransport {
     udid: string,
     source: string,
     destination: string,
+    timeoutMs: number = this.commandTimeoutMs,
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       // devicectl device copy to
@@ -432,8 +450,8 @@ export class RealUsbTransport implements IosTransport {
       };
       const timer = setTimeout(() => {
         child.kill("SIGKILL");
-        finish(new Error(`copy ${direction} device timed out after ${this.commandTimeoutMs}ms`));
-      }, this.commandTimeoutMs);
+        finish(new Error(`copy ${direction} device timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
       child.stderr.on("data", (d) => {
         stderr += String(d);
       });
