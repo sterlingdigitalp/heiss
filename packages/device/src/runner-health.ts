@@ -12,6 +12,12 @@ import { RUNNER_BUILD, RUNNER_PROTOCOL_VERSION } from "@heiss/core";
 import { listUsbIphones } from "./usb.js";
 import { withRunnerBuildLock } from "./runner-lock.js";
 import {
+  diagnoseRunnerFailure,
+  runnerFailureEvidence,
+  type RunnerDiagnosis,
+  type RunnerFailureCause,
+} from "./runner-diagnosis.js";
+import {
   automationRunnerLabel,
   downloadBuildInstallRunner,
   launchAutomationRunner,
@@ -80,11 +86,13 @@ export interface RunnerRepairResult {
   detail: string;
 }
 
-export type DeviceSupervisorAction = RunnerRepairAction | "coredevice_restart" | "restart_deferred" | "unlock_required" | "offline";
+export type DeviceSupervisorAction = RunnerRepairAction | "coredevice_restart" | "restart_deferred" | "unlock_required" | "operator_required" | "offline";
 
 export interface DeviceSupervisorResult {
   ok: boolean;
   action: DeviceSupervisorAction;
+  /** Named failure cause, when the evidence matched a known one. */
+  cause?: RunnerFailureCause;
   checks: {
     usb: boolean;
     paired: boolean;
@@ -261,14 +269,38 @@ export async function superviseDeviceHealth(
       detail: `USB, app-container command channel, and runner heartbeat are healthy (${before.detail})`,
     };
   }
-  if (/locked|passcode|unlock|developer mode/i.test(before.detail)) {
+  // A locked phone or Developer Mode off blocks every repair step, so stop
+  // before touching the runner. Other operator-only causes (storage, trust)
+  // are only judged after a repair fails: a plain relaunch can still succeed.
+  const pre = diagnoseRunnerFailure(before.detail);
+  if (pre && (pre.cause === "device_locked" || pre.cause === "developer_mode_off")) {
     return {
-      ok: false, action: "unlock_required", checks: baseChecks,
-      detail: `Unlock ${device.name} and leave it connected: ${before.detail}`,
+      ok: false, action: "unlock_required", cause: pre.cause, checks: baseChecks,
+      detail: `${device.name}: ${pre.action} (${before.detail})`,
     };
   }
 
-  const repair = await ensureAutomationRunner(udid, opts);
+  const operatorRequired = (diagnosis: RunnerDiagnosis, detail: string): DeviceSupervisorResult => ({
+    ok: false, action: "operator_required", cause: diagnosis.cause,
+    checks: { ...baseChecks, commandChannel: before.pingOk, runnerHeartbeat: false, protocolCompatible: before.protocolCompatible },
+    detail: `${device.name}: ${diagnosis.action} (${firstLine(detail)})`,
+  });
+
+  let repair: RunnerRepairResult;
+  try {
+    repair = await ensureAutomationRunner(udid, opts);
+  } catch (error) {
+    // A thrown repair keeps propagating as before (including RunnerBusyError,
+    // which must not lead to a CoreDevice restart) unless it names a cause
+    // only the operator can fix.
+    const message = error instanceof Error ? error.message : String(error);
+    const diagnosis = diagnoseRunnerFailure(runnerFailureEvidence(message));
+    if (diagnosis?.needsHuman) return operatorRequired(diagnosis, message);
+    throw error;
+  }
+  const repairDiagnosis = repair.ok ? undefined : diagnoseRunnerFailure(runnerFailureEvidence(repair.detail));
+  // Restarting CoreDevice cannot trust a certificate or free storage.
+  if (repairDiagnosis?.needsHuman) return operatorRequired(repairDiagnosis, repair.detail);
   if (repair.ok) {
     const afterRepair = await checkAutomationRunner(udid, opts);
     if (afterRepair.healthy) {
@@ -296,12 +328,21 @@ export async function superviseDeviceHealth(
     detail: error instanceof Error ? error.message : String(error),
   }));
   const final = await checkAutomationRunner(udid, opts);
+  const finalDiagnosis = final.healthy
+    ? undefined
+    : diagnoseRunnerFailure(runnerFailureEvidence(finalRepair.detail, final.detail)) ?? repairDiagnosis;
   return {
     ok: final.healthy,
     action: "coredevice_restart",
+    cause: finalDiagnosis?.cause,
     checks: { ...baseChecks, commandChannel: final.pingOk, runnerHeartbeat: final.healthy, protocolCompatible: final.protocolCompatible },
     detail: final.healthy
       ? `CoreDevice and runner recovered (${finalRepair.detail})`
-      : `CoreDevice restart exhausted; user intervention required: ${final.detail}`,
+      : `CoreDevice restart exhausted; user intervention required: ${finalDiagnosis ? `${finalDiagnosis.action} ` : ""}${final.detail}`,
   };
+}
+
+function firstLine(text: string): string {
+  const line = text.split("\n").find((candidate) => candidate.trim()) ?? text;
+  return line.length > 240 ? `${line.slice(0, 240)}…` : line;
 }

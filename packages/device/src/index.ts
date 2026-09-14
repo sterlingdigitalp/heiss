@@ -45,6 +45,12 @@ export {
   type RunnerLockRecord,
 } from "./runner-lock.js";
 export {
+  diagnoseRunnerFailure,
+  runnerFailureEvidence,
+  type RunnerDiagnosis,
+  type RunnerFailureCause,
+} from "./runner-diagnosis.js";
+export {
   checkAutomationRunner,
   ensureAutomationRunner,
   superviseDeviceHealth,

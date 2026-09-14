@@ -363,6 +363,8 @@ export interface DeviceHealthRecord {
   checkedAt: string;
   ok: boolean;
   action: string;
+  /** Named runner failure cause (see @heiss/device runner-diagnosis). */
+  cause?: string;
   detail: string;
   checks: {
     usb: boolean;

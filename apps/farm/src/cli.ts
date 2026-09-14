@@ -1255,7 +1255,7 @@ async function main(): Promise<void> {
               const health = await superviseAutomationRunner(device, allowServiceRestart);
               if (health) store.state.settings.deviceHealth[device.id] = {
                 checkedAt: new Date().toISOString(), ok: health.ok, action: health.action,
-                detail: health.detail, checks: health.checks,
+                cause: health.cause, detail: health.detail, checks: health.checks,
               };
             }
           }
