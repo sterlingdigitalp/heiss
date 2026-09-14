@@ -337,6 +337,9 @@ export interface FarmSettings {
   platformOrder: Platform[];
   /** One-time migration marker for platform-major default warmup times. */
   platformScheduleVersion: number;
+  /** One-time marker: legacy accounts were backfilled with a warmup schedule
+   *  and X posting slot. Once set, removed schedules stay removed. */
+  scheduleBackfillVersion: number;
   /** Likes/follows and other engagement are omitted unless a human enables them. */
   /** Last observed state is persisted so disconnect alerts fire once per transition. */
   deviceStates: Record<string, "online" | "offline">;

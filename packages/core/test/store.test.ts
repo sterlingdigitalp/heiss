@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { JsonStore, StoreConflictError, emptyState, pruneActivity, pruneSessions } from "../src/index.js";
@@ -89,5 +89,38 @@ describe("session pruning", () => {
   it("keeps a session with an unparseable timestamp rather than dropping it", () => {
     const state = { sessions: [session({ id: "weird", updatedAt: "not-a-date" })], activity: [], locks: { devices: {}, content: {} } };
     assert.equal(pruneSessions(state as never, now), 0);
+  });
+});
+
+describe("legacy schedule backfill", () => {
+  const legacyFarm = () => {
+    const path = join(mkdtempSync(join(tmpdir(), "heiss-backfill-")), "farm.json");
+    const state = emptyState() as ReturnType<typeof emptyState> & { settings: { scheduleBackfillVersion?: number } };
+    delete state.settings.scheduleBackfillVersion;
+    state.accounts.push({
+      id: "x1", deviceId: "d1", platform: "x", handle: "@legacy",
+      stage: "fresh", trustScore: 0, searchTerms: [], createdAt: "2026-07-01T00:00:00.000Z",
+    });
+    writeFileSync(path, JSON.stringify(state));
+    return path;
+  };
+
+  it("backfills a legacy account once", () => {
+    const store = new JsonStore(legacyFarm());
+    assert.equal(store.state.warmupSchedules.filter((s) => s.accountId === "x1").length, 1);
+    assert.equal(store.state.slots.filter((s) => s.accountId === "x1").length, 1);
+    assert.equal(store.state.settings.scheduleBackfillVersion, 1);
+  });
+
+  it("keeps removed warmup schedules and slots removed across reloads", () => {
+    const path = legacyFarm();
+    const store = new JsonStore(path);
+    store.state.warmupSchedules = store.state.warmupSchedules.filter((s) => s.accountId !== "x1");
+    store.state.slots = store.state.slots.filter((s) => s.accountId !== "x1");
+    store.save();
+
+    const reopened = new JsonStore(path);
+    assert.deepEqual(reopened.state.warmupSchedules.filter((s) => s.accountId === "x1"), []);
+    assert.deepEqual(reopened.state.slots.filter((s) => s.accountId === "x1"), []);
   });
 });

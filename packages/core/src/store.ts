@@ -89,6 +89,7 @@ export function emptyState(): FarmState {
       accountDailyActionCap: 25,
       platformOrder: ["x", "tiktok", "instagram", "youtube"],
       platformScheduleVersion: 2,
+      scheduleBackfillVersion: 1,
       deviceStates: {},
       notificationKeys: {},
       maintenance: { mode: "running" },
@@ -143,6 +144,7 @@ export class JsonStore {
     this.state.settings.accountDailyActionCap ??= 25;
     this.state.settings.platformOrder ??= ["x", "tiktok", "instagram", "youtube"];
     this.state.settings.platformScheduleVersion ??= 0;
+    this.state.settings.scheduleBackfillVersion ??= 0;
     this.state.settings.deviceStates ??= {};
     this.state.settings.notificationKeys ??= {};
     this.state.settings.maintenance ??= { mode: "running" };
@@ -177,6 +179,9 @@ export class JsonStore {
         account.engagement.likesEnabled = false;
         account.engagement.followsEnabled = false;
       }
+      // One-time legacy backfill. Running it on every load re-created any
+      // schedule the operator removed (audit 2026-09-14).
+      if (this.state.settings.scheduleBackfillVersion >= 1) continue;
       if (this.state.warmupSchedules.some((schedule) => schedule.accountId === account.id)) continue;
       const index = this.state.warmupSchedules.length;
       const minutes = 15 * 60 + 30 + index * 14;
@@ -189,10 +194,14 @@ export class JsonStore {
     // X became a posting platform after the original farms were created.
     // Give existing X accounts the same explicit morning slot as newly added
     // posting accounts; maturity and queue gates still prevent surprise posts.
-    for (const account of this.state.accounts.filter((candidate) => candidate.platform === "x")) {
-      if (!this.state.slots.some((slot) => slot.accountId === account.id)) {
-        this.state.slots.push({ id: cryptoRandom(), accountId: account.id, timeOfDay: "09:00", enabled: true });
+    if (this.state.settings.scheduleBackfillVersion < 1) {
+      for (const account of this.state.accounts.filter((candidate) => candidate.platform === "x")) {
+        if (!this.state.slots.some((slot) => slot.accountId === account.id)) {
+          this.state.slots.push({ id: cryptoRandom(), accountId: account.id, timeOfDay: "09:00", enabled: true });
+        }
       }
+      // New accounts get their slot and warmup from add-account; removals persist.
+      this.state.settings.scheduleBackfillVersion = 1;
     }
     // Migrate legacy alternating-person schedules once. Contiguous platform
     // windows keep each app open while all of its accounts are processed.
