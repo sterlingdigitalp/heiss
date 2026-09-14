@@ -25,6 +25,16 @@ import type {
 } from "./types.js";
 import type { LockSnapshot } from "./locks.js";
 import { ResourceLocks } from "./locks.js";
+import {
+  isLockStale,
+  newLockRecord,
+  probeProcessAlive,
+  readLockRecord,
+  reclaimStaleLock,
+  releaseLockFile,
+  tryCreateLockFile,
+  type LockRecord,
+} from "./lockfile.js";
 
 export interface FarmState {
   version: 1;
@@ -257,6 +267,13 @@ export class JsonStore {
   }
 
   save(): void {
+    // The revision check and the rename must be one step. Without the lock two
+    // writers can both read revision N and both commit N+1, silently dropping
+    // one writer's changes (audit 2026-09-14, reproduced).
+    withStoreWriteLock(this.path, () => this.commit());
+  }
+
+  private commit(): void {
     if (existsSync(this.path)) {
       const current = JSON.parse(readFileSync(this.path, "utf8")) as Partial<FarmState>;
       const currentRevision = current.revision ?? 0;
@@ -355,6 +372,41 @@ function localDay(iso: string, timeZone: string): string {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(iso));
   const value = (type: string) => parts.find((part) => part.type === type)?.value ?? "00";
   return `${value("year")}-${value("month")}-${value("day")}`;
+}
+
+/** A save holds the lock for one read-parse-write of farm.json — milliseconds.
+ *  Short enough that a live PID this old is a wedged holder, not PID reuse. */
+const STORE_LOCK_MAX_AGE_MS = 30_000;
+/** Wait this long for another writer before reporting a conflict. */
+const STORE_LOCK_WAIT_MS = 15_000;
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+export function withStoreWriteLock<T>(storePath: string, fn: () => T): T {
+  const path = `${storePath}.lock`;
+  mkdirSync(dirname(path), { recursive: true });
+  const stale = (current: LockRecord | null) => isLockStale(current, Date.now(), STORE_LOCK_MAX_AGE_MS, probeProcessAlive);
+  const deadline = Date.now() + STORE_LOCK_WAIT_MS;
+  let record: LockRecord;
+  for (let attempt = 0; ; attempt++) {
+    record = newLockRecord("farm store save");
+    if (tryCreateLockFile(path, record)) break;
+    const existing = readLockRecord(path);
+    if (stale(existing) && reclaimStaleLock(path, record, existing, stale)) break;
+    if (Date.now() > deadline) {
+      throw new StoreConflictError(
+        `Farm state is locked by another writer (${existing ? `pid ${existing.pid}` : "unknown"}); retry the command`,
+      );
+    }
+    sleepSync(Math.min(50, 2 + attempt));
+  }
+  try {
+    return fn();
+  } finally {
+    releaseLockFile(path, record);
+  }
 }
 
 export class StoreConflictError extends Error {

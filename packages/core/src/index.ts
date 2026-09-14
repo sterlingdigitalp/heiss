@@ -9,6 +9,7 @@ export * from "./fegos-import.js";
 export * from "./capacity.js";
 export * from "./protocol.js";
 export * from "./locks.js";
+export * from "./lockfile.js";
 export * from "./queue.js";
 export * from "./schedule.js";
 export * from "./checkpoint.js";

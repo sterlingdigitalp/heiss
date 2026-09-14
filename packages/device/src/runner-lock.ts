@@ -9,23 +9,27 @@
  * install is worse than waiting for the daemon's next cooldown.
  */
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { linkSync, mkdirSync, readFileSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import {
+  isLockStale,
+  newLockRecord,
+  probeProcessAlive,
+  readLockRecord,
+  reclaimStaleLock,
+  releaseLockFile,
+  tryCreateLockFile,
+  type LockRecord,
+  type ProcessProbe,
+} from "@heiss/core";
 
 /** Longer than the worst legitimate pipeline (device wait + 600s build +
  *  installs + two 300s readiness waits); past this the lock is stale even if
  *  its PID is alive, which bounds PID reuse and a wedged holder. */
 export const RUNNER_LOCK_MAX_AGE_MS = 60 * 60_000;
 
-export interface RunnerLockRecord {
-  pid: number;
-  /** Holder process start time (epoch ms) — distinguishes a reused PID. */
-  processStartedAt: number;
-  acquiredAt: number;
-  purpose: string;
-}
+export type RunnerLockRecord = LockRecord;
 
 export class RunnerBusyError extends Error {
   constructor(readonly holder: RunnerLockRecord) {
@@ -42,18 +46,9 @@ export function runnerLockPath(): string {
   return join(homedir(), ".heiss", "runner-build.lock");
 }
 
-function ownProcessStartedAt(): number {
-  return Math.round(Date.now() - process.uptime() * 1000);
-}
-
-/** Start time of a live PID via ps, or null when the PID is gone. */
-function processStartedAt(pid: number): number | null | "unknown" {
-  try {
-    process.kill(pid, 0);
-  } catch (error) {
-    // EPERM means the process exists but belongs to someone else.
-    if ((error as NodeJS.ErrnoException).code !== "EPERM") return null;
-  }
+/** An hour is long enough for PID reuse, so compare process start times via ps. */
+const probeProcessStart: ProcessProbe = (pid) => {
+  if (probeProcessAlive(pid) === null) return null;
   try {
     const out = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", timeout: 2_000 });
     const parsed = Date.parse(out.trim());
@@ -61,80 +56,14 @@ function processStartedAt(pid: number): number | null | "unknown" {
   } catch {
     return "unknown";
   }
-}
+};
 
 export function isRunnerLockStale(
   record: RunnerLockRecord | null,
   now: number,
-  probe: (pid: number) => number | null | "unknown" = processStartedAt,
+  probe: ProcessProbe = probeProcessStart,
 ): boolean {
-  if (!record || !Number.isInteger(record.pid) || !Number.isFinite(record.acquiredAt)) return true;
-  if (now - record.acquiredAt > RUNNER_LOCK_MAX_AGE_MS) return true;
-  const started = probe(record.pid);
-  if (started === null) return true;
-  // ps reports whole seconds; a start time far from the recorded one is a reused PID.
-  if (started !== "unknown" && Math.abs(started - record.processStartedAt) > 5_000) return true;
-  return false;
-}
-
-function readRecord(path: string): RunnerLockRecord | null {
-  try {
-    return JSON.parse(readFileSync(path, "utf8")) as RunnerLockRecord;
-  } catch {
-    return null;
-  }
-}
-
-function tryCreate(path: string, record: RunnerLockRecord): boolean {
-  // Write the whole record privately, then hard-link it into place. link()
-  // fails when the lock exists and never exposes a half-written file, which a
-  // concurrent reader would otherwise judge corrupt and therefore stale.
-  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temp, JSON.stringify(record));
-  try {
-    linkSync(temp, path);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
-    throw error;
-  } finally {
-    try { unlinkSync(temp); } catch { /* already removed */ }
-  }
-}
-
-/** A reclaim is a sub-millisecond critical section; a guard this old belongs
- *  to a reclaimer that died inside it. */
-const RECLAIM_GUARD_STALE_MS = 30_000;
-
-/**
- * Serialise stale-lock reclaim. Without it two reclaimers can both judge the
- * same lock stale, and the slower one deletes the lock the faster one just
- * created. mkdir is atomic, so exactly one process holds the guard.
- */
-function withReclaimGuard(path: string, fn: () => void): boolean {
-  const guard = `${path}.reclaim`;
-  const take = (): boolean => {
-    try {
-      mkdirSync(guard);
-      return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      return false;
-    }
-  };
-  if (!take()) {
-    let age = 0;
-    try { age = Date.now() - statSync(guard).mtimeMs; } catch { /* just released */ }
-    if (age <= RECLAIM_GUARD_STALE_MS) return false;
-    try { rmdirSync(guard); } catch { /* another reclaimer removed it */ }
-    if (!take()) return false;
-  }
-  try {
-    fn();
-    return true;
-  } finally {
-    try { rmdirSync(guard); } catch { /* already removed */ }
-  }
+  return isLockStale(record, now, RUNNER_LOCK_MAX_AGE_MS, probe);
 }
 
 /**
@@ -147,33 +76,17 @@ export async function withRunnerBuildLock<T>(
   path: string = runnerLockPath(),
 ): Promise<T> {
   mkdirSync(dirname(path), { recursive: true });
-  const record: RunnerLockRecord = {
-    pid: process.pid,
-    processStartedAt: ownProcessStartedAt(),
-    acquiredAt: Date.now(),
-    purpose,
-  };
-  if (!tryCreate(path, record)) {
-    const existing = readRecord(path);
+  const record = newLockRecord(purpose);
+  if (!tryCreateLockFile(path, record)) {
+    const existing = readLockRecord(path);
     if (!isRunnerLockStale(existing, Date.now())) throw new RunnerBusyError(existing!);
-    let acquired = false;
-    withReclaimGuard(path, () => {
-      // Judge again inside the guard: the lock may have been replaced by a
-      // live holder since it was first read.
-      const current = readRecord(path);
-      if (current && JSON.stringify(current) !== JSON.stringify(existing) && !isRunnerLockStale(current, Date.now())) return;
-      try { unlinkSync(path); } catch { /* already removed */ }
-      acquired = tryCreate(path, record);
-    });
-    if (!acquired) throw new RunnerBusyError(readRecord(path) ?? existing ?? record);
+    const stale = (current: RunnerLockRecord | null) => isRunnerLockStale(current, Date.now());
+    if (!reclaimStaleLock(path, record, existing, stale)) {
+      throw new RunnerBusyError(readLockRecord(path) ?? existing ?? record);
+    }
   }
 
-  const release = () => {
-    const current = readRecord(path);
-    if (current && current.pid === record.pid && current.acquiredAt === record.acquiredAt) {
-      try { unlinkSync(path); } catch { /* already removed */ }
-    }
-  };
+  const release = () => releaseLockFile(path, record);
   // `finally` does not run on process.exit (e.g. the daemon's tick watchdog).
   // No SIGTERM handler: adding one would suppress default termination; a
   // signal-killed holder is reclaimed by the dead-PID check instead.

@@ -579,6 +579,16 @@ async function main(): Promise<void> {
   if (commandMutatesFarm(args) && process.env[AUTHORIZED_MUTATION_ENV] !== "1") {
     const dataDir = getArg(args, "--data") ?? defaultDataDir();
     const forwarded = await forwardToController(dataDir, args);
+    if (forwarded.forwarded === "unknown") {
+      // Never fall through to a local run: the controller may already have
+      // applied this change, and a second copy would bypass its queue.
+      process.stderr.write(
+        `The controller received this command but its result is unknown (${forwarded.reason}). ` +
+        "It may still be running or already applied. Check `status` before retrying.\n",
+      );
+      process.exitCode = 75;
+      return;
+    }
     if (forwarded.forwarded) {
       if (forwarded.stdout) process.stdout.write(forwarded.stdout);
       if (forwarded.stderr) process.stderr.write(forwarded.stderr);

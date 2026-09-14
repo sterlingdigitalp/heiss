@@ -34,33 +34,69 @@ export class SerialCommandAuthority {
   }
 }
 
+export type ForwardResult =
+  /** No controller took the command; running it locally is safe. */
+  | { forwarded: false }
+  /** The controller ran it and returned a result. */
+  | { forwarded: true; code: number; stdout: string; stderr: string }
+  /**
+   * The request reached the controller but no result came back (timeout,
+   * dropped connection, garbled reply). It may be queued, running, or done, so
+   * it must NOT be retried locally — that could apply the mutation twice
+   * outside the serialized queue (audit 2026-09-14).
+   */
+  | { forwarded: "unknown"; reason: string };
+
+/**
+ * Longer than the controller can legitimately take: a full tick in the queue
+ * ahead (the 25-minute tick watchdog) plus this command's own child ceiling.
+ */
+export const FORWARD_TIMEOUT_MS = 25 * 60_000 + 20 * 60_000 + 60_000;
+
 export async function forwardToController(
   dataDir: string,
   args: string[],
-  timeoutMs = 10 * 60_000,
-): Promise<{ forwarded: boolean; code?: number; stdout?: string; stderr?: string }> {
+  timeoutMs = FORWARD_TIMEOUT_MS,
+): Promise<ForwardResult> {
   const socketPath = commandSocketPath(dataDir);
   if (!existsSync(socketPath)) return { forwarded: false };
   return new Promise((resolve) => {
     const socket = createConnection(socketPath);
     let raw = "";
+    // Once connected, the request is handed to the controller; every failure
+    // after that point has an unknown outcome.
+    let delivered = false;
+    let settled = false;
+    const settle = (result: ForwardResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
     const timer = setTimeout(() => {
       socket.destroy();
-      resolve({ forwarded: false });
+      settle(delivered
+        ? { forwarded: "unknown", reason: `no reply from the controller within ${Math.round(timeoutMs / 60_000)} minutes` }
+        : { forwarded: false });
     }, timeoutMs);
     socket.setEncoding("utf8");
-    socket.on("connect", () => socket.end(`${JSON.stringify({ args })}\n`));
+    socket.on("connect", () => {
+      delivered = true;
+      socket.end(`${JSON.stringify({ args })}\n`);
+    });
     socket.on("data", (chunk) => { raw += chunk; });
-    socket.on("error", () => {
-      clearTimeout(timer);
-      resolve({ forwarded: false });
+    socket.on("error", (error) => {
+      // A stale socket file with no listener (ECONNREFUSED/ENOENT) never
+      // delivered anything, so a local run is still safe.
+      settle(delivered ? { forwarded: "unknown", reason: error.message } : { forwarded: false });
     });
     socket.on("close", () => {
-      clearTimeout(timer);
       try {
-        resolve({ forwarded: true, ...JSON.parse(raw) as { code: number; stdout: string; stderr: string } });
+        settle({ forwarded: true, ...JSON.parse(raw) as { code: number; stdout: string; stderr: string } });
       } catch {
-        resolve({ forwarded: false });
+        settle(delivered
+          ? { forwarded: "unknown", reason: "the controller closed the connection without a result" }
+          : { forwarded: false });
       }
     });
   });
