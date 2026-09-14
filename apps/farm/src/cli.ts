@@ -113,7 +113,7 @@ Setup:
 Farm:
   heiss-farm status [--data DIR]
   heiss-farm run [--time HH:mm] [--data DIR] [--interrupt N]
-  heiss-farm daemon [--interval-sec 30] [--data DIR]
+  heiss-farm daemon [--interval-sec 60] [--data DIR]
   heiss-farm daemon install | uninstall | status [--data DIR]   # persistent launchd agent
   heiss-farm resume [--data DIR]
   heiss-farm register-device <name> <udid>
