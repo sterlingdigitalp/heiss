@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import { RealUsbTransport } from "./ios-transport.js";
 import { RUNNER_BUILD, RUNNER_PROTOCOL_VERSION } from "@heiss/core";
 import { listUsbIphones } from "./usb.js";
+import { withRunnerBuildLock } from "./runner-lock.js";
 import {
   automationRunnerLabel,
   downloadBuildInstallRunner,
@@ -194,12 +195,17 @@ export async function ensureAutomationRunner(
     return { ok: true, action, detail: `automation runner healthy (${health.detail})` };
   }
   if (action === "relaunch") {
-    const launched = await launchAutomationRunner(udid, join(runnerWorkDir(), "HeissRunner"));
-    const state = await waitForAutomationRunnerReady(
-      launched.label,
-      launched.logPath,
-      opts.readyTimeoutMs ?? 300_000,
-    );
+    // Relaunch builds from the shared sources + DerivedData an install rewrites.
+    const relaunched = await withRunnerBuildLock(`runner relaunch for ${udid.slice(0, 8)}`, async () => {
+      const launched = await launchAutomationRunner(udid, join(runnerWorkDir(), "HeissRunner"));
+      const state = await waitForAutomationRunnerReady(
+        launched.label,
+        launched.logPath,
+        opts.readyTimeoutMs ?? 300_000,
+      );
+      return { launched, state };
+    });
+    const { launched, state } = relaunched;
     if (state !== "ready") {
       return { ok: false, action, detail: `relaunch ${state}; see ${launched.logPath}` };
     }

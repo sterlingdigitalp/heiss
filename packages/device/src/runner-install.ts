@@ -15,6 +15,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { withRunnerBuildLock } from "./runner-lock.js";
 import { planSigning, type SigningConfig } from "./signing.js";
 import { listUsbIphones, pollUntilReady } from "./usb.js";
 
@@ -317,6 +318,13 @@ export async function installAppOnDevice(
 /** Full pipeline: wait for device → build → install. */
 export async function downloadBuildInstallRunner(
   opts: InstallRunnerOptions = {},
+): Promise<InstallRunnerResult> {
+  const target = opts.udid ? ` for ${opts.udid.slice(0, 8)}` : "";
+  return withRunnerBuildLock(`runner build+install${target}`, () => buildInstallRunnerLocked(opts));
+}
+
+async function buildInstallRunnerLocked(
+  opts: InstallRunnerOptions,
 ): Promise<InstallRunnerResult> {
   let udid = opts.udid;
   let deviceName = "iPhone";

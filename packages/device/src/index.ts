@@ -39,6 +39,12 @@ export {
   type InstallRunnerResult,
 } from "./runner-install.js";
 export {
+  withRunnerBuildLock,
+  RunnerBusyError,
+  runnerLockPath,
+  type RunnerLockRecord,
+} from "./runner-lock.js";
+export {
   checkAutomationRunner,
   ensureAutomationRunner,
   superviseDeviceHealth,
