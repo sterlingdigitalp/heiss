@@ -17,6 +17,11 @@ import {
   effectiveWarmupTime,
   warmupScheduleIsDue,
   nextWarmupSummary,
+  sessionRestMinutes,
+  sessionRestRemainingMs,
+  lastDeviceActivityAt,
+  SESSION_REST_MIN_MINUTES,
+  SESSION_REST_MAX_MINUTES,
   accountsNeedingSlotFill,
   pickAccountForQueueItem,
   assertCanAddAccount,
@@ -158,6 +163,48 @@ describe("local warmup schedule", () => {
       nextWarmupSummary([schedule], [account], "2026-07-14T04:30:00.000Z", "America/Chicago")[0]?.day,
       "due now",
     );
+  });
+});
+
+describe("session rest between scheduled sessions", () => {
+  it("rests a bounded, varied, deterministic number of minutes", () => {
+    const rests = new Set<number>();
+    for (let i = 0; i < 200; i++) {
+      const rest = sessionRestMinutes(`2026-08-19T17:${String(i % 60).padStart(2, "0")}:0${i % 10}.000Z`);
+      assert.ok(rest >= SESSION_REST_MIN_MINUTES && rest <= SESSION_REST_MAX_MINUTES);
+      rests.add(rest);
+    }
+    assert.ok(rests.size > 1, "the rest is not a constant");
+    assert.equal(sessionRestMinutes("k"), sessionRestMinutes("k"));
+  });
+
+  it("holds until the rest has elapsed, never longer than one rest", () => {
+    const end = "2026-08-19T17:10:00.000Z";
+    const rest = sessionRestMinutes(end) * 60_000;
+    assert.equal(sessionRestRemainingMs(undefined, end), 0);
+    assert.equal(sessionRestRemainingMs(end, "2026-08-19T17:11:00.000Z"), rest - 60_000);
+    assert.equal(sessionRestRemainingMs(end, new Date(Date.parse(end) + rest).toISOString()), 0);
+    assert.equal(sessionRestRemainingMs(end, "2026-08-20T09:00:00.000Z"), 0);
+    // Clock moved backwards: still at most one rest.
+    assert.equal(sessionRestRemainingMs(end, "2026-08-19T16:00:00.000Z"), rest);
+  });
+
+  it("takes the latest completion, heartbeat, or engagement attempt on that device only", () => {
+    const state = {
+      accounts: [{ id: "a1", deviceId: "d1" }, { id: "a2", deviceId: "d2" }],
+      sessions: [
+        { deviceId: "d1", completedAt: "2026-08-19T17:04:00.000Z", heartbeatAt: "2026-08-19T17:03:00.000Z" },
+        { deviceId: "d1", heartbeatAt: "2026-08-19T17:20:00.000Z" },
+        { deviceId: "d2", completedAt: "2026-08-19T18:00:00.000Z" },
+      ],
+      curatedTargets: [
+        { accountId: "a1", lastAttemptedAt: "2026-08-19T17:30:31.945Z", lastEngagedAt: "not a date" },
+        { accountId: "a2", lastAttemptedAt: "2026-08-19T19:00:00.000Z" },
+      ],
+    };
+    assert.equal(lastDeviceActivityAt(state, "d1"), "2026-08-19T17:30:31.945Z");
+    assert.equal(lastDeviceActivityAt(state, "d2"), "2026-08-19T19:00:00.000Z");
+    assert.equal(lastDeviceActivityAt(state, "d3"), undefined);
   });
 });
 

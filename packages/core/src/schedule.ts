@@ -108,6 +108,55 @@ export function warmupScheduleIsDue(
   return timeToMinutes(localTimeOfDay(nowIso, timeZone)) >= timeToMinutes(effectiveWarmupTime(schedule, today));
 }
 
+/**
+ * Rest owed between scheduled sessions on one device. Schedules only say
+ * "past the time", so a late start (maintenance, unplugged phone, daemon
+ * restart) makes every overdue persona due at once and they chain end to end
+ * with no idle gap — the catch-up signature of 2026-08-19, where five personas
+ * ran back to back. Nothing is ever skipped: sessions only wait, so the
+ * one-per-day guards still hold and a missed run still happens later that day.
+ */
+export const SESSION_REST_MIN_MINUTES = 4;
+export const SESSION_REST_MAX_MINUTES = 9;
+
+/** Varies per gap so the rest itself is not a constant, keyed on the persisted
+ *  end stamp so it is stable across ticks and daemon restarts. */
+export function sessionRestMinutes(seedKey: string): number {
+  const span = SESSION_REST_MAX_MINUTES - SESSION_REST_MIN_MINUTES + 1;
+  return SESSION_REST_MIN_MINUTES + (stableHash(seedKey) % span);
+}
+
+/**
+ * When scheduled work last touched a device, from state that is already
+ * persisted: session completion/heartbeat and curated-engagement attempts.
+ * (`updatedAt` is deliberately ignored — bookkeeping edits refresh it and
+ * would postpone the next session forever.)
+ */
+export function lastDeviceActivityAt(
+  state: {
+    accounts: Array<Pick<SocialAccount, "id" | "deviceId">>;
+    sessions: Array<{ deviceId: string; completedAt?: string; heartbeatAt?: string }>;
+    curatedTargets: Array<{ accountId: string; lastAttemptedAt?: string; lastEngagedAt?: string }>;
+  },
+  deviceId: string,
+): string | undefined {
+  const accountIds = new Set(state.accounts.filter((a) => a.deviceId === deviceId).map((a) => a.id));
+  const stamps = [
+    ...state.sessions.filter((s) => s.deviceId === deviceId).flatMap((s) => [s.completedAt, s.heartbeatAt]),
+    ...state.curatedTargets.filter((t) => accountIds.has(t.accountId)).flatMap((t) => [t.lastAttemptedAt, t.lastEngagedAt]),
+  ].filter((stamp): stamp is string => Boolean(stamp) && Number.isFinite(Date.parse(stamp!)));
+  return stamps.sort((a, b) => Date.parse(a) - Date.parse(b)).pop();
+}
+
+/** Milliseconds a device must still rest before its next scheduled session. */
+export function sessionRestRemainingMs(lastActivityAt: string | undefined, nowIso: string): number {
+  if (!lastActivityAt) return 0;
+  const rest = sessionRestMinutes(lastActivityAt) * 60_000;
+  const remaining = Date.parse(lastActivityAt) + rest - Date.parse(nowIso);
+  // A future-dated stamp (clock change) must not hold the device past one rest.
+  return Math.max(0, Math.min(remaining, rest));
+}
+
 export function nextWarmupSummary(
   schedules: WarmupSchedule[],
   accounts: SocialAccount[],

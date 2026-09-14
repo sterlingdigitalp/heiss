@@ -20,6 +20,8 @@ import {
   createSlot,
   createWarmupSchedule,
   warmupScheduleIsDue,
+  lastDeviceActivityAt,
+  sessionRestRemainingMs,
   nextWarmupSummary,
   localTimeOfDay,
   calendarDay,
@@ -1201,9 +1203,18 @@ async function main(): Promise<void> {
           );
           const accountActionable = (account: { id: string; preflightStatus?: string }) =>
             (account.preflightStatus ?? "ready") === "ready" && !attentionAccountIds.has(account.id);
+          // New scheduled sessions (warmups, curated engagement) wait out a
+          // short rest after the device's last scheduled work, so a late start
+          // spreads the backlog instead of chaining it. Retries and queued
+          // posts are not gated.
+          const restRemainingMs = new Map(store.state.devices.map((row) => [
+            row.id, sessionRestRemainingMs(lastDeviceActivityAt(store.state, row.id), nowIso),
+          ]));
+          const deviceRested = (deviceId: string) => (restRemainingMs.get(deviceId) ?? 0) === 0;
           const dueWarmupIds = store.state.warmupSchedules.filter((schedule) => {
             const account = store.state.accounts.find((candidate) => candidate.id === schedule.accountId);
-            return account && accountActionable(account) && warmupScheduleIsDue(schedule, nowIso, store.state.settings.timeZone, account.lastWarmupAt);
+            return account && accountActionable(account) && deviceRested(account.deviceId)
+              && warmupScheduleIsDue(schedule, nowIso, store.state.settings.timeZone, account.lastWarmupAt);
           }).map((schedule) => schedule.accountId);
           // Supervise the on-device automation runner whenever this tick has
           // actionable work to send it — a dead/wedged runner is relaunched
@@ -1229,6 +1240,7 @@ async function main(): Promise<void> {
           // flag was never revisited.
           const curatedDue = store.state.accounts.some((candidate) =>
             candidate.platform === "x"
+            && deviceRested(candidate.deviceId)
             && planDailyEngagement(
               store.state.curatedTargets, candidate.id, nowIso, store.state.settings.timeZone,
               { timeOfDay: candidate.curatedEngagementAt,
@@ -1281,6 +1293,7 @@ async function main(): Promise<void> {
           // healthy. Fail-soft: an error here must not break the tick.
           if (result.sessions.length === 0) {
             const engageDevice = store.state.devices.find((row) => row.online
+              && deviceRested(row.id)
               && store.state.settings.deviceHealth[row.id]?.ok === true);
             if (engageDevice) {
               const persona = store.state.accounts.find((candidate) =>
@@ -1334,6 +1347,8 @@ async function main(): Promise<void> {
             sessions: result.sessions.length,
             posts: result.sessions.filter((session) => session.kind === "post" && session.checkpoint.posted).length,
             completed, interrupted: result.interrupted, dueWarmupIds, cloud,
+            restingDevices: Object.fromEntries([...restRemainingMs]
+              .filter(([, ms]) => ms > 0).map(([id, ms]) => [id, Math.ceil(ms / 60_000)])),
           }));
         } else {
           console.log(JSON.stringify({ at: nowIso, timeOfDay, waiting: "Connect an online iPhone and add an account" }));
