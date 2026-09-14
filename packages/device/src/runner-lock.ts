@@ -9,7 +9,8 @@
  * install is worse than waiting for the daemon's next cooldown.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { linkSync, mkdirSync, readFileSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -85,12 +86,54 @@ function readRecord(path: string): RunnerLockRecord | null {
 }
 
 function tryCreate(path: string, record: RunnerLockRecord): boolean {
+  // Write the whole record privately, then hard-link it into place. link()
+  // fails when the lock exists and never exposes a half-written file, which a
+  // concurrent reader would otherwise judge corrupt and therefore stale.
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temp, JSON.stringify(record));
   try {
-    writeFileSync(path, JSON.stringify(record), { flag: "wx" });
+    linkSync(temp, path);
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw error;
+  } finally {
+    try { unlinkSync(temp); } catch { /* already removed */ }
+  }
+}
+
+/** A reclaim is a sub-millisecond critical section; a guard this old belongs
+ *  to a reclaimer that died inside it. */
+const RECLAIM_GUARD_STALE_MS = 30_000;
+
+/**
+ * Serialise stale-lock reclaim. Without it two reclaimers can both judge the
+ * same lock stale, and the slower one deletes the lock the faster one just
+ * created. mkdir is atomic, so exactly one process holds the guard.
+ */
+function withReclaimGuard(path: string, fn: () => void): boolean {
+  const guard = `${path}.reclaim`;
+  const take = (): boolean => {
+    try {
+      mkdirSync(guard);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      return false;
+    }
+  };
+  if (!take()) {
+    let age = 0;
+    try { age = Date.now() - statSync(guard).mtimeMs; } catch { /* just released */ }
+    if (age <= RECLAIM_GUARD_STALE_MS) return false;
+    try { rmdirSync(guard); } catch { /* another reclaimer removed it */ }
+    if (!take()) return false;
+  }
+  try {
+    fn();
+    return true;
+  } finally {
+    try { rmdirSync(guard); } catch { /* already removed */ }
   }
 }
 
@@ -113,13 +156,16 @@ export async function withRunnerBuildLock<T>(
   if (!tryCreate(path, record)) {
     const existing = readRecord(path);
     if (!isRunnerLockStale(existing, Date.now())) throw new RunnerBusyError(existing!);
-    // Re-read before removing so we never delete a lock someone else just took.
-    if (JSON.stringify(readRecord(path)) === JSON.stringify(existing)) {
+    let acquired = false;
+    withReclaimGuard(path, () => {
+      // Judge again inside the guard: the lock may have been replaced by a
+      // live holder since it was first read.
+      const current = readRecord(path);
+      if (current && JSON.stringify(current) !== JSON.stringify(existing) && !isRunnerLockStale(current, Date.now())) return;
       try { unlinkSync(path); } catch { /* already removed */ }
-    }
-    if (!tryCreate(path, record)) {
-      throw new RunnerBusyError(readRecord(path) ?? existing ?? record);
-    }
+      acquired = tryCreate(path, record);
+    });
+    if (!acquired) throw new RunnerBusyError(readRecord(path) ?? existing ?? record);
   }
 
   const release = () => {
