@@ -43,6 +43,8 @@ import {
   targetHandleKey,
   planDailyEngagement,
   choosePostForEngagement,
+  recordEngagementTarget,
+  xPostTargetKey,
   selectXPostPair,
   type ParsedXPost,
   planFegosImport,
@@ -372,10 +374,14 @@ async function runCuratedEngagementOnce(
     // Ages are derived against the run's own clock, not wall time at parse, so
     // a slow run cannot drift the freshness window mid-decision.
     const pair = selectXPostPair(cells, { now: new Date(nowIso) });
+    // Records hold a fingerprint of the post key, never its text; map back to
+    // the keys of the posts on screen for the planner.
+    const engagedFingerprints = new Set(store.state.engagementTargets
+      .filter((record) => record.accountId === account.id)
+      .map((record) => record.targetKey));
+    const alreadyEngaged = (post: ParsedXPost) => engagedFingerprints.has(xPostTargetKey(post.key));
     const choice = choosePostForEngagement(pair.mostRecent, pair.preceding, {
-      alreadyEngagedKeys: store.state.engagementTargets
-        .filter((record) => record.accountId === account.id)
-        .map((record) => record.targetKey),
+      alreadyEngagedKeys: pair.posts.filter(alreadyEngaged).map((post) => post.key),
     });
     if (!choice.post) {
       // Report WHY, not just that. A bare "no_eligible_post" sends you back to
@@ -385,8 +391,7 @@ async function runCuratedEngagementOnce(
         ageHours: post.ageHours, likes: post.likes, isPinned: post.isPinned,
         isQuote: post.isQuote, hasMedia: post.hasMedia,
         bodyLength: post.bodyText.length, hasReadableText: post.hasReadableText,
-        alreadyEngaged: store.state.engagementTargets.some(
-          (record) => record.accountId === account.id && record.targetKey === post.key),
+        alreadyEngaged: alreadyEngaged(post),
         preview: post.matchText,
       };
       // A scan is a full device pass — account switch, search, profile, read —
@@ -433,7 +438,14 @@ async function runCuratedEngagementOnce(
       if (report.stoppedAt === "complete") {
         if (followLanded) target.followedAt ??= nowIso;
         if (followLanded || likeLanded) target.lastEngagedAt = nowIso;
-        if (likeLanded) target.engagedCount += 1;
+        if (likeLanded) {
+          target.engagedCount += 1;
+          // Remember the post itself, so a later rotation day moves on to a
+          // newer post instead of re-opening this one to find it already liked.
+          recordEngagementTarget(store.state.engagementTargets, {
+            accountId: account.id, platform: "x", action: "like", targetKey: xPostTargetKey(chosen.key),
+          }, nowIso);
+        }
       }
       store.pushActivity({
         kind: "curated_engagement", accountId: account.id, deviceId: device.id,
@@ -2202,8 +2214,8 @@ async function main(): Promise<void> {
     if (!approval || !["ready", "needs_manual"].includes(approval.status)) throw new Error("Approved action is not completable");
     const account = store.state.accounts.find((item) => item.id === approval.accountId); const now = new Date().toISOString();
     approval.status = args[1] === "complete" ? "completed" : "skipped"; approval.completedAt = now;
-    if (approval.status === "completed" && !store.state.engagementTargets.some((item) => item.accountId === approval.accountId && item.targetKey === approval.targetKey && item.action === approval.action)) {
-      store.state.engagementTargets.push({ id: randomUUID(), accountId: approval.accountId, platform: approval.platform, action: approval.action, targetKey: approval.targetKey, at: now });
+    if (approval.status === "completed") {
+      recordEngagementTarget(store.state.engagementTargets, { accountId: approval.accountId, platform: approval.platform, action: approval.action, targetKey: approval.targetKey }, now);
     }
     store.pushActivity({ kind: "candidate_completed", accountId: approval.accountId, deviceId: account?.deviceId,
       message: `${approval.action} @${approval.targetHandle} ${approval.status}` });

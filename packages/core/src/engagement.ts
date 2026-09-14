@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { stageIndex } from "./lifecycle.js";
 import type {
   ActivityEvent,
@@ -125,6 +125,39 @@ export function engagementAllowance(input: {
     approvalId,
     reason: policy.mode,
   };
+}
+
+/**
+ * Record a successful engagement, refreshing the timestamp when this account
+ * already engaged the same target with the same action.
+ *
+ * The recorders used to insert only when the key had never been seen, by any
+ * account. The denylist only looks back TARGET_DEDUPLICATION_DAYS, so once the
+ * first record aged out every later engagement went unrecorded and the target
+ * was immediately eligible again (audit 2026-09-14, reproduced).
+ */
+export function recordEngagementTarget(
+  targets: EngagementTargetRecord[],
+  entry: Omit<EngagementTargetRecord, "id" | "at">,
+  now: string,
+): EngagementTargetRecord {
+  const existing = targets.find((target) =>
+    target.accountId === entry.accountId && target.action === entry.action && target.targetKey === entry.targetKey);
+  if (existing) {
+    if (existing.at < now) existing.at = now;
+    return existing;
+  }
+  const record: EngagementTargetRecord = { id: randomUUID(), ...entry, at: now };
+  targets.push(record);
+  return record;
+}
+
+/**
+ * Non-reversible fingerprint of an X post key (which embeds the post's text),
+ * so engagement records keep their no-third-party-content promise.
+ */
+export function xPostTargetKey(postKey: string): string {
+  return `xpost:${createHash("sha256").update(postKey).digest("hex").slice(0, 32)}`;
 }
 
 export function activeBlockedTargetKeys(targets: EngagementTargetRecord[], now: string): string[] {

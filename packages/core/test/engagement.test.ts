@@ -7,6 +7,10 @@ import {
   normalizeEngagementPolicy,
   type EngagementApproval,
   type SocialAccount,
+  activeBlockedTargetKeys,
+  recordEngagementTarget,
+  xPostTargetKey,
+  type EngagementTargetRecord,
 } from "../src/index.js";
 
 function mature(): SocialAccount {
@@ -71,5 +75,39 @@ describe("controlled engagement", () => {
       }],
     });
     assert.deepEqual({ likes: allowance.likes, follows: allowance.follows }, { likes: 1, follows: 1 });
+  });
+});
+
+describe("engagement target records", () => {
+  const day = 86_400_000;
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const now = Date.parse("2026-09-14T12:00:00.000Z");
+
+  it("re-blocks a target engaged again after its first record aged out", () => {
+    const targets: EngagementTargetRecord[] = [{
+      id: "old", accountId: "a1", platform: "x", action: "like", targetKey: "t1", at: iso(now - 31 * day),
+    }];
+    assert.deepEqual(activeBlockedTargetKeys(targets, iso(now)), [], "aged out");
+    recordEngagementTarget(targets, { accountId: "a1", platform: "x", action: "like", targetKey: "t1" }, iso(now));
+    assert.deepEqual(activeBlockedTargetKeys(targets, iso(now)), ["t1"]);
+    assert.equal(targets.length, 1, "refreshed in place, not duplicated");
+  });
+
+  it("keeps attribution per account and action, and never moves a timestamp backwards", () => {
+    const targets: EngagementTargetRecord[] = [];
+    recordEngagementTarget(targets, { accountId: "a1", platform: "x", action: "like", targetKey: "t1" }, iso(now));
+    recordEngagementTarget(targets, { accountId: "a2", platform: "x", action: "like", targetKey: "t1" }, iso(now));
+    recordEngagementTarget(targets, { accountId: "a1", platform: "x", action: "follow", targetKey: "t1" }, iso(now));
+    recordEngagementTarget(targets, { accountId: "a1", platform: "x", action: "like", targetKey: "t1" }, iso(now - day));
+    assert.equal(targets.length, 3);
+    assert.equal(targets[0]!.at, iso(now));
+  });
+
+  it("fingerprints X post keys without keeping the post text", () => {
+    const key = xPostTargetKey("x:gm builders, shipping the new release today");
+    assert.match(key, /^xpost:[0-9a-f]{32}$/);
+    assert.equal(key, xPostTargetKey("x:gm builders, shipping the new release today"));
+    assert.ok(!key.includes("builders"));
+    assert.notEqual(key, xPostTargetKey("x:a different post"));
   });
 });

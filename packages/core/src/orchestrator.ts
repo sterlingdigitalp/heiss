@@ -10,6 +10,7 @@ import {
 } from "./lifecycle.js";
 import {
   activeBlockedTargetKeys,
+  recordEngagementTarget,
   engagementAllowance,
   ensureDailyEngagementApproval,
   normalizeEngagementPolicy,
@@ -1028,12 +1029,9 @@ export class FarmOrchestrator {
     if (executed) {
       stored.status = "completed";
       stored.completedAt = now;
-      if (!this.store.state.engagementTargets.some((target) => target.targetKey === stored.targetKey)) {
-        this.store.state.engagementTargets.push({
-          id: randomUUID(), accountId: account.id, platform: account.platform,
-          action: "like", targetKey: stored.targetKey, at: now,
-        });
-      }
+      recordEngagementTarget(this.store.state.engagementTargets, {
+        accountId: account.id, platform: account.platform, action: "like", targetKey: stored.targetKey,
+      }, now);
       this.store.pushActivity({
         kind: "candidate_completed", sessionId, accountId: account.id, deviceId: account.deviceId,
         message: `like @${stored.targetHandle} completed automatically`,
@@ -1071,10 +1069,10 @@ export class FarmOrchestrator {
       message: `${action} ${outcome}${targetKey ? ` (target ${targetKey.slice(0, 8)})` : ""}`,
       meta: { action, outcome, targetKey, localDay },
     });
-    if (executed && targetKey && !this.store.state.engagementTargets.some((target) => target.targetKey === targetKey)) {
-      this.store.state.engagementTargets.push({
-        id: randomUUID(), accountId: account.id, platform: account.platform, action, targetKey, at: now,
-      });
+    if (executed && targetKey) {
+      recordEngagementTarget(this.store.state.engagementTargets, {
+        accountId: account.id, platform: account.platform, action, targetKey,
+      }, now);
     }
   }
 
