@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
 const QRCode = require("qrcode");
+const { validateFarmArgs, isTrustedSender } = require("./ipc-guard.cjs");
 
 const ROOT = app.isPackaged ? __dirname : path.resolve(__dirname, "../..");
 const FARM_CLI = app.isPackaged
@@ -16,6 +17,7 @@ const CANONICAL_DATA = path.join(os.homedir(), ".heiss", "live");
 const CONTROLLER_LABEL = "so.heiss.controller";
 const CONTROLLER_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", `${CONTROLLER_LABEL}.plist`);
 const CONTROLLER_LOG = path.join(CANONICAL_DATA, "controller.log");
+const RENDERER = path.join(__dirname, "renderer.html");
 
 function farmEnvironment(extra = {}) {
   return { ...process.env, HEISS_DATA: CANONICAL_DATA, ...extra };
@@ -34,6 +36,8 @@ function runFarm(args) {
         });
     let stdout = "";
     let stderr = "";
+    // Without this a missing npx or failed spawn is an unhandled main-process error.
+    child.on("error", reject);
     child.stdout.on("data", (d) => {
       stdout += d.toString();
     });
@@ -88,7 +92,21 @@ function stopDaemon() {
 }
 
 function readControllerLog() {
-  try { return fs.readFileSync(CONTROLLER_LOG, "utf8").slice(-12000); } catch { return ""; }
+  // Read only the tail; the log grows without bound and this runs on every status poll.
+  const bytes = 12_000;
+  let fd;
+  try {
+    fd = fs.openSync(CONTROLLER_LOG, "r");
+    const size = fs.fstatSync(fd).size;
+    const length = Math.min(size, bytes);
+    const buffer = Buffer.alloc(length);
+    fs.readSync(fd, buffer, 0, length, size - length);
+    return buffer.toString("utf8");
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
 }
 
 function daemonStatus() {
@@ -107,7 +125,10 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
-  win.loadFile(path.join(__dirname, "renderer.html"));
+  // The window only ever shows the bundled renderer: no navigation, no popups.
+  win.webContents.on("will-navigate", (event) => event.preventDefault());
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.loadFile(RENDERER);
 }
 
 app.whenReady().then(() => {
@@ -121,14 +142,23 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-ipcMain.handle("farm", async (_e, args) => runFarm(args));
-ipcMain.handle("daemon-start", async () => startDaemon());
-ipcMain.handle("daemon-stop", async () => stopDaemon());
-ipcMain.handle("daemon-status", async () => daemonStatus());
-ipcMain.handle("qr-code", async (_e, value) => QRCode.toDataURL(String(value), { width: 220, margin: 1 }));
-ipcMain.handle("login-item-get", async () => app.getLoginItemSettings());
-ipcMain.handle("login-item-set", async (_e, enabled) => {
+/** Register a handler that only the app's own top-level renderer may call. */
+function handle(channel, fn) {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!isTrustedSender(event, RENDERER)) throw new Error(`Refused ${channel} from an untrusted frame`);
+    return fn(...args);
+  });
+}
+
+handle("farm", async (args) => runFarm(validateFarmArgs(args)));
+handle("daemon-start", async () => startDaemon());
+handle("daemon-stop", async () => stopDaemon());
+handle("daemon-status", async () => daemonStatus());
+handle("qr-code", async (value) => QRCode.toDataURL(String(value).slice(0, 2_000), { width: 220, margin: 1 }));
+handle("login-item-get", async () => app.getLoginItemSettings());
+handle("login-item-set", async (enabled) => {
   app.setLoginItemSettings({ openAtLogin: Boolean(enabled) });
   return app.getLoginItemSettings();
 });
-ipcMain.handle("open-external", async (_e, url) => shell.openExternal(url));
+// open-external was removed: the renderer never used it, and it passed any
+// URL scheme straight to the OS.

@@ -8,7 +8,8 @@
     "start": "electron .",
     "build": "node scripts/build-app.cjs",
     "pack": "node scripts/build-app.cjs",
-    "typecheck": "node -e \"process.exit(0)\""
+    "typecheck": "node -e \"process.exit(0)\"",
+    "test": "node --test test/*.test.cjs"
   },
   "dependencies": {
     "@heiss/core": "*",

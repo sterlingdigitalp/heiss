@@ -8,5 +8,4 @@ contextBridge.exposeInMainWorld("heiss", {
   qrCode: (value) => ipcRenderer.invoke("qr-code", value),
   loginItemGet: () => ipcRenderer.invoke("login-item-get"),
   loginItemSet: (enabled) => ipcRenderer.invoke("login-item-set", enabled),
-  openExternal: (url) => ipcRenderer.invoke("open-external", url),
 });

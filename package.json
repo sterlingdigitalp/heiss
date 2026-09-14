@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "build": "npm run build -w @heiss/core && npm run build -w @heiss/device && npm run build -w @heiss/web && npm run build -w @heiss/farm && npm run build -w @heiss/desktop",
-    "test": "npm run test -w @heiss/core && npm run test -w @heiss/device && npm run test -w @heiss/farm && npm run test -w @heiss/web",
+    "test": "npm run test -w @heiss/core && npm run test -w @heiss/device && npm run test -w @heiss/farm && npm run test -w @heiss/web && npm run test -w @heiss/desktop",
     "test:all": "npm test",
     "dev:web": "npm run dev -w @heiss/web",
     "farm": "npm run start -w @heiss/farm --",
