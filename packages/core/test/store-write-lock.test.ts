@@ -17,9 +17,14 @@ const SAVES_EACH = 25;
 const writer = `
   const [path, signals] = process.argv.slice(1);
   const { JsonStore, StoreConflictError } = await import(${JSON.stringify(storeModule)});
-  const { existsSync, writeFileSync } = await import("node:fs");
+  const { existsSync, readFileSync, writeFileSync } = await import("node:fs");
   writeFileSync(signals + "/ready-" + process.pid, "");
-  while (!existsSync(signals + "/go")) {}
+  const idle = new Int32Array(new SharedArrayBuffer(4));
+  // Sleep-poll while others boot (spinning would starve them), then spin to
+  // the shared start instant so the race is sub-millisecond.
+  while (!existsSync(signals + "/go")) Atomics.wait(idle, 0, 0, 1);
+  const startAt = Number(readFileSync(signals + "/go", "utf8"));
+  while (Date.now() < startAt) {}
   for (let i = 0; i < ${SAVES_EACH}; i++) {
     for (;;) {
       const store = new JsonStore(path);
@@ -34,7 +39,7 @@ function runWriter(path: string, signals: string): Promise<number> {
   return new Promise((done) => {
     // Own timeout under the test runner's; SIGKILL so nothing lingers.
     const child = execFile(process.execPath, ["--import", "tsx", "--input-type=module", "-e", writer, path, signals],
-      { timeout: 60_000, killSignal: "SIGKILL" }, (error, _out, stderr) => {
+      { timeout: 180_000, killSignal: "SIGKILL" }, (error, _out, stderr) => {
         if (error) console.error(stderr);
         done(error ? (typeof error.code === "number" ? error.code : 1) : 0);
       });
@@ -45,15 +50,18 @@ function runWriter(path: string, signals: string): Promise<number> {
 }
 
 describe("farm store write lock", () => {
-  it("never loses an update when processes save concurrently", async () => {
+  it("never loses an update when processes save concurrently", { timeout: 300_000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), "heiss-store-"));
     const path = join(dir, "farm.json");
     new JsonStore(path).save();
     const signals = mkdtempSync(join(tmpdir(), "heiss-store-go-"));
     const running = Array.from({ length: WRITERS }, () => runWriter(path, signals));
-    const readyBy = Date.now() + 40_000;
+    // tsx boots take ~9s idle and far longer under a loaded full suite.
+    const readyBy = Date.now() + 90_000;
     while (readdirSync(signals).length < WRITERS && Date.now() < readyBy) await new Promise((r) => setTimeout(r, 50));
-    writeFileSync(join(signals, "go"), "");
+    const ready = readdirSync(signals).length;
+    writeFileSync(join(signals, "go"), String(Date.now() + 500));
+    assert.equal(ready, WRITERS, "all writers booted before the race started");
     assert.deepEqual((await Promise.all(running)).filter((code) => code !== 0), [], "no writer crashed");
 
     const keys = Object.keys(new JsonStore(path).state.settings.notificationKeys);

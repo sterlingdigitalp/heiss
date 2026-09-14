@@ -87,66 +87,92 @@ describe("runner build lock", () => {
   });
 });
 
-// Child processes race for the lock at the same instant. Each appends
-// "start"/"end" lines around a short hold; overlapping holds would mean two
+// Child processes boot once, then race for the lock at a shared instant in
+// many rounds (the reclaim race is microseconds wide, and each boot costs
+// seconds). Each hold appends "start"/"end" lines; an interleaving means two
 // processes believed they owned the build directory.
 const lockModule = resolve(dirname(fileURLToPath(import.meta.url)), "../src/runner-lock.ts");
+const CONTENDERS = 8;
+const ROUNDS = 12;
 const contender = `
-  const [path, log, dir] = process.argv.slice(1);
+  const [dir] = process.argv.slice(1);
   const { withRunnerBuildLock, RunnerBusyError } = await import(${JSON.stringify(lockModule)});
-  const { appendFileSync, existsSync, writeFileSync } = await import("node:fs");
-  // tsx boot takes seconds; report ready, then spin until every contender is released together.
+  const { appendFileSync, existsSync, readFileSync, writeFileSync } = await import("node:fs");
+  const idle = new Int32Array(new SharedArrayBuffer(4));
   writeFileSync(dir + "/ready-" + process.pid, "");
-  while (!existsSync(dir + "/go")) {}
-  try {
-    await withRunnerBuildLock("contender", async () => {
-      appendFileSync(log, "start " + process.pid + "\\n");
-      await new Promise((r) => setTimeout(r, 150));
-      appendFileSync(log, "end " + process.pid + "\\n");
-    }, path);
-  } catch (error) {
-    if (!(error instanceof RunnerBusyError)) { console.error(error); process.exit(2); }
+  for (let round = 0; round < ${ROUNDS}; round++) {
+    // Sleep-poll while others boot or finish (spinning would starve them),
+    // then spin to the shared start instant so the race is sub-millisecond.
+    while (!existsSync(dir + "/go-" + round)) Atomics.wait(idle, 0, 0, 1);
+    const startAt = Number(readFileSync(dir + "/go-" + round, "utf8"));
+    while (Date.now() < startAt) {}
+    try {
+      await withRunnerBuildLock("contender", async () => {
+        appendFileSync(dir + "/holds-" + round, "start " + process.pid + "\\n");
+        await new Promise((r) => setTimeout(r, 40));
+        appendFileSync(dir + "/holds-" + round, "end " + process.pid + "\\n");
+      }, dir + "/runner-build.lock");
+    } catch (error) {
+      if (!(error instanceof RunnerBusyError)) { console.error(error); process.exit(2); }
+    }
+    writeFileSync(dir + "/done-" + round + "-" + process.pid, "");
   }
 `;
 
-function runContender(path: string, log: string, dir: string): Promise<number> {
+function runContender(dir: string): Promise<number> {
   return new Promise((done) => {
-    // Own timeout well under the test runner's, SIGKILL so nothing lingers.
-    const child = execFile(process.execPath, ["--import", "tsx", "--input-type=module", "-e", contender, path, log, dir],
-      { timeout: 20_000, killSignal: "SIGKILL" }, (error) => done(error ? (typeof error.code === "number" ? error.code : 1) : 0));
+    // Own timeout under the test's; SIGKILL so nothing lingers.
+    const child = execFile(process.execPath, ["--import", "tsx", "--input-type=module", "-e", contender, dir],
+      { timeout: 180_000, killSignal: "SIGKILL" }, (error) => done(error ? (typeof error.code === "number" ? error.code : 1) : 0));
     const kill = () => child.kill("SIGKILL");
     process.once("exit", kill);
     child.once("exit", () => process.removeListener("exit", kill));
   });
 }
 
+const count = (dir: string, prefix: string) => readdirSync(dir).filter((file) => file.startsWith(prefix)).length;
+async function waitFor(condition: () => boolean, ms: number): Promise<boolean> {
+  const until = Date.now() + ms;
+  while (!condition() && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+  return condition();
+}
+
 describe("runner build lock across processes", () => {
   for (const [name, seedStale] of [["fresh lock", false], ["stale lock reclaim", true]] as const) {
-    it(`never lets two processes hold it at once (${name})`, async () => {
-      for (let round = 0; round < 2; round++) {
-        const path = lockPath();
-        const log = join(dirname(path), "holds.log");
-        const signals = mkdtempSync(join(tmpdir(), "heiss-lock-go-"));
-        writeFileSync(log, "");
-        if (seedStale) writeFileSync(path, JSON.stringify(record({ pid: 2_147_483_000, acquiredAt: Date.now() })));
-        const running = Array.from({ length: 8 }, () => runContender(path, log, signals));
-        const readyBy = Date.now() + 25_000;
-        while (readdirSync(signals).length < 8 && Date.now() < readyBy) await new Promise((r) => setTimeout(r, 50));
-        writeFileSync(join(signals, "go"), "");
-        const codes = await Promise.all(running);
-        assert.deepEqual(codes.filter((code) => code !== 0), [], "no contender crashed");
-        const lines = readFileSync(log, "utf8").trim().split("\n").filter(Boolean);
-        assert.ok(lines.length >= 2, "someone acquired the lock");
-        // All eight were released together while the first holds for 150ms,
-        // so most must have been refused — otherwise there was no race.
-        assert.ok(lines.length / 2 < 8, `contenders did not actually collide (${lines.length / 2} holds)`);
-        for (let i = 0; i < lines.length; i += 2) {
-          assert.match(lines[i]!, /^start /);
-          assert.equal(lines[i + 1], lines[i]!.replace("start", "end"), `hold ${i / 2} overlapped another`);
+    it(`never lets two processes hold it at once (${name})`, { timeout: 300_000 }, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "heiss-lock-race-"));
+      const lock = join(dir, "runner-build.lock");
+      const running = Array.from({ length: CONTENDERS }, () => runContender(dir));
+      // tsx boots take ~9s idle and far longer under a loaded full suite.
+      const booted = await waitFor(() => count(dir, "ready-") === CONTENDERS, 150_000);
+      let collided = false;
+      let codes: number[];
+      try {
+        for (let round = 0; round < ROUNDS && booted; round++) {
+          if (seedStale) writeFileSync(lock, JSON.stringify(record({ pid: 2_147_483_000, acquiredAt: Date.now() })));
+          writeFileSync(join(dir, `go-${round}`), String(Date.now() + 150));
+          if (!await waitFor(() => count(dir, `done-${round}-`) === CONTENDERS, 30_000)) break;
+          const lines = existsSync(join(dir, `holds-${round}`))
+            ? readFileSync(join(dir, `holds-${round}`), "utf8").trim().split("\n").filter(Boolean) : [];
+          assert.ok(lines.length >= 2, `round ${round}: someone acquired the lock`);
+          for (let i = 0; i < lines.length; i += 2) {
+            assert.match(lines[i]!, /^start /);
+            assert.equal(lines[i + 1], lines[i]!.replace("start", "end"), `round ${round}: hold ${i / 2} overlapped another`);
+          }
+          if (lines.length / 2 < CONTENDERS) collided = true;
+          assert.equal(existsSync(lock), false, `round ${round}: released`);
         }
-        assert.equal(existsSync(path), false, "released");
-        assert.deepEqual(readdirSync(dirname(path)).filter((f) => f !== "holds.log"), [], "no temp files or guard left");
+      } finally {
+        // Always release every waiting round — a failed assertion must not leave
+        // children sleeping until their timeout and holding the runner open.
+        for (let round = 0; round < ROUNDS; round++) writeFileSync(join(dir, `go-${round}`), "0");
+        codes = await Promise.all(running);
       }
+      assert.ok(booted, "all contenders booted before the race started");
+      assert.deepEqual(codes.filter((code) => code !== 0), [], "no contender crashed");
+      assert.equal(count(dir, "done-"), CONTENDERS * ROUNDS, "every round completed");
+      assert.ok(collided, "contenders actually collided in at least one round");
+      assert.deepEqual(readdirSync(dir).filter((file) => /\.tmp$|\.reclaim$|\.lock$/.test(file)), [], "no temp files, guard, or lock left");
     });
   }
 });
