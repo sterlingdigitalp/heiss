@@ -6,6 +6,10 @@ import {
   choosePostForEngagement,
   planDailyEngagement,
   pickDueEngagementPersona,
+  recordCuratedOutcome,
+  curatedEngagementBlocked,
+  CURATED_FAILURE_LIMIT,
+  type CuratedFailureRecord,
   HOTTER_POST_MULTIPLE,
 } from "../src/engagement-plan.js";
 import type { PostSnapshot } from "../src/engagement-plan.js";
@@ -349,5 +353,42 @@ describe("picking the next persona across devices", () => {
       pickDueEngagementPersona([{ ...account("ig", "d1", "09:00"), platform: "instagram" }], { ...base, targets: [target("ig")], deviceReady: () => true }),
       undefined,
     );
+  });
+});
+
+describe("curated failure escalation", () => {
+  const day = "2026-09-18";
+  const at = (m: number) => `2026-09-18T15:${String(m).padStart(2, "0")}:00.000Z`;
+
+  it("stops a persona for the day after repeated failures, and says so once", () => {
+    const failures: Record<string, CuratedFailureRecord> = {};
+    const results = [1, 2, 3, 4].map((i) => recordCuratedOutcome(failures, "a1",
+      { ok: false, error: "Keyboard key _ was not available", localDay: day, nowIso: at(i) }));
+    assert.deepEqual(results.map((r) => r.streak), [1, 2, 3, 4]);
+    // Raised exactly once, on the failure that crosses the limit.
+    assert.deepEqual(results.map((r) => r.blockedNow), [false, false, true, false]);
+    assert.equal(curatedEngagementBlocked(failures, "a1", day), true);
+    assert.equal(curatedEngagementBlocked(failures, "a1", "2026-09-19"), false, "a new day tries again");
+    assert.equal(curatedEngagementBlocked(failures, "other", day), false, "only the stuck persona");
+  });
+
+  it("replays 2026-09-18: 24 retries become 3, and the rest of the day is skipped", () => {
+    const failures: Record<string, CuratedFailureRecord> = {};
+    let attempts = 0;
+    for (let tick = 0; tick < 24; tick++) {
+      if (curatedEngagementBlocked(failures, "a1", day)) continue;
+      attempts++;
+      recordCuratedOutcome(failures, "a1", { ok: false, error: "Keyboard key _ was not available", localDay: day, nowIso: at(tick) });
+    }
+    assert.equal(attempts, CURATED_FAILURE_LIMIT, "gave up after the limit instead of retrying all morning");
+  });
+
+  it("any success clears the streak", () => {
+    const failures: Record<string, CuratedFailureRecord> = {};
+    recordCuratedOutcome(failures, "a1", { ok: false, error: "transient", localDay: day, nowIso: at(1) });
+    recordCuratedOutcome(failures, "a1", { ok: false, error: "transient", localDay: day, nowIso: at(2) });
+    assert.equal(recordCuratedOutcome(failures, "a1", { ok: true, localDay: day, nowIso: at(3) }).streak, 0);
+    assert.equal(failures.a1, undefined);
+    assert.equal(curatedEngagementBlocked(failures, "a1", day), false);
   });
 });

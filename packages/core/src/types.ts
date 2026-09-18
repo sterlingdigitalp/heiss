@@ -349,6 +349,9 @@ export interface FarmSettings {
   maintenance: MaintenanceState;
   /** Last typed device/runner health result per registered device. */
   deviceHealth: Record<string, DeviceHealthRecord>;
+  /** Curated-engagement failure streaks, so a deterministic fault stops
+   *  retrying in silence (see recordCuratedOutcome). */
+  curatedFailures?: Record<string, { streak: number; lastError: string; lastAt: string; blockedDay?: string }>;
   /** Controller heartbeat proves there is one active scheduling authority. */
   controllerHeartbeatAt?: string;
   controllerPid?: number;

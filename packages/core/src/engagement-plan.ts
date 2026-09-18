@@ -214,3 +214,57 @@ export function pickDueEngagementPersona<
       (left.curatedEngagementAt ?? "").localeCompare(right.curatedEngagementAt ?? "")
       || left.id.localeCompare(right.id))[0];
 }
+
+/** Consecutive identical-looking failures before a persona stops retrying for the day. */
+export const CURATED_FAILURE_LIMIT = 3;
+
+export interface CuratedFailureRecord {
+  streak: number;
+  lastError: string;
+  lastAt: string;
+  /** Local day this persona gave up on; cleared by the next day or a success. */
+  blockedDay?: string;
+}
+
+/**
+ * Track curated-engagement failures so a deterministic fault cannot retry in
+ * silence.
+ *
+ * A driver error deliberately does not spend the persona's day — a transient
+ * fault should retry. But on 2026-09-18 a deterministic one (an unreachable
+ * keyboard key) retried every ~3 minutes from 09:08 to 10:43, told nobody, and
+ * the whole engagement window was lost. After CURATED_FAILURE_LIMIT failures in
+ * a row the persona stops for the day and the caller raises it with a human;
+ * any success clears the streak.
+ */
+export function recordCuratedOutcome(
+  failures: Record<string, CuratedFailureRecord>,
+  accountId: string,
+  outcome: { ok: boolean; error?: string; localDay: string; nowIso: string },
+): { streak: number; blockedNow: boolean } {
+  if (outcome.ok) {
+    delete failures[accountId];
+    return { streak: 0, blockedNow: false };
+  }
+  const previous = failures[accountId];
+  // A different failure is still a failure: what matters is that this persona
+  // cannot get through, not that it fails the same way each time.
+  const streak = (previous?.blockedDay === outcome.localDay ? previous.streak : (previous?.streak ?? 0)) + 1;
+  const blockedNow = streak >= CURATED_FAILURE_LIMIT && previous?.blockedDay !== outcome.localDay;
+  failures[accountId] = {
+    streak,
+    lastError: (outcome.error ?? "").slice(0, 300),
+    lastAt: outcome.nowIso,
+    blockedDay: streak >= CURATED_FAILURE_LIMIT ? outcome.localDay : previous?.blockedDay,
+  };
+  return { streak, blockedNow };
+}
+
+/** True while this persona has given up for `localDay`. */
+export function curatedEngagementBlocked(
+  failures: Record<string, CuratedFailureRecord>,
+  accountId: string,
+  localDay: string,
+): boolean {
+  return failures[accountId]?.blockedDay === localDay;
+}

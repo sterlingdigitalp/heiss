@@ -43,6 +43,8 @@ import {
   targetHandleKey,
   planDailyEngagement,
   pickDueEngagementPersona,
+  recordCuratedOutcome,
+  curatedEngagementBlocked,
   choosePostForEngagement,
   recordEngagementTarget,
   xPostTargetKey,
@@ -1325,7 +1327,8 @@ async function main(): Promise<void> {
                 nowIso,
                 timeZone: store.state.settings.timeZone,
                 deviceReady: (deviceId) => engageableDevices.has(deviceId),
-                actionable: accountActionable,
+                actionable: (candidate) => accountActionable(candidate)
+                  && !curatedEngagementBlocked(store.state.settings.curatedFailures ?? {}, candidate.id, localDayNow),
               });
               if (persona) {
                 try {
@@ -1339,13 +1342,35 @@ async function main(): Promise<void> {
                     dryRun: false, nowIso, openPost: true,
                   });
                   console.log(JSON.stringify({ at: nowIso, curatedEngagement: outcome }));
+                  // The runner returned a verdict, so this persona is not stuck
+                  // even if nothing landed.
+                  store.state.settings.curatedFailures ??= {};
+                  recordCuratedOutcome(store.state.settings.curatedFailures, persona.id,
+                    { ok: true, localDay: localDayNow, nowIso });
+                  store.save();
                   if (outcome.engaged) {
                     notifyDesktop("Heiss engaged a target",
                       `${persona.handle} → ${String((outcome as { target?: string }).target ?? "")}`);
                   }
                 } catch (error) {
-                  console.error(JSON.stringify({ at: nowIso,
-                    curatedEngagementError: error instanceof Error ? error.message : String(error) }));
+                  const message = error instanceof Error ? error.message : String(error);
+                  console.error(JSON.stringify({ at: nowIso, curatedEngagementError: message }));
+                  // A driver error does not spend the persona's day, so a
+                  // deterministic fault would otherwise retry every tick in
+                  // silence — 95 minutes of it on 2026-09-18. Give up for the
+                  // day after a few in a row, and say so.
+                  store.state.settings.curatedFailures ??= {};
+                  const failure = recordCuratedOutcome(store.state.settings.curatedFailures, persona.id,
+                    { ok: false, error: message, localDay: localDayNow, nowIso });
+                  if (failure.blockedNow) {
+                    store.pushActivity({
+                      kind: "curated_engagement", accountId: persona.id, deviceId: persona.deviceId,
+                      message: `${persona.handle}: engagement stopped for today after ${failure.streak} failures — ${message.slice(0, 160)}`,
+                    });
+                    notifyDesktop("Heiss engagement needs attention",
+                      `${persona.handle} failed ${failure.streak}x: ${message.slice(0, 120)}`);
+                  }
+                  store.save();
                 }
               }
             }
