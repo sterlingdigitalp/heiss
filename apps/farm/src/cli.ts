@@ -3,7 +3,7 @@
  * heiss-farm — local controller (physical iPhones only, no simulator).
  */
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import {
@@ -47,6 +47,9 @@ import {
   summaryDue,
   buildDailySummary,
   summaryIsBad,
+  assessControllerHeartbeat,
+  shouldRaiseControllerAlarm,
+  stalePause,
   curatedEngagementBlocked,
   choosePostForEngagement,
   recordEngagementTarget,
@@ -86,6 +89,10 @@ import { findProjectRoot } from "./project-root.js";
 import {
   controllerAgentStatus,
   installControllerAgent,
+  installWatchdogAgent,
+  uninstallWatchdogAgent,
+  reviveController,
+  controllerLastExitCode,
   uninstallControllerAgent,
 } from "./daemon-agent.js";
 import { createHmac, randomUUID } from "node:crypto";
@@ -1040,6 +1047,74 @@ async function main(): Promise<void> {
     return;
   }
 
+  // The watchdog: a single-shot check of the controller's heartbeat, run by its
+  // own launchd agent. Everything else that reports trouble IS the controller,
+  // so when it dies nobody speaks (2026-09-18: dead 04:21, found 12:00).
+  if (cmd === "daemon" && args[1] === "watch") {
+    const dataDir = getArg(args, "--data") ?? defaultDataDir();
+    const nowIso = new Date().toISOString();
+    const statePath = farmStatePath(dataDir);
+    let heartbeatAt: string | undefined;
+    try {
+      heartbeatAt = (JSON.parse(readFileSync(statePath, "utf8")) as
+        { settings?: { controllerHeartbeatAt?: string } }).settings?.controllerHeartbeatAt;
+    } catch {
+      heartbeatAt = undefined;
+    }
+    const health = assessControllerHeartbeat(heartbeatAt, nowIso);
+    let maintenance: { mode: string; reason?: string; enteredAt?: string } | undefined;
+    try {
+      maintenance = (JSON.parse(readFileSync(statePath, "utf8")) as
+        { settings?: { maintenance?: { mode: string; reason?: string; enteredAt?: string } } }).settings?.maintenance;
+    } catch { maintenance = undefined; }
+    const pause = stalePause(maintenance, nowIso);
+    const memoPath = join(dataDir, "watchdog-state.json");
+    let memo: { alive: boolean; notifiedAt?: string; pausedNotifiedAt?: string } | undefined;
+    let pausedNotifiedAt: string | undefined;
+    try { memo = JSON.parse(readFileSync(memoPath, "utf8")) as typeof memo; } catch { memo = undefined; }
+
+    let recovery: { ok: boolean; detail: string } | undefined;
+    let recovered = false;
+    if (!health.alive) {
+      // Restart the job, then give it long enough to write one heartbeat.
+      recovery = reviveController();
+      spawnSync("/bin/sleep", ["25"]);
+      let after: string | undefined;
+      try {
+        after = (JSON.parse(readFileSync(statePath, "utf8")) as
+          { settings?: { controllerHeartbeatAt?: string } }).settings?.controllerHeartbeatAt;
+      } catch { after = undefined; }
+      recovered = assessControllerHeartbeat(after, new Date().toISOString()).alive;
+    }
+
+    const stillDown = !health.alive && !recovered;
+    const alarm = shouldRaiseControllerAlarm(memo, !stillDown ? true : false, nowIso);
+    if (stillDown && alarm) {
+      const exitCode = controllerLastExitCode();
+      notifyDesktop("Heiss controller is down",
+        `${health.detail}; restart ${recovery?.ok ? "ran but it did not come back" : "failed"}`
+        + (exitCode !== undefined ? ` (launchd exit ${exitCode}${exitCode === 78 ? " — re-register with: heiss-farm daemon install" : ""})` : ""));
+    } else if (!health.alive && recovered && (!memo || memo.alive)) {
+      notifyDesktop("Heiss controller restarted", `${health.detail}; it is running again`);
+    }
+    writeFileSync(memoPath, JSON.stringify({
+      alive: !stillDown,
+      notifiedAt: stillDown && alarm ? nowIso : memo?.notifiedAt,
+      pausedNotifiedAt: pausedNotifiedAt ?? (pause.stale ? memo?.pausedNotifiedAt : undefined),
+      checkedAt: nowIso,
+    }));
+    // A farm left paused is as quiet as a dead one, and the desktop detach flow
+    // has stranded it more than once.
+    if (pause.stale && shouldRaiseControllerAlarm(
+      { alive: !memo?.pausedNotifiedAt, notifiedAt: memo?.pausedNotifiedAt }, false, nowIso)) {
+      notifyDesktop("Heiss farm is paused", `${pause.detail} — resume with: heiss-farm maintenance exit`);
+      pausedNotifiedAt = nowIso;
+    }
+    print({ ok: true, controller: health.alive ? "alive" : recovered ? "recovered" : "down",
+      detail: health.detail, recovery: recovery?.detail, pause: pause.detail });
+    return;
+  }
+
   if (cmd === "daemon" && ["install", "uninstall", "status"].includes(args[1] ?? "")) {
     const dataDir = getArg(args, "--data") ?? defaultDataDir();
     const here = dirname(fileURLToPath(import.meta.url));
@@ -1047,14 +1122,19 @@ async function main(): Promise<void> {
     const srcCliPath = resolve(here, "..", "src", "cli.ts");
     if (args[1] === "install") {
       const intervalSec = getArg(args, "--interval-sec");
-      print(installControllerAgent({
+      const controller = installControllerAgent({
         dataDir,
         distCliPath,
         srcCliPath,
         intervalSec: intervalSec ? Number(intervalSec) : undefined,
-      }));
+      });
+      // Install the watcher alongside it: nothing else can report the
+      // controller being dead.
+      const watchdog = installWatchdogAgent({ dataDir, distCliPath, srcCliPath });
+      print({ ...controller, watchdog });
     } else if (args[1] === "uninstall") {
-      print(uninstallControllerAgent(dataDir));
+      const watchdog = uninstallWatchdogAgent();
+      print({ ...uninstallControllerAgent(dataDir), watchdog });
     } else {
       print(controllerAgentStatus(dataDir));
     }

@@ -107,3 +107,14 @@ describe("repeated failure escalation", () => {
     assert.equal(REPEATED_FAILURE_LIMIT, 3);
   });
 });
+
+describe("summary when the farm is paused", () => {
+  it("leads with the pause and calls the day bad", () => {
+    const state = farm();
+    state.settings.maintenance = { mode: "active", reason: "Detach from desktop", enteredAt: at("14:00") };
+    const summary = buildDailySummary(state, at("15:30"));
+    assert.equal(summary.paused, true);
+    assert.match(summary.headline, /^PAUSED \(Detach from desktop\) — nothing scheduled ran/);
+    assert.equal(summaryIsBad(summary), true);
+  });
+});

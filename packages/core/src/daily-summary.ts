@@ -15,6 +15,8 @@ export const SUMMARY_GRACE_MINUTES = 45;
 
 export interface DailySummary {
   day: string;
+  /** The farm was paused when the day was reported on. */
+  paused: boolean;
   warmupsCompleted: number;
   warmupsScheduled: number;
   engagementsAttempted: number;
@@ -73,7 +75,9 @@ export function buildDailySummary(state: FarmState, nowIso: string): DailySummar
     .filter((device) => state.settings.deviceHealth[device.id]?.ok === false)
     .map((device) => `${device.name}: ${state.settings.deviceHealth[device.id]?.detail ?? "unhealthy"}`);
 
+  const paused = state.settings.maintenance.mode !== "running";
   const parts = [
+    paused ? `PAUSED (${state.settings.maintenance.reason ?? "no reason given"}) — nothing scheduled ran` : "",
     `warmups ${warmupsCompleted}/${scheduled.length}`,
     `engagements ${engagementsLanded}/${touched.length}`,
   ];
@@ -83,6 +87,7 @@ export function buildDailySummary(state: FarmState, nowIso: string): DailySummar
 
   return {
     day,
+    paused,
     warmupsCompleted,
     warmupsScheduled: scheduled.length,
     engagementsAttempted: touched.length,
@@ -90,13 +95,14 @@ export function buildDailySummary(state: FarmState, nowIso: string): DailySummar
     blockedPersonas,
     needsAttention,
     deviceIssues,
-    headline: parts.join(" · "),
+    headline: parts.filter(Boolean).join(" · "),
   };
 }
 
 /** True when the day fell short of what was scheduled — worth a louder notification. */
 export function summaryIsBad(summary: DailySummary): boolean {
-  return summary.warmupsCompleted < summary.warmupsScheduled
+  return summary.paused
+    || summary.warmupsCompleted < summary.warmupsScheduled
     || summary.engagementsLanded < summary.engagementsAttempted
     || summary.blockedPersonas.length > 0
     || summary.needsAttention.length > 0

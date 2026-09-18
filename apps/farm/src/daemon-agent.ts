@@ -159,3 +159,116 @@ export function uninstallControllerAgent(dataDir?: string): ControllerAgentStatu
   rmSync(controllerPlistPath(), { force: true });
   return controllerAgentStatus(dataDir);
 }
+
+export const WATCHDOG_LABEL = "so.heiss.watchdog";
+/** Single-shot check; launchd reruns it, so a crash costs one interval. */
+export const WATCHDOG_INTERVAL_SEC = 300;
+
+export function watchdogPlistPath(): string {
+  return join(homedir(), "Library", "LaunchAgents", `${WATCHDOG_LABEL}.plist`);
+}
+
+export function watchdogLogPath(dataDir: string): string {
+  return join(dataDir, "watchdog.log");
+}
+
+export function watchdogPlistXml(opts: {
+  programArguments: string[];
+  logPath: string;
+  intervalSec?: number;
+  environment?: Record<string, string>;
+}): string {
+  const argsXml = opts.programArguments.map((arg) => `<string>${xmlEscape(arg)}</string>`).join("");
+  const envXml = Object.entries(opts.environment ?? {})
+    .map(([key, value]) => `<key>${xmlEscape(key)}</key><string>${xmlEscape(value)}</string>`)
+    .join("");
+  // StartInterval, not KeepAlive: the watchdog must run, report, and exit. A
+  // long-lived watcher can wedge exactly like the thing it watches.
+  return `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>`
+    + `<key>Label</key><string>${WATCHDOG_LABEL}</string>`
+    + `<key>ProgramArguments</key><array>${argsXml}</array>`
+    + (envXml ? `<key>EnvironmentVariables</key><dict>${envXml}</dict>` : "")
+    + `<key>RunAtLoad</key><true/>`
+    + `<key>StartInterval</key><integer>${opts.intervalSec ?? WATCHDOG_INTERVAL_SEC}</integer>`
+    + `<key>StandardOutPath</key><string>${xmlEscape(opts.logPath)}</string>`
+    + `<key>StandardErrorPath</key><string>${xmlEscape(opts.logPath)}</string>`
+    + `</dict></plist>`;
+}
+
+export function watchdogProgramArguments(opts: {
+  dataDir: string;
+  distCliPath: string;
+  srcCliPath: string;
+}): string[] {
+  if (existsSync(opts.distCliPath)) {
+    return [stableNodePath(), opts.distCliPath, "daemon", "watch", "--data", opts.dataDir];
+  }
+  return ["/usr/bin/env", "npx", "tsx", opts.srcCliPath, "daemon", "watch", "--data", opts.dataDir];
+}
+
+export function installWatchdogAgent(opts: {
+  dataDir: string;
+  distCliPath: string;
+  srcCliPath: string;
+  intervalSec?: number;
+}): { ok: true; label: string; plist: string; running: boolean } {
+  const uid = process.getuid?.() ?? 0;
+  const plistPath = watchdogPlistPath();
+  mkdirSync(dirname(plistPath), { recursive: true });
+  const programArguments = watchdogProgramArguments(opts);
+  const environment: Record<string, string> = {};
+  if (programArguments[0] === "/usr/bin/env") {
+    environment.PATH = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  }
+  writeFileSync(plistPath, watchdogPlistXml({
+    programArguments,
+    logPath: watchdogLogPath(opts.dataDir),
+    intervalSec: opts.intervalSec,
+    environment,
+  }));
+  spawnSync("launchctl", ["bootout", `gui/${uid}/${WATCHDOG_LABEL}`], { stdio: "ignore" });
+  spawnSync("launchctl", ["bootstrap", `gui/${uid}`, plistPath], { encoding: "utf8" });
+  const running = spawnSync("launchctl", ["print", `gui/${uid}/${WATCHDOG_LABEL}`], { stdio: "ignore" }).status === 0;
+  return { ok: true, label: WATCHDOG_LABEL, plist: plistPath, running };
+}
+
+export function uninstallWatchdogAgent(): { ok: true; label: string } {
+  const uid = process.getuid?.() ?? 0;
+  spawnSync("launchctl", ["bootout", `gui/${uid}/${WATCHDOG_LABEL}`], { stdio: "ignore" });
+  rmSync(watchdogPlistPath(), { force: true });
+  return { ok: true, label: WATCHDOG_LABEL };
+}
+
+/**
+ * Bring the controller back. Only ever touches this launchd label — never a
+ * process tree, and never a GUI application.
+ *
+ * Kickstart alone is not enough: it fails when the job is gone from launchd,
+ * and when launchd refuses to exec the program (exit 78 after the app bundle
+ * was rebuilt and re-signed, 2026-09-18). Re-bootstrapping the plist recovers
+ * both, which is what a person would have had to do by hand.
+ */
+export function reviveController(): { ok: boolean; detail: string } {
+  const uid = process.getuid?.() ?? 0;
+  const kick = spawnSync("launchctl", ["kickstart", "-k", `gui/${uid}/${CONTROLLER_LABEL}`], { encoding: "utf8" });
+  if (kick.status === 0) return { ok: true, detail: "kickstarted the controller job" };
+  const plist = controllerPlistPath();
+  if (!existsSync(plist)) {
+    return { ok: false, detail: `no controller plist at ${plist}; run: heiss-farm daemon install` };
+  }
+  spawnSync("launchctl", ["bootout", `gui/${uid}/${CONTROLLER_LABEL}`], { stdio: "ignore" });
+  const boot = spawnSync("launchctl", ["bootstrap", `gui/${uid}`, plist], { encoding: "utf8" });
+  if (boot.status !== 0) {
+    return { ok: false, detail: (boot.stderr || `launchctl bootstrap failed (${boot.status})`).trim() };
+  }
+  spawnSync("launchctl", ["kickstart", "-k", `gui/${uid}/${CONTROLLER_LABEL}`], { stdio: "ignore" });
+  return { ok: true, detail: "re-registered the controller job with launchd" };
+}
+
+/** Last exit status launchd recorded for the controller, when it can be read. */
+export function controllerLastExitCode(): number | undefined {
+  const uid = process.getuid?.() ?? 0;
+  const result = spawnSync("launchctl", ["print", `gui/${uid}/${CONTROLLER_LABEL}`], { encoding: "utf8" });
+  const match = /last exit code = (\d+)/.exec(result.stdout ?? "");
+  return match ? Number(match[1]) : undefined;
+}
