@@ -423,6 +423,10 @@ export interface FarmSession {
   retryCount?: number;
   /** Infrastructure retries never inflate the social-session backoff. */
   transportRetryCount?: number;
+  /** Collapsed wording of the last failure, and how many times in a row it has
+   *  repeated — identical repeats escalate without riding the whole ladder. */
+  failureSignature?: string;
+  repeatedFailureCount?: number;
   nextRetryAt?: string;
   lastError?: string;
   failureKind?: FailureKind;

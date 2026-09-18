@@ -36,7 +36,7 @@ import {
   remainingSteps,
   resumeSession,
 } from "./checkpoint.js";
-import { classifyFailure } from "./failures.js";
+import { classifyFailure, repeatedFailureCount } from "./failures.js";
 import { readyLikeApprovalsForTargeting, recordDiscoveryCandidates, refreshCandidateQueue } from "./candidates.js";
 import type { JsonStore } from "./store.js";
 import type {
@@ -1149,16 +1149,24 @@ export class FarmOrchestrator {
     // a genuinely stuck account stops consuming device time every cycle.
     const RETRY_ESCALATION_LIMIT = 6;
     const TRANSPORT_ESCALATION_LIMIT = 20;
+    // Those ladders suit transient faults. A deterministic one repeats word for
+    // word and only wastes the wait, so identical failures escalate sooner.
+    const repeated = repeatedFailureCount(session.failureSignature, session.repeatedFailureCount, message);
     const escalate = disposition.requiresAttention
+      || repeated.deterministic
       || (retryCount ?? 0) >= RETRY_ESCALATION_LIMIT
       || (transportRetryCount ?? 0) >= TRANSPORT_ESCALATION_LIMIT;
     const escalationNote = !disposition.requiresAttention && escalate
-      ? `${message} (escalated after ${retryCount ?? transportRetryCount} recovery attempts)`
+      ? (repeated.deterministic
+        ? `${message} (unchanged across ${repeated.count} attempts — retrying will not help)`
+        : `${message} (escalated after ${retryCount ?? transportRetryCount} recovery attempts)`)
       : message;
     const paused = checkpointSession({
       ...session,
       retryCount,
       transportRetryCount,
+      failureSignature: repeated.signature,
+      repeatedFailureCount: repeated.count,
       nextRetryAt: escalate || delay === undefined
         ? undefined
         : new Date(new Date(now).getTime() + delay).toISOString(),

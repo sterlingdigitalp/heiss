@@ -12,6 +12,7 @@ export * from "./locks.js";
 export * from "./lockfile.js";
 export * from "./queue.js";
 export * from "./schedule.js";
+export * from "./daily-summary.js";
 export * from "./checkpoint.js";
 export * from "./failures.js";
 export * from "./auth.js";

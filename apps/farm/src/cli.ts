@@ -44,6 +44,9 @@ import {
   planDailyEngagement,
   pickDueEngagementPersona,
   recordCuratedOutcome,
+  summaryDue,
+  buildDailySummary,
+  summaryIsBad,
   curatedEngagementBlocked,
   choosePostForEngagement,
   recordEngagementTarget,
@@ -1374,6 +1377,20 @@ async function main(): Promise<void> {
                 }
               }
             }
+          }
+          // One report per local day once the last window has passed, good day
+          // or bad: a silent farm and a healthy idle one look identical, which
+          // is how 2026-09-18 went unnoticed from 09:08 to 10:28.
+          if (summaryDue(store.state, nowIso)) {
+            const summary = buildDailySummary(store.state, nowIso);
+            store.state.settings.notificationKeys.dailySummary = summary.day;
+            store.pushActivity({ kind: "daily_summary", message: summary.headline });
+            store.save();
+            notifyDesktop(
+              summaryIsBad(summary) ? "Heiss day finished with problems" : "Heiss day complete",
+              summary.headline,
+            );
+            console.log(JSON.stringify({ at: nowIso, dailySummary: summary }));
           }
           const cloud = await pushCloudCompletions(store).catch((error) => ({ warning: String(error), pushed: 0 }));
           const completed = result.sessions.filter((session) => session.status === "completed").length;

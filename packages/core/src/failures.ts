@@ -53,3 +53,41 @@ function failureKindFrom(error: unknown): FailureKind | undefined {
     "app_navigation", "safety_policy", "action",
   ].includes(value) ? value as FailureKind : undefined;
 }
+
+/** Repeats of the same failure before escalating, regardless of failure kind. */
+export const REPEATED_FAILURE_LIMIT = 3;
+
+/**
+ * Collapse a failure message to what makes it the "same" failure: the wording,
+ * without the identifiers that change every attempt (screenshot names, session
+ * and command ids, paths, timings).
+ */
+export function failureSignature(message: string): string {
+  return message
+    .replace(/\b[0-9a-fA-F]{8}-[0-9a-fA-F-]{4,}\b/g, "<id>")
+    .replace(/\/\S+/g, "<path>")
+    .replace(/\d+/g, "<n>")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
+}
+
+/**
+ * How many times in a row this exact failure has now been seen.
+ *
+ * The retry ladders are generous because most failures are transient — but a
+ * deterministic fault repeats verbatim and rides the ladder for hours. On
+ * 2026-09-18 an unreachable keyboard key would have taken ~2.6 hours of
+ * app_navigation backoff (5/10/20/40/80 minutes) to reach a human. Identical
+ * wording is the signal that waiting will not help.
+ */
+export function repeatedFailureCount(
+  previousSignature: string | undefined,
+  previousCount: number | undefined,
+  message: string,
+): { signature: string; count: number; deterministic: boolean } {
+  const signature = failureSignature(message);
+  const count = signature === previousSignature ? (previousCount ?? 0) + 1 : 1;
+  return { signature, count, deterministic: count >= REPEATED_FAILURE_LIMIT };
+}
