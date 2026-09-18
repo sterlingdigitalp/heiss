@@ -1,6 +1,6 @@
 /** Shared command protocol. Update both values when runner semantics change. */
 export const RUNNER_PROTOCOL_VERSION = 2;
-export const RUNNER_BUILD = "heiss-runner-2026.09.17.3";
+export const RUNNER_BUILD = "heiss-runner-2026.09.18.3";
 
 export interface RunnerProtocolInfo {
   protocolVersion: number;

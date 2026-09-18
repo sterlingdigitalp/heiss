@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.09.17.3"
+private let heissRunnerBuild = "heiss-runner-2026.09.18.3"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -478,7 +478,7 @@ final class HeissRunnerUITests: XCTestCase {
                     throw NSError(domain: "HeissRunner", code: 11, userInfo: [NSLocalizedDescriptionKey: "Search field did not receive keyboard focus"])
                 }
                 clearSearchFieldIfNeeded(app, surface: window, field: field)
-                try typeUsingVisibleKeyboard(app, text: term)
+                try typeUsingVisibleKeyboard(app, text: term, field: field)
                 submitVisibleSearch(app, surface: window, command: command)
             }
         } else if action == "post:compose" {
@@ -899,7 +899,7 @@ final class HeissRunnerUITests: XCTestCase {
             throw NSError(domain: "HeissRunner", code: 11, userInfo: [NSLocalizedDescriptionKey: "Search field did not receive keyboard focus"])
         }
         clearSearchFieldIfNeeded(app, surface: window, field: field)
-        try typeUsingVisibleKeyboard(app, text: term)
+        try typeUsingVisibleKeyboard(app, text: term, field: field)
         submitVisibleSearch(app, surface: window, command: command)
         Thread.sleep(forTimeInterval: 1.2)
         return discoveryDetail(base: "xctest:\(platform):\(action)", platform: platform, actor: command["handle"] as? String ?? "")
@@ -1680,16 +1680,24 @@ final class HeissRunnerUITests: XCTestCase {
             // and aborted the whole search. typeText handles every character in
             // one call; the key-tapping path stays as the fallback for apps
             // whose fields refuse it.
+            // Verify through snapshot() and strip the invisible bidi controls X
+            // wraps field text in — comparing raw .value reported "not landed"
+            // for text that was typed correctly, which sent every handle down
+            // the key-tapping path (2026-09-18).
+            let typedLanded: () -> Bool = {
+                let raw = (try? field.snapshot())?.value as? String ?? ""
+                return self.normalizedHandle(raw).contains(self.normalizedHandle(term))
+            }
             var landed = false
-            if field.exists {
-                field.typeText(term)
-                Thread.sleep(forTimeInterval: 0.4)
-                let value = ((field.value as? String) ?? "").lowercased()
-                landed = value.contains(term.lowercased())
+            for attempt in 0..<2 where !landed {
+                if field.exists { field.typeText(term) }
+                Thread.sleep(forTimeInterval: 0.5)
+                landed = typedLanded()
+                if !landed, attempt == 0 { clearSearchFieldIfNeeded(app, surface: window, field: field) }
             }
             if !landed {
                 clearSearchFieldIfNeeded(app, surface: window, field: field)
-                try typeUsingVisibleKeyboard(app, text: term)
+                try typeUsingVisibleKeyboard(app, text: term, field: field)
             }
             submitVisibleSearch(app, surface: window, command: command)
         }
@@ -1933,7 +1941,7 @@ final class HeissRunnerUITests: XCTestCase {
         }
     }
 
-    private func typeUsingVisibleKeyboard(_ app: XCUIApplication, text: String) throws {
+    private func typeUsingVisibleKeyboard(_ app: XCUIApplication, text: String, field: XCUIElement? = nil) throws {
         // A plus sign is a natural way to configure topics such as "11+ exam",
         // but third-party search keyboards expose it behind inconsistent
         // second-layer labels. The word is semantically identical and keeps
@@ -1961,7 +1969,26 @@ final class HeissRunnerUITests: XCTestCase {
                 }
                 key = app.keys[label]
             }
-            guard key.waitForExistence(timeout: 2), key.isHittable else {
+            if !key.waitForExistence(timeout: 2) || !key.isHittable {
+                // Plane-switch labels are ambiguous ("#+=" and "123" both report
+                // as "more"), so the walk can strand on the wrong plane — on
+                // 2026-09-18 every underscore handle failed here and the whole
+                // 9am engagement window did nothing. Typing the character
+                // directly needs no plane at all.
+                // Re-resolve: the captured field goes stale across plane
+                // switches, so `field.exists` is false by the time we need it.
+                let live = app.searchFields.count > 0 ? app.searchFields.firstMatch
+                    : (app.textFields.count > 0 ? app.textFields.firstMatch : nil)
+                if let live, live.exists {
+                    live.typeText(String(character))
+                    Thread.sleep(forTimeInterval: Double.random(in: 0.06...0.16))
+                    continue
+                }
+                if let field, field.exists {
+                    field.typeText(String(character))
+                    Thread.sleep(forTimeInterval: Double.random(in: 0.06...0.16))
+                    continue
+                }
                 throw NSError(domain: "HeissRunner", code: 13, userInfo: [NSLocalizedDescriptionKey: "Keyboard key \(label) was not available"])
             }
             key.tap()
