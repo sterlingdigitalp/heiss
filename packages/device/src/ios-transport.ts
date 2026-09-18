@@ -5,9 +5,13 @@
  */
 import { execFile, spawn } from "node:child_process";
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
+  statSync,
   writeFileSync,
   rmSync,
 } from "node:fs";
@@ -16,6 +20,7 @@ import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { DeviceSessionError, type IosTransport } from "./ios-driver.js";
+import { automationLogPath } from "./runner-install.js";
 import {
   RUNNER_BUILD,
   RUNNER_PROTOCOL_VERSION,
@@ -337,6 +342,13 @@ export class RealUsbTransport implements IosTransport {
     // connection was interrupted"), taking the whole farm offline until the Mac
     // is rebooted. Stay responsive for short commands, then back off hard —
     // a batched session cannot possibly answer in its first minute anyway.
+    // A step failure can tear down the XCTest host; launchd's KeepAlive then
+    // starts a fresh runner that knows nothing of this command, so the wait
+    // could only ever end in the full timeout (15 minutes for a session).
+    // The new runner announces itself in the automation log, so watch for that
+    // and fail in seconds instead. Observed 2026-09-17: a failed X search step
+    // cost 15 minutes per attempt, on every retry.
+    const restartWatch = watchForRunnerRestart(udid);
     const pollStartedAt = Date.now();
     const pollDelay = () => {
       const elapsed = Date.now() - pollStartedAt;
@@ -357,6 +369,12 @@ export class RealUsbTransport implements IosTransport {
             this.onProgress({ ...progress, udid, receivedAt: new Date().toISOString() });
           }
         } catch { /* journal is created only after account verification */ }
+      }
+      if (restartWatch.restarted()) {
+        rmSync(work, { recursive: true, force: true });
+        throw new Error(
+          `HeissRunner restarted while running ${String(cmd.action)} (a step tore down the XCTest host); see ${automationLogPath(udid)}`,
+        );
       }
       try {
         await this.copyFromDevice(udid, remoteOut, localOut, POLL_COPY_TIMEOUT_MS);
@@ -476,4 +494,44 @@ function normalizeFailureKind(value: unknown): FailureKind {
     "transport", "runner", "unknown_ui", "account_mismatch",
     "app_navigation", "safety_policy", "action",
   ].includes(value) ? value as FailureKind : "action";
+}
+
+/**
+ * Watches the runner's automation log for a fresh "ready" banner, which means
+ * launchd restarted the XCTest host. Reads only the bytes appended since the
+ * last check, so a long-running session does not re-read a growing log.
+ */
+export function watchForRunnerRestart(
+  udid: string,
+  logPath = automationLogPath(udid),
+): { restarted: () => boolean } {
+  const READY = "HEISS_COMMAND_SERVER_READY";
+  const size = (): number => {
+    try { return statSync(logPath).size; } catch { return -1; }
+  };
+  let seen = size();
+  return {
+    restarted(): boolean {
+      const current = size();
+      if (current < 0 || seen < 0) { seen = current; return false; }
+      // Truncated or rotated: the runner was relaunched with a fresh log.
+      if (current < seen) { seen = current; return true; }
+      if (current === seen) return false;
+      const length = Math.min(current - seen, 256_000);
+      const from = current - length;
+      const buffer = Buffer.alloc(length);
+      let fd: number | undefined;
+      try {
+        fd = openSync(logPath, "r");
+        readSync(fd, buffer, 0, length, from);
+      } catch {
+        seen = current;
+        return false;
+      } finally {
+        if (fd !== undefined) closeSync(fd);
+      }
+      seen = current;
+      return buffer.toString("utf8").includes(READY);
+    },
+  };
 }

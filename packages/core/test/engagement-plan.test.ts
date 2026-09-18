@@ -5,6 +5,7 @@ import {
   postEngagementScore,
   choosePostForEngagement,
   planDailyEngagement,
+  pickDueEngagementPersona,
   HOTTER_POST_MULTIPLE,
 } from "../src/engagement-plan.js";
 import type { PostSnapshot } from "../src/engagement-plan.js";
@@ -299,5 +300,54 @@ describe("engagement holds until the persona's own hour", () => {
     // days release and some do not. Identical every day would mean no jitter.
     assert.equal(released.some(Boolean) && released.some((r) => !r), true,
       `expected mixed results across days, got ${JSON.stringify(released)}`);
+  });
+});
+
+describe("picking the next persona across devices", () => {
+  const target = (accountId: string) => ({
+    id: `t-${accountId}`, accountId, handle: `@t${accountId}`, platform: "x" as const,
+    active: true, addedAt: "2026-09-01T00:00:00.000Z", engagedCount: 0,
+  });
+  const account = (id: string, deviceId: string, at: string) => ({
+    id, deviceId, platform: "x", curatedEngagementAt: at, curatedEngagementJitterMinutes: 0,
+  });
+  const base = {
+    nowIso: "2026-09-18T16:00:00.000Z", // 11:00 local, every schedule below is past
+    timeZone: "America/Chicago",
+    actionable: () => true,
+  };
+
+  it("serves a second device when the first has nobody due", () => {
+    const accounts = [account("a1", "seeDevice", "09:00"), account("b1", "newDevice", "09:30")];
+    // Only b1 has a target, so device one has nothing to do this tick.
+    const picked = pickDueEngagementPersona(accounts, {
+      ...base, targets: [target("b1")], deviceReady: () => true,
+    });
+    assert.equal(picked?.id, "b1", "the idle first device must not block the second");
+  });
+
+  it("takes the most overdue persona, and never one on a device that is not ready", () => {
+    const accounts = [account("late", "d2", "10:30"), account("early", "d1", "09:00")];
+    const targets = [target("late"), target("early")];
+    assert.equal(pickDueEngagementPersona(accounts, { ...base, targets, deviceReady: () => true })?.id, "early");
+    assert.equal(
+      pickDueEngagementPersona(accounts, { ...base, targets, deviceReady: (id) => id === "d2" })?.id,
+      "late",
+      "only the ready device's persona is eligible",
+    );
+    assert.equal(pickDueEngagementPersona(accounts, { ...base, targets, deviceReady: () => false }), undefined);
+  });
+
+  it("skips accounts needing attention and non-X accounts", () => {
+    const accounts = [account("flagged", "d1", "09:00"), account("fine", "d1", "09:30")];
+    const targets = [target("flagged"), target("fine")];
+    assert.equal(
+      pickDueEngagementPersona(accounts, { ...base, targets, deviceReady: () => true, actionable: (a) => a.id !== "flagged" })?.id,
+      "fine",
+    );
+    assert.equal(
+      pickDueEngagementPersona([{ ...account("ig", "d1", "09:00"), platform: "instagram" }], { ...base, targets: [target("ig")], deviceReady: () => true }),
+      undefined,
+    );
   });
 });

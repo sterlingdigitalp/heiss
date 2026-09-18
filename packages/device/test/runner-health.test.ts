@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,6 +14,7 @@ import {
   automationRunnerLabel,
   automationPlistXml,
 } from "../src/runner-install.js";
+import { watchForRunnerRestart } from "../src/ios-transport.js";
 import { loadSigningConfig, resolveSigningConfig } from "../src/signing.js";
 
 describe("automation runner supervision", () => {
@@ -128,5 +129,29 @@ describe("signing resilience (autonomy regressions)", () => {
     process.env.HEISS_ASC_ISSUER_ID = "ISSUER";
     const resolved = resolveSigningConfig({}, join(dir, "absent.json"));
     assert.equal(resolved.method, "asc");
+  });
+});
+
+describe("runner restart detection during a command", () => {
+  it("fires only when a fresh ready banner is appended, and on log rotation", () => {
+    const log = join(mkdtempSync(join(tmpdir(), "heiss-restart-")), "runner.log");
+    writeFileSync(log, "Testing started\nHEISS_COMMAND_SERVER_READY\nt = 1.0s Tap\n");
+    const watch = watchForRunnerRestart("udid", log);
+    assert.equal(watch.restarted(), false, "the banner already present is this run's own");
+
+    writeFileSync(log, "Testing started\nHEISS_COMMAND_SERVER_READY\nt = 1.0s Tap\nt = 2.0s Swipe\n");
+    assert.equal(watch.restarted(), false, "ordinary progress is not a restart");
+
+    appendFileSync(log, "** TEST EXECUTE FAILED **\nTesting started\nHEISS_COMMAND_SERVER_READY\n");
+    assert.equal(watch.restarted(), true, "a new ready banner means launchd relaunched the host");
+    assert.equal(watch.restarted(), false, "reported once, not on every poll");
+
+    writeFileSync(log, "fresh\n");
+    assert.equal(watch.restarted(), true, "a truncated or rotated log is a relaunch too");
+  });
+
+  it("stays quiet when the log is missing", () => {
+    const watch = watchForRunnerRestart("udid", join(tmpdir(), "heiss-no-such-runner.log"));
+    assert.equal(watch.restarted(), false);
   });
 });

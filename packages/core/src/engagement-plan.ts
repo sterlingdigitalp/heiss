@@ -173,3 +173,44 @@ export function planDailyEngagement(
   )[0]!;
   return { target: leastRecent, shouldFollow: false, reason: "rotation" };
 }
+
+/**
+ * The persona that should engage next, across every device that is ready.
+ *
+ * Picking one device first and then looking only at its personas starves a
+ * second phone: whenever the first device has nobody due, no engagement runs
+ * at all even though the other phone has a persona waiting. Ordering by
+ * scheduled time keeps the most overdue persona first, so a late start does
+ * not systematically favour one device.
+ */
+export function pickDueEngagementPersona<
+  T extends {
+    id: string;
+    deviceId: string;
+    platform: string;
+    curatedEngagementAt?: string;
+    curatedEngagementJitterMinutes?: number;
+  },
+>(
+  accounts: T[],
+  opts: {
+    targets: CuratedTarget[];
+    nowIso: string;
+    timeZone: string;
+    deviceReady: (deviceId: string) => boolean;
+    actionable: (account: T) => boolean;
+  },
+): T | undefined {
+  return accounts
+    .filter((candidate) =>
+      candidate.platform === "x"
+      && opts.deviceReady(candidate.deviceId)
+      && opts.actionable(candidate)
+      && planDailyEngagement(opts.targets, candidate.id, opts.nowIso, opts.timeZone, {
+        timeOfDay: candidate.curatedEngagementAt,
+        jitterMinutes: candidate.curatedEngagementJitterMinutes ?? 8,
+      }).target !== null)
+    .sort((left, right) =>
+      (left.curatedEngagementAt ?? "").localeCompare(right.curatedEngagementAt ?? "")
+      || left.id.localeCompare(right.id))[0];
+}

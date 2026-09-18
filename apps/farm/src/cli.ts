@@ -42,6 +42,7 @@ import {
   curatedTargetsFor,
   targetHandleKey,
   planDailyEngagement,
+  pickDueEngagementPersona,
   choosePostForEngagement,
   recordEngagementTarget,
   xPostTargetKey,
@@ -1314,19 +1315,18 @@ async function main(): Promise<void> {
           // contends with a warmup, and only against a runner we just saw
           // healthy. Fail-soft: an error here must not break the tick.
           if (result.sessions.length === 0) {
-            const engageDevice = store.state.devices.find((row) => row.online
-              && deviceRested(row.id)
-              && store.state.settings.deviceHealth[row.id]?.ok === true);
-            if (engageDevice) {
-              const persona = store.state.accounts.find((candidate) =>
-                candidate.platform === "x"
-                && candidate.deviceId === engageDevice.id
-                && (candidate.preflightStatus ?? "ready") === "ready"
-                && planDailyEngagement(
-                  store.state.curatedTargets, candidate.id, nowIso, store.state.settings.timeZone,
-                  { timeOfDay: candidate.curatedEngagementAt,
-                    jitterMinutes: candidate.curatedEngagementJitterMinutes ?? 8 },
-                ).target !== null);
+            const engageableDevices = new Set(store.state.devices
+              .filter((row) => row.online && deviceRested(row.id)
+                && store.state.settings.deviceHealth[row.id]?.ok === true)
+              .map((row) => row.id));
+            if (engageableDevices.size > 0) {
+              const persona = pickDueEngagementPersona(store.state.accounts, {
+                targets: store.state.curatedTargets,
+                nowIso,
+                timeZone: store.state.settings.timeZone,
+                deviceReady: (deviceId) => engageableDevices.has(deviceId),
+                actionable: accountActionable,
+              });
               if (persona) {
                 try {
                   // openPost drives the like, and stayed off while the like was

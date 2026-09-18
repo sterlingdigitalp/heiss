@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.08.08.1"
+private let heissRunnerBuild = "heiss-runner-2026.09.17.3"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1696,7 +1696,15 @@ final class HeissRunnerUITests: XCTestCase {
     }
 
     private func normalizedHandle(_ value: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // X wraps handles in invisible bidi controls — the accessibility label
+        // reads "\u{2066}\u{202A}@AI4Operators\u{202C}\u{2069}". Leaving them in
+        // made an exact compare fail for every handle whose OCR text was also
+        // ambiguous (capital I, underscores), so those accounts could never be
+        // verified or switched to (2026-09-17). Drop format/control scalars.
+        let stripped = String(String.UnicodeScalarView(
+            value.unicodeScalars.filter { !$0.properties.isDefaultIgnorableCodePoint && !$0.properties.isBidiControl }
+        ))
+        let trimmed = stripped.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var result = Substring(trimmed)
         while result.first == "@" { result = result.dropFirst() }
         return String(result)
@@ -1891,7 +1899,11 @@ final class HeissRunnerUITests: XCTestCase {
     /// prior search step is not appended (which reads as the term "typed
     /// twice"). Non-destructive when the field is empty or shows a placeholder.
     private func clearSearchFieldIfNeeded(_ app: XCUIApplication, surface: XCUIElement, field: XCUIElement) {
-        let value = (field.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        // snapshot() throws a catchable Swift error; reading .value on an element
+        // that has left the hierarchy raises "Failed to get matching snapshot",
+        // which unwinds past every catch here and tears down the command server
+        // (2026-09-17: one stale search field killed a whole warmup session).
+        let value = ((try? field.snapshot())?.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = value.lowercased()
         guard !value.isEmpty, !lower.contains("search"), !lower.contains("find") else { return }
         let clear = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Clear")).firstMatch
@@ -2470,7 +2482,9 @@ final class HeissRunnerUITests: XCTestCase {
             // avatar row. Search that account list by exact rendered handle.
             window.coordinate(withNormalizedOffset: CGVector(dx: 0.74, dy: 0.075)).tap()
             Thread.sleep(forTimeInterval: 1.0)
-            if try tapExactHandleUsingOCR(surface: window, normalized: normalized) {
+            let selected = try tapExactHandleUsingAccessibility(app, normalized: normalized)
+                || tapExactHandleUsingOCR(surface: window, normalized: normalized)
+            if selected {
                 Thread.sleep(forTimeInterval: 1.2)
                 try openXDrawer(surface: window)
                 inspectedAccounts.append(try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | "))
@@ -3084,6 +3098,28 @@ final class HeissRunnerUITests: XCTestCase {
         return raw.lowercased().range(of: pattern, options: .regularExpression) != nil
     }
 
+    /// Tap the account row whose published label is exactly this handle.
+    ///
+    /// The overflow account list was searched by OCR alone, so any handle Vision
+    /// reads ambiguously could never be selected: "@AI4Operators" (capital I vs
+    /// l vs 1) and "@EvaAI_Lab" (underscore) failed on every slot and retry,
+    /// while the same drawer published both labels exactly. Ask the tree first
+    /// and keep OCR as the fallback (2026-09-17).
+    private func tapExactHandleUsingAccessibility(_ app: XCUIApplication, normalized: String) -> Bool {
+        for query in drawerHandleQueries(app, normalized: normalized) {
+            for element in query.allElementsBoundByIndex.prefix(12)
+            where elementContainsExactHandle(element, normalized: normalized) {
+                guard element.exists else { continue }
+                if element.isHittable { element.tap(); return true }
+                let frame = element.frame
+                guard frame.width > 0, frame.height > 0 else { continue }
+                element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+                return true
+            }
+        }
+        return false
+    }
+
     private func tapExactHandleUsingOCR(
         surface: XCUIElement,
         normalized: String,
@@ -3171,14 +3207,51 @@ final class HeissRunnerUITests: XCTestCase {
         return false
     }
 
+    /// Markers that prove the drawer is open. "Profile" alone, constrained to
+    /// the upper screen band, stopped matching after the iOS 27 / X update:
+    /// the check failed on an OPEN drawer, so the retry tapped the avatar
+    /// again, walked into the account list, and landed on X's "Log in to X"
+    /// sheet — reported as "drawer did not open" with the login sheet in the
+    /// screenshot (2026-09-17).
+    private static let xDrawerMarkers = ["Profile", "Bookmarks", "Communities", "Settings and privacy", "Premium", "Lists"]
+
+    private func xDrawerIsOpen() throws -> Bool {
+        for marker in Self.xDrawerMarkers {
+            if try screenContainsTextUsingOCR(marker) { return true }
+        }
+        return false
+    }
+
     private func openXDrawer(surface: XCUIElement) throws {
-        for _ in 0..<3 {
+        for attempt in 0..<3 {
             _ = try dismissStaleLimitedPhotosSystemPrompt(surface: surface, appearanceTimeout: 1)
+            if try xDrawerIsOpen() { return }
+            // Never tap blindly into a login sheet: another tap there selects an
+            // account row or "add an existing account".
+            if try dismissXLoginSheetIfPresent(surface: surface), attempt < 2 {
+                Thread.sleep(forTimeInterval: 0.8)
+            }
             surface.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.06)).tap()
-            Thread.sleep(forTimeInterval: 1.0)
-            if try screenContainsTextUsingOCR("Profile", minimumVisionY: 0.55) { return }
+            Thread.sleep(forTimeInterval: 1.2)
+            if try xDrawerIsOpen() { return }
         }
         throw NSError(domain: "HeissRunner", code: 16, userInfo: [NSLocalizedDescriptionKey: "X navigation drawer did not open"])
+    }
+
+    /// X's "Log in to X — Continue with your existing accounts" sheet. Tapping
+    /// a row there would re-authenticate an account; closing it returns to the
+    /// signed-in app, which is what every caller actually wants.
+    @discardableResult
+    private func dismissXLoginSheetIfPresent(surface: XCUIElement) throws -> Bool {
+        let sheetShowing = try screenContainsTextUsingOCR("Continue with your existing accounts")
+            || screenContainsTextUsingOCR("Log in to")
+        guard sheetShowing else { return false }
+        // The sheet's close control sits top-right; tap it in screen space,
+        // since the element query would need the app handle this helper has
+        // deliberately not got (callers reach it from several apps).
+        surface.coordinate(withNormalizedOffset: CGVector(dx: 0.925, dy: 0.072)).tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        return true
     }
 
     private func screenContainsTextUsingOCR(

@@ -144,6 +144,11 @@ export function startCommandAuthorityServer(
   // Keep the writable side open after the client half-closes its request so
   // long-running canaries can return their complete JSON response.
   const server = createServer({ allowHalfOpen: true }, (socket) => {
+    // A client that disconnects before its reply is written makes the write
+    // fail with EPIPE/ECONNRESET. Unhandled, that 'error' event takes down the
+    // whole controller — it did, 2026-09-18, after which launchd could not get
+    // it healthy again and the farm sat idle.
+    socket.on("error", () => { /* the caller is gone; the command still ran */ });
     let raw = "";
     let oversized = false;
     socket.setEncoding("utf8");
@@ -193,6 +198,9 @@ export function startCommandAuthorityServer(
         socket.end(JSON.stringify({ code, stdout, stderr }));
       });
     });
+  });
+  server.on("error", (error) => {
+    console.error(JSON.stringify({ at: new Date().toISOString(), commandSocketError: String(error) }));
   });
   server.listen(socketPath, () => {
     // 0600 so only this user can hand the controller a command. The socket was
