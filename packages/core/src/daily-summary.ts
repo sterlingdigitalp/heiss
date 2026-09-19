@@ -22,6 +22,8 @@ export interface DailySummary {
   engagementsAttempted: number;
   engagementsLanded: number;
   blockedPersonas: string[];
+  /** Targets the rotation gave up on today. */
+  pausedTargets: string[];
   needsAttention: string[];
   deviceIssues: string[];
   /** One line, phrased for a desktop notification. */
@@ -67,6 +69,10 @@ export function buildDailySummary(state: FarmState, nowIso: string): DailySummar
     .filter(([, record]) => record.blockedDay === day)
     .map(([accountId]) => handleOf(accountId));
 
+  const pausedTargets = state.curatedTargets
+    .filter((target) => target.autoPausedAt && calendarDay(target.autoPausedAt, timeZone) === day)
+    .map((target) => `${handleOf(target.accountId)} → ${target.handle}`);
+
   const needsAttention = [...new Set(state.sessions
     .filter((session) => session.status === "checkpointed" && session.requiresAttention)
     .map((session) => handleOf(session.accountId)))];
@@ -82,6 +88,7 @@ export function buildDailySummary(state: FarmState, nowIso: string): DailySummar
     `engagements ${engagementsLanded}/${touched.length}`,
   ];
   if (blockedPersonas.length > 0) parts.push(`stopped: ${blockedPersonas.join(", ")}`);
+  if (pausedTargets.length > 0) parts.push(`targets paused: ${pausedTargets.join(", ")}`);
   if (needsAttention.length > 0) parts.push(`needs you: ${needsAttention.join(", ")}`);
   if (deviceIssues.length > 0) parts.push(deviceIssues.join("; "));
 
@@ -93,6 +100,7 @@ export function buildDailySummary(state: FarmState, nowIso: string): DailySummar
     engagementsAttempted: touched.length,
     engagementsLanded,
     blockedPersonas,
+    pausedTargets,
     needsAttention,
     deviceIssues,
     headline: parts.filter(Boolean).join(" · "),

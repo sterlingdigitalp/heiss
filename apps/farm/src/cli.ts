@@ -44,6 +44,8 @@ import {
   planDailyEngagement,
   pickDueEngagementPersona,
   recordCuratedOutcome,
+  recordTargetAttempt,
+  clearAutoPause,
   summaryDue,
   buildDailySummary,
   summaryIsBad,
@@ -415,9 +417,11 @@ async function runCuratedEngagementOnce(
       // half an hour, and nothing else could use the device meanwhile.
       if (!opts.dryRun) {
         target.lastAttemptedAt = nowIso;
+        const barren = recordTargetAttempt(target, { engaged: false, reason: choice.reason, nowIso });
         store.pushActivity({
           kind: "curated_engagement", accountId: account.id, deviceId: device.id,
-          message: `${account.handle} → ${target.handle}: attempt spent, ${choice.reason}`,
+          message: `${account.handle} → ${target.handle}: attempt spent, ${choice.reason}`
+            + (barren.autoPausedNow ? ` — paused after ${barren.barrenAttempts} barren attempts` : ""),
         });
         store.save();
       }
@@ -448,6 +452,11 @@ async function runCuratedEngagementOnce(
       // A driver throw is different and deliberately excluded — that never
       // reaches here, so infrastructure faults still retry.
       target.lastAttemptedAt = nowIso;
+      const barren = recordTargetAttempt(target, {
+        engaged: followLanded || likeLanded,
+        reason: String(report.stoppedAt ?? "unknown"),
+        nowIso,
+      });
       if (report.stoppedAt === "complete") {
         if (followLanded) target.followedAt ??= nowIso;
         if (followLanded || likeLanded) target.lastEngagedAt = nowIso;
@@ -459,6 +468,10 @@ async function runCuratedEngagementOnce(
             accountId: account.id, platform: "x", action: "like", targetKey: xPostTargetKey(chosen.key),
           }, nowIso);
         }
+      }
+      if (barren.autoPausedNow) {
+        notifyDesktop("Heiss paused a target",
+          `${account.handle} → ${target.handle}: ${target.autoPauseReason ?? "no engagement"}`);
       }
       store.pushActivity({
         kind: "curated_engagement", accountId: account.id, deviceId: device.id,
@@ -1946,6 +1959,9 @@ async function main(): Promise<void> {
       // Pausing keeps the row (and its follow history) but takes it out of the
       // daily rotation — this is how a weekly substitution is made.
       target.active = args[1] === "resume";
+      // Resuming must also clear an automatic pause, or the target would stay
+      // out of the rotation while reporting itself active.
+      if (target.active) clearAutoPause(target);
       store.pushActivity({
         kind: "curated_target_updated", accountId: target.accountId,
         message: `${account?.handle ?? target.accountId} ${target.active ? "resumed" : "paused"} ${target.handle}`,

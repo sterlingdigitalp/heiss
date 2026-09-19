@@ -62,7 +62,9 @@ export function activeCuratedTargetsFor(
   targets: CuratedTarget[],
   accountId: string,
 ): CuratedTarget[] {
-  return curatedTargetsFor(targets, accountId).filter((target) => target.active);
+  // Auto-paused targets stay in the list for history and for `targets resume`,
+  // but the rotation must not keep spending days on them.
+  return curatedTargetsFor(targets, accountId).filter((target) => target.active && !target.autoPausedAt);
 }
 
 export interface AddTargetCheck {
@@ -97,4 +99,43 @@ export function checkCuratedTargetAddition(
     };
   }
   return { ok: true, handle };
+}
+
+/** Consecutive barren attempts before the rotation moves past a target. */
+export const BARREN_ATTEMPT_LIMIT = 3;
+
+/**
+ * Record what an attempt on a target produced.
+ *
+ * The rotation orders by least-recently-engaged, so a target that never
+ * engages never updates `lastEngagedAt` and stays first in line forever: on
+ * 2026-09-18 and again on 2026-09-19 the same persona spent its whole day on
+ * @wadefoster and landed nothing. Not every barren attempt is a fault — a
+ * target who posts twice a month often has nothing worth engaging — but after
+ * a few in a row the persona's day is better spent on someone else.
+ */
+export function recordTargetAttempt(
+  target: CuratedTarget,
+  outcome: { engaged: boolean; reason: string; nowIso: string },
+  limit = BARREN_ATTEMPT_LIMIT,
+): { barrenAttempts: number; autoPausedNow: boolean } {
+  if (outcome.engaged) {
+    target.barrenAttempts = 0;
+    return { barrenAttempts: 0, autoPausedNow: false };
+  }
+  const barrenAttempts = (target.barrenAttempts ?? 0) + 1;
+  target.barrenAttempts = barrenAttempts;
+  const autoPausedNow = barrenAttempts >= limit && !target.autoPausedAt;
+  if (autoPausedNow) {
+    target.autoPausedAt = outcome.nowIso;
+    target.autoPauseReason = `${barrenAttempts} attempts without engaging (last: ${outcome.reason})`;
+  }
+  return { barrenAttempts, autoPausedNow };
+}
+
+/** Undo an automatic pause — `targets resume` and any manual reactivation. */
+export function clearAutoPause(target: CuratedTarget): void {
+  delete target.autoPausedAt;
+  delete target.autoPauseReason;
+  target.barrenAttempts = 0;
 }

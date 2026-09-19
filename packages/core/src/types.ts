@@ -84,6 +84,12 @@ export interface CuratedTarget {
   note?: string;
   /** Paused targets stay for history but are never engaged. Used for weekly substitutions. */
   active: boolean;
+  /** Consecutive attempts that spent the persona's day without engaging. */
+  barrenAttempts?: number;
+  /** Set when those attempts crossed the limit and the rotation skipped past
+   *  this target; `targets resume` clears it. */
+  autoPausedAt?: string;
+  autoPauseReason?: string;
   addedAt: string;
   /** Set once the persona has followed this target (the week-one follow burst). */
   followedAt?: string;
