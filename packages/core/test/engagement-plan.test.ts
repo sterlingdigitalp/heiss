@@ -11,6 +11,7 @@ import {
   CURATED_FAILURE_LIMIT,
   type CuratedFailureRecord,
   HOTTER_POST_MULTIPLE,
+  MAX_ENGAGEMENT_AGE_HOURS,
 } from "../src/engagement-plan.js";
 import type { PostSnapshot } from "../src/engagement-plan.js";
 import type { CuratedTarget } from "../src/types.js";
@@ -390,5 +391,52 @@ describe("curated failure escalation", () => {
     assert.equal(recordCuratedOutcome(failures, "a1", { ok: true, localDay: day, nowIso: at(3) }).streak, 0);
     assert.equal(failures.a1, undefined);
     assert.equal(curatedEngagementBlocked(failures, "a1", day), false);
+  });
+});
+
+describe("freshness cap", () => {
+  const post = (over: Partial<PostSnapshot> = {}): PostSnapshot => ({
+    key: `x:${over.matchText ?? "p"}`, matchText: "p", bodyText: "some words here",
+    ageHours: 2, likes: 5, reposts: 0, replies: 0, isPinned: false, isQuote: false,
+    isRepost: false, hasMedia: false, hasReadableText: true, ...over,
+  });
+
+  it("engages a fresh post and refuses a stale one", () => {
+    assert.equal(choosePostForEngagement(post({ ageHours: 24 }), null).reason, "most_recent");
+    assert.equal(choosePostForEngagement(post({ ageHours: MAX_ENGAGEMENT_AGE_HOURS }), null).reason, "most_recent",
+      "exactly at the cap still counts");
+    const stale = choosePostForEngagement(post({ ageHours: MAX_ENGAGEMENT_AGE_HOURS + 1 }), null);
+    assert.equal(stale.post, null);
+    assert.equal(stale.reason, "no_fresh_post");
+  });
+
+  it("replays 2026-09-20: the 24h posts engage, the 196h/243h/1011h ones do not", () => {
+    for (const ageHours of [24, 24]) {
+      assert.equal(choosePostForEngagement(post({ ageHours }), null).post?.ageHours, ageHours);
+    }
+    for (const ageHours of [196, 243, 1011]) {
+      const choice = choosePostForEngagement(post({ ageHours }), post({ ageHours: ageHours + 24, matchText: "older" }));
+      assert.equal(choice.post, null, `${ageHours}h should not be engaged`);
+      assert.equal(choice.reason, "no_fresh_post");
+    }
+  });
+
+  it("falls back to a fresh preceding post when the newest is a repost", () => {
+    const choice = choosePostForEngagement(
+      post({ isRepost: true, matchText: "rt" }),
+      post({ ageHours: 30, matchText: "mine" }),
+    );
+    assert.equal(choice.reason, "fell_back_to_preceding");
+    assert.equal(choice.post?.matchText, "mine");
+  });
+
+  it("keeps engaging when an age cannot be parsed, rather than stopping every persona", () => {
+    const choice = choosePostForEngagement(post({ ageHours: undefined }), null);
+    assert.equal(choice.reason, "most_recent", "unknown age must fail open");
+  });
+
+  it("still says no_eligible_post when the problem is not age", () => {
+    assert.equal(choosePostForEngagement(post({ isRepost: true }), null).reason, "no_eligible_post");
+    assert.equal(choosePostForEngagement(null, null).reason, "no_eligible_post");
   });
 });

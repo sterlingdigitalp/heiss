@@ -60,13 +60,32 @@ export interface PostChoice {
     | "most_recent"
     | "preceding_is_hotter"
     | "fell_back_to_preceding"
+    | "no_fresh_post"
     | "no_eligible_post";
+}
+
+/**
+ * Oldest post a persona will engage.
+ *
+ * Without a cap the farm likes whatever a quiet account last posted: on
+ * 2026-09-20 every persona engaged, but three of the five posts were 8, 10 and
+ * 42 days old. That counted as success and is not what a person does. Past
+ * this age the day is better spent on a target with something current, which
+ * the barren-attempt counter then records honestly as "nothing fresh".
+ */
+export const MAX_ENGAGEMENT_AGE_HOURS = 72;
+
+/** Unknown age is treated as fresh on purpose: a timestamp-parsing regression
+ *  must not silently stop every persona engaging. */
+function postIsStale(post: PostSnapshot | null | undefined): boolean {
+  return Boolean(post && post.ageHours !== undefined && post.ageHours > MAX_ENGAGEMENT_AGE_HOURS);
 }
 
 function postIsEligible(post: PostSnapshot | null | undefined, engaged: Set<string>): post is PostSnapshot {
   if (!post) return false;
   if (post.isRepost) return false;
   if (post.hasReadableText === false) return false;
+  if (postIsStale(post)) return false;
   return !engaged.has(post.key);
 }
 
@@ -103,6 +122,9 @@ export function choosePostForEngagement(
   // The newest post is a repost/unreadable/already touched — the preceding one
   // is the only candidate left, so recency is not required of it.
   if (precedingOk) return { post: preceding, reason: "fell_back_to_preceding" };
+  // Say which it was: a quiet account that has simply gone cold reads very
+  // differently from a profile the runner could not read.
+  if (postIsStale(mostRecent) || postIsStale(preceding)) return { post: null, reason: "no_fresh_post" };
   return { post: null, reason: "no_eligible_post" };
 }
 
