@@ -1227,6 +1227,21 @@ async function main(): Promise<void> {
       const now = new Date();
       const nowIso = now.toISOString();
       const timeOfDay = localTimeOfDay(nowIso, store.state.settings.timeZone);
+      // load() reclaims device locks nothing is using. Say so: a lock stranded
+      // by a dead holder silently blocked every session for hours on
+      // 2026-09-22, reported only as "device_busy" once a minute.
+      if (store.reclaimedDeviceLocks.length > 0) {
+        for (const lock of store.reclaimedDeviceLocks) {
+          store.pushActivity({
+            kind: "device_lock_reclaimed", deviceId: lock.deviceId,
+            message: `released a device lock held by ${lock.holder} (${lock.reason})`,
+          });
+        }
+        store.save();
+        notifyDesktop("Heiss freed a stuck device",
+          store.reclaimedDeviceLocks.map((lock) => `${lock.holder}: ${lock.reason}`).join("; "));
+        console.log(JSON.stringify({ at: nowIso, reclaimedDeviceLocks: store.reclaimedDeviceLocks }));
+      }
       try {
         store.state.settings.controllerHeartbeatAt = nowIso;
         store.state.settings.controllerPid = process.pid;

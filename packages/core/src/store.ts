@@ -24,7 +24,7 @@ import type {
   User,
 } from "./types.js";
 import type { LockSnapshot } from "./locks.js";
-import { ResourceLocks } from "./locks.js";
+import { ResourceLocks, normalizeDeviceLock, staleDeviceLocks } from "./locks.js";
 import {
   isLockStale,
   newLockRecord,
@@ -114,6 +114,9 @@ export class JsonStore {
     this.locks = new ResourceLocks();
     this.load();
   }
+
+  /** Device locks reclaimed by the most recent load(), for the caller to report. */
+  reclaimedDeviceLocks: Array<{ deviceId: string; holder: string; reason: string }> = [];
 
   load(): void {
     if (!existsSync(this.path)) {
@@ -262,9 +265,18 @@ export class JsonStore {
     // lock frees the device for other consumers (the preflight canary, a fresh
     // controller) instead of blocking it until a full resume happens to run.
     const locks = this.state.locks ?? { devices: {}, content: {} };
-    for (const [deviceId, holder] of Object.entries(locks.devices)) {
-      if (orphaned.has(holder)) delete locks.devices[deviceId];
-    }
+    // Reclaim device locks nothing is using any more: the owning session died,
+    // the owning process is gone, the hold outlived any real session, or the
+    // lock predates ownership tracking. Without this a curated engagement that
+    // died holding the lock blocked the farm permanently — every later tick
+    // reported device_busy, which reads as a normal outcome and escalates
+    // nothing (2026-09-22 cost a whole morning).
+    this.reclaimedDeviceLocks = staleDeviceLocks(locks.devices, {
+      nowIso: new Date().toISOString(),
+      pidIsAlive,
+      orphanedHolders: orphaned,
+    });
+    for (const { deviceId } of this.reclaimedDeviceLocks) delete locks.devices[deviceId];
     for (const [itemId, holder] of Object.entries(locks.content)) {
       if (orphaned.has(holder)) delete locks.content[itemId];
     }
@@ -362,7 +374,7 @@ export function pruneSessions(state: FarmState, now: string = new Date().toISOSt
   const cutoff = new Date(now).getTime() - ACTIVITY_RETENTION_DAYS * 86_400_000;
   if (!Number.isFinite(cutoff)) return 0;
   const held = new Set<string>([
-    ...Object.values(state.locks?.devices ?? {}),
+    ...Object.values(state.locks?.devices ?? {}).map((lock) => normalizeDeviceLock(lock).holder),
     ...Object.values(state.locks?.content ?? {}),
   ]);
   const terminal = new Set(["completed", "failed", "retired", "interrupted"]);
