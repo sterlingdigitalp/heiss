@@ -86,7 +86,7 @@ import {
   resolveSigningConfig,
   detectLocalTeams,
 } from "@heiss/device";
-import { defaultDataDir, farmStatePath } from "./paths.js";
+import { controllerHeartbeatPath, defaultDataDir, farmStatePath } from "./paths.js";
 import { findProjectRoot } from "./project-root.js";
 import {
   controllerAgentStatus,
@@ -1069,12 +1069,31 @@ async function main(): Promise<void> {
     const statePath = farmStatePath(dataDir);
     let heartbeatAt: string | undefined;
     try {
-      heartbeatAt = (JSON.parse(readFileSync(statePath, "utf8")) as
-        { settings?: { controllerHeartbeatAt?: string } }).settings?.controllerHeartbeatAt;
+      // The timer-written file is the real liveness signal; farm.json's
+      // heartbeat only advances between tick phases.
+      heartbeatAt = readFileSync(controllerHeartbeatPath(dataDir), "utf8").trim().split(" ")[0];
     } catch {
       heartbeatAt = undefined;
     }
-    const health = assessControllerHeartbeat(heartbeatAt, nowIso);
+    if (!heartbeatAt) {
+      try {
+        heartbeatAt = (JSON.parse(readFileSync(statePath, "utf8")) as
+          { settings?: { controllerHeartbeatAt?: string } }).settings?.controllerHeartbeatAt;
+      } catch {
+        heartbeatAt = undefined;
+      }
+    }
+    let controllerPid: number | undefined;
+    try {
+      controllerPid = (JSON.parse(readFileSync(statePath, "utf8")) as
+        { settings?: { controllerPid?: number } }).settings?.controllerPid;
+    } catch { controllerPid = undefined; }
+    const pidAlive = controllerPid === undefined ? undefined : (() => {
+      try { process.kill(controllerPid, 0); return true; } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "EPERM";
+      }
+    })();
+    const health = assessControllerHeartbeat(heartbeatAt, nowIso, undefined, pidAlive);
     let maintenance: { mode: string; reason?: string; enteredAt?: string } | undefined;
     try {
       maintenance = (JSON.parse(readFileSync(statePath, "utf8")) as
@@ -1168,6 +1187,16 @@ async function main(): Promise<void> {
     const runnerReinstallAttempts = new Map<string, number>();
     const authority = new SerialCommandAuthority();
     const commandServer = startCommandAuthorityServer(getArg(args, "--data") ?? defaultDataDir(), authority);
+    // Liveness independent of tick phases: this keeps writing through a long
+    // session because the tick awaits I/O, and stops if the process wedges or
+    // dies — which is what the watchdog should judge.
+    const heartbeatFile = controllerHeartbeatPath(getArg(args, "--data") ?? defaultDataDir());
+    const writeHeartbeat = () => {
+      try { writeFileSync(heartbeatFile, `${new Date().toISOString()} ${process.pid}\n`); } catch { /* best effort */ }
+    };
+    writeHeartbeat();
+    const heartbeatTimer = setInterval(writeHeartbeat, 30_000);
+    heartbeatTimer.unref();
     const superviseAutomationRunner = async (device: { udid: string; name: string }, allowServiceRestart: boolean) => {
       const last = runnerRepairAttempts.get(device.udid) ?? 0;
       if (Date.now() - last < 10 * 60 * 1000) return undefined;

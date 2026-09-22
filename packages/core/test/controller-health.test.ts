@@ -5,6 +5,7 @@ import {
   shouldRaiseControllerAlarm,
   CONTROLLER_STALE_AFTER_MS,
   CONTROLLER_ALARM_REPEAT_MS,
+  CONTROLLER_WEDGED_AFTER_MS,
   stalePause,
 } from "../src/index.js";
 
@@ -65,5 +66,31 @@ describe("a farm left paused", () => {
     );
     assert.equal(pause.stale, true);
     assert.match(pause.detail, /paused for \d+h/);
+  });
+});
+
+describe("a controller that is busy, not dead", () => {
+  it("does not call a live process dead while its tick runs long", () => {
+    // A warmup holds a tick for 8+ minutes without advancing the heartbeat.
+    const busy = assessControllerHeartbeat(ago(8 * 60_000), now, undefined, true);
+    assert.equal(busy.alive, true, "killing here destroyed live work on 2026-09-22");
+    assert.match(busy.detail, /the controller process is running \(a long tick\)/);
+  });
+
+  it("still calls it dead once past the point its own tick watchdog would have acted", () => {
+    const wedged = assessControllerHeartbeat(ago(CONTROLLER_WEDGED_AFTER_MS + 60_000), now, undefined, true);
+    assert.equal(wedged.alive, false);
+    assert.match(wedged.detail, /running but has not ticked/);
+  });
+
+  it("calls it dead immediately when the process is gone", () => {
+    assert.equal(assessControllerHeartbeat(ago(8 * 60_000), now, undefined, false).alive, false);
+    // Unknown liveness keeps the old, stricter behaviour.
+    assert.equal(assessControllerHeartbeat(ago(8 * 60_000), now, undefined, undefined).alive, false);
+  });
+
+  it("is unaffected while the heartbeat is fresh", () => {
+    assert.equal(assessControllerHeartbeat(ago(30_000), now, undefined, true).alive, true);
+    assert.equal(assessControllerHeartbeat(ago(30_000), now, undefined, false).alive, true);
   });
 });

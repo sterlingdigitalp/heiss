@@ -8,8 +8,12 @@
  * farm state, so an outside watcher only needs to read a file.
  */
 
-/** Ticks run about once a minute; this tolerates a slow tick and a restart. */
+/** Ticks run about once a minute, but one doing real device work takes many
+ *  minutes, and the heartbeat only advances between phases. */
 export const CONTROLLER_STALE_AFTER_MS = 6 * 60_000;
+/** A live process with a stale heartbeat is busy or wedged, not dead. Its own
+ *  tick watchdog force-restarts at 25 minutes; past that it never will. */
+export const CONTROLLER_WEDGED_AFTER_MS = 28 * 60_000;
 /** While it stays down, repeat the alarm at most this often. */
 export const CONTROLLER_ALARM_REPEAT_MS = 30 * 60_000;
 
@@ -19,10 +23,21 @@ export interface ControllerHealth {
   detail: string;
 }
 
+/**
+ * Judge the controller from its heartbeat and, when known, whether its process
+ * still exists.
+ *
+ * Killing on a stale heartbeat alone is wrong: a tick running a warmup holds
+ * for 8+ minutes without advancing it, and on 2026-09-22 the watchdog
+ * SIGKILLed a live controller mid-engagement — twice — destroying the work it
+ * was protecting. A live process is only declared dead once it is past the
+ * point where its own tick watchdog would have restarted it.
+ */
 export function assessControllerHeartbeat(
   heartbeatAt: string | undefined,
   nowIso: string,
   staleAfterMs = CONTROLLER_STALE_AFTER_MS,
+  pidAlive?: boolean,
 ): ControllerHealth {
   if (!heartbeatAt) return { alive: false, detail: "the controller has never recorded a heartbeat" };
   const age = Date.parse(nowIso) - Date.parse(heartbeatAt);
@@ -30,9 +45,17 @@ export function assessControllerHeartbeat(
   // A heartbeat from the future is a clock change, not a dead controller.
   if (age < 0) return { alive: true, ageMs: 0, detail: "heartbeat is ahead of the clock" };
   const minutes = Math.round(age / 60_000);
-  return age > staleAfterMs
-    ? { alive: false, ageMs: age, detail: `no controller heartbeat for ${minutes} minutes` }
-    : { alive: true, ageMs: age, detail: `heartbeat ${Math.round(age / 1000)}s ago` };
+  if (age <= staleAfterMs) return { alive: true, ageMs: age, detail: `heartbeat ${Math.round(age / 1000)}s ago` };
+  if (pidAlive === true && age <= CONTROLLER_WEDGED_AFTER_MS) {
+    return { alive: true, ageMs: age, detail: `heartbeat ${minutes} minutes old, but the controller process is running (a long tick)` };
+  }
+  return {
+    alive: false,
+    ageMs: age,
+    detail: pidAlive === true
+      ? `controller process is running but has not ticked for ${minutes} minutes`
+      : `no controller heartbeat for ${minutes} minutes`,
+  };
 }
 
 /** Alarm on the way down, and only occasionally while it stays down. */
