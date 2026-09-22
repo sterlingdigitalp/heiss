@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.09.18.3"
+private let heissRunnerBuild = "heiss-runner-2026.09.22.3"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -2471,7 +2471,7 @@ final class HeissRunnerUITests: XCTestCase {
             // current X account without touching feed content.
             window.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
             Thread.sleep(forTimeInterval: 0.8)
-            try openXDrawer(surface: window)
+            try openXDrawer(app: app, surface: window)
             var inspectedAccounts = [try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | ")]
             if try drawerPublishesExactHandle(app, normalized: normalized)
                 || screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.72) {
@@ -2486,7 +2486,7 @@ final class HeissRunnerUITests: XCTestCase {
             for (index, x) in accountSlots.enumerated() {
                 window.coordinate(withNormalizedOffset: CGVector(dx: x, dy: 0.075)).tap()
                 Thread.sleep(forTimeInterval: 1.0)
-                try openXDrawer(surface: window)
+                try openXDrawer(app: app, surface: window)
                 inspectedAccounts.append(try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | "))
                 // Re-read rather than single-shot: OCR intermittently bleeds an
                 // adjacent glyph into the handle ("@EvaAI_Lab" read as
@@ -2513,7 +2513,7 @@ final class HeissRunnerUITests: XCTestCase {
                 || tapExactHandleUsingOCR(surface: window, normalized: normalized)
             if selected {
                 Thread.sleep(forTimeInterval: 1.2)
-                try openXDrawer(surface: window)
+                try openXDrawer(app: app, surface: window)
                 inspectedAccounts.append(try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | "))
                 if try drawerPublishesExactHandle(app, normalized: normalized)
                     || waitForExactHandleUsingOCR(normalized: normalized, timeout: 3.0, minimumVisionY: 0.72) {
@@ -3249,20 +3249,57 @@ final class HeissRunnerUITests: XCTestCase {
         return false
     }
 
-    private func openXDrawer(surface: XCUIElement) throws {
-        for attempt in 0..<3 {
+    /// Swipe away an incoming notification banner.
+    ///
+    /// Banners sit exactly where the drawer avatar is. A blind tap there opens
+    /// whatever app is being announced: on 2026-09-22 a canary ended up in
+    /// Messages, hunting for X's drawer in the spam folder. Targeted query on
+    /// SpringBoard only — never a scan of the app's own hierarchy.
+    private func dismissNotificationBannerIfPresent() {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let banner = springboard.otherElements["NotificationShortLookView"]
+        guard banner.exists else { return }
+        banner.swipeUp()
+        Thread.sleep(forTimeInterval: 0.6)
+    }
+
+    private func openXDrawer(app: XCUIApplication, surface: XCUIElement) throws {
+        for attempt in 0..<4 {
+            dismissNotificationBannerIfPresent()
+            // A banner tap (or anything else) can put another app in front;
+            // tapping on regardless is how the runner ended up in Messages.
+            if app.state != .runningForeground {
+                app.activate()
+                _ = app.wait(for: .runningForeground, timeout: 8)
+                Thread.sleep(forTimeInterval: 0.8)
+            }
             _ = try dismissStaleLimitedPhotosSystemPrompt(surface: surface, appearanceTimeout: 1)
             if try xDrawerIsOpen() { return }
             // Never tap blindly into a login sheet: another tap there selects an
             // account row or "add an existing account".
-            if try dismissXLoginSheetIfPresent(surface: surface), attempt < 2 {
+            if try dismissXLoginSheetIfPresent(surface: surface), attempt < 3 {
                 Thread.sleep(forTimeInterval: 0.8)
             }
-            surface.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.06)).tap()
+            // (0.08, 0.06) is 40pt down. On iOS 27 the avatar sits at ~42pt
+            // with the status bar immediately above, so this tap lands in the
+            // status bar often enough to matter — and a status-bar tap scrolls
+            // the feed to top, which looks exactly like "the drawer did not
+            // open" (2026-09-19, 09-21, 09-22). Alternate a lower point.
+            //
+            // Deliberately coordinates, not an element lookup: querying X's
+            // header through the accessibility tree forces a snapshot of the
+            // whole feed hierarchy, which timed out commands and tore down the
+            // runner when tried on 2026-09-22.
+            let dy: CGFloat = attempt == 1 ? 0.075 : 0.06
+            surface.coordinate(withNormalizedOffset: CGVector(dx: 0.085, dy: dy)).tap()
             Thread.sleep(forTimeInterval: 1.2)
             if try xDrawerIsOpen() { return }
         }
-        throw NSError(domain: "HeissRunner", code: 16, userInfo: [NSLocalizedDescriptionKey: "X navigation drawer did not open"])
+        let foreground = app.state == .runningForeground
+        throw NSError(domain: "HeissRunner", code: 16, userInfo: [
+            NSLocalizedDescriptionKey: "X navigation drawer did not open"
+                + (foreground ? "" : " (X was not in the foreground — another app had it)"),
+        ])
     }
 
     /// X's "Log in to X — Continue with your existing accounts" sheet. Tapping
