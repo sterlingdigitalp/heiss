@@ -37,6 +37,8 @@ import {
   resumeSession,
 } from "./checkpoint.js";
 import { classifyFailure, repeatedFailureCount } from "./failures.js";
+import { RUNNER_BUILD } from "./protocol.js";
+import { retiredAttentionSessions } from "./stale-attention.js";
 import { readyLikeApprovalsForTargeting, recordDiscoveryCandidates, refreshCandidateQueue } from "./candidates.js";
 import type { JsonStore } from "./store.js";
 import type {
@@ -275,6 +277,22 @@ export class FarmOrchestrator {
         duplicate.completedAt = runNow;
         duplicate.updatedAt = runNow;
       }
+    }
+
+    // A parked session that escalated on a runner build since replaced, on an
+    // earlier day, was most likely broken by that build. Retire it so the
+    // account runs its schedule again instead of waiting on a human forever.
+    for (const stale of retiredAttentionSessions(this.store.state.sessions, { nowIso: runNow, timeZone, runnerBuild: RUNNER_BUILD })) {
+      stale.status = "failed";
+      stale.requiresAttention = false;
+      stale.lastError = `retired: escalated on ${stale.escalatedOnRunnerBuild}, since replaced by ${RUNNER_BUILD} (was: ${stale.lastError ?? "unknown"})`;
+      stale.completedAt = runNow;
+      stale.updatedAt = runNow;
+      const account = this.store.state.accounts.find((candidate) => candidate.id === stale.accountId);
+      if (account?.preflightStatus === "attention") { account.preflightStatus = "ready"; account.preflightNote = undefined; }
+      const message = `${account?.handle ?? stale.accountId}: retired a parked ${stale.kind} session from runner ${stale.escalatedOnRunnerBuild}; back on schedule`;
+      activity.push(message);
+      this.store.pushActivity({ kind: "session_retired", sessionId: stale.id, accountId: stale.accountId, deviceId: stale.deviceId, message });
     }
 
     // 1) Resume incomplete sessions first
@@ -1173,6 +1191,7 @@ export class FarmOrchestrator {
       lastError: escalationNote,
       failureKind: disposition.kind,
       requiresAttention: escalate,
+      escalatedOnRunnerBuild: escalate ? RUNNER_BUILD : undefined,
       updatedAt: now,
       activityLog: [...session.activityLog, escalationNote],
     });

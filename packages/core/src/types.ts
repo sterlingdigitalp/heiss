@@ -438,6 +438,9 @@ export interface FarmSession {
   failureKind?: FailureKind;
   /** Excludes the checkpoint from autonomous retries until a human resumes it. */
   requiresAttention?: boolean;
+  /** Runner build the session escalated on; a parked session from a build
+   *  since replaced is retired rather than blocking its account forever. */
+  escalatedOnRunnerBuild?: string;
   /** Last heartbeat/progress timestamp received from the on-device journal. */
   heartbeatAt?: string;
   /** Review approval consumed only after a session completes successfully. */
