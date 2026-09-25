@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.09.22.3"
+private let heissRunnerBuild = "heiss-runner-2026.09.25.3"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -679,8 +679,27 @@ final class HeissRunnerUITests: XCTestCase {
             var engagedTargetKeys = Set(stepDetails.compactMap { detail in
                 detail.range(of: "target:").map { String(detail[$0.upperBound...]).split(separator: ":").first.map(String.init) ?? "" }
             }.filter { !$0.isEmpty })
+            var appCrashRecoveries = 0
             while completed < plannedSteps.count {
-                let disrupted = try sweepKnownOverlays(app: app, platform: platform)
+                // If the app crashed during the last step, any query against it
+                // ("Failed to get matching snapshots") tears down the whole
+                // XCTest host. Check the state first and relaunch instead: on
+                // 2026-09-25 seven X crashes cost two personas their warmups.
+                var relaunched = false
+                if app.state == .notRunning {
+                    appCrashRecoveries += 1
+                    guard appCrashRecoveries <= 3 else {
+                        throw NSError(domain: "HeissRunner", code: 18, userInfo: [NSLocalizedDescriptionKey: "\(platform) crashed \(appCrashRecoveries) times this session"])
+                    }
+                    Thread.sleep(forTimeInterval: 2.0)
+                    app.launch()
+                    guard app.wait(for: .runningForeground, timeout: 15) else {
+                        throw NSError(domain: "HeissRunner", code: 18, userInfo: [NSLocalizedDescriptionKey: "\(platform) did not relaunch after crashing at step \(completed + 1)"])
+                    }
+                    Thread.sleep(forTimeInterval: 2.5)
+                    relaunched = true
+                }
+                let disrupted = try sweepKnownOverlays(app: app, platform: platform) || relaunched
                 try assertNoBlockingOverlay(app: app, platform: platform)
                 guard app.state == .runningForeground else {
                     throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "\(platform) lost foreground at step \(completed + 1)"])
@@ -1210,11 +1229,22 @@ final class HeissRunnerUITests: XCTestCase {
         // OCR returns one observation per rendered LINE, so a 60-character body
         // slice will never match as a unit. Try progressively shorter needles.
         let body = postMatch.replacingOccurrences(of: "\n", with: " ")
-        let words = body.split(separator: " ").map(String.init)
+        // Mentions, hashtags and links are tappable: a needle containing one
+        // (or a tap on the line centre over one) opens that profile instead of
+        // the post — 3 of 5 post_did_not_open failures by 2026-09-25. Build the
+        // phrase needles from the plain words before the first such token.
+        let allWords = body.split(separator: " ").map(String.init)
+        func isLink(_ word: String) -> Bool {
+            let w = word.lowercased()
+            return w.hasPrefix("@") || w.hasPrefix(".@") || w.hasPrefix("#") || w.hasPrefix("http") || w.contains("://")
+        }
+        let words = Array(allWords.prefix(while: { !isLink($0) }))
+        let plainWords = allWords.filter { !isLink($0) }
         var needles: [String] = []
         if words.count >= 4 { needles.append(words.prefix(4).joined(separator: " ")) }
         if words.count >= 3 { needles.append(words.prefix(3).joined(separator: " ")) }
-        if let longest = words.filter({ $0.count >= 6 }).max(by: { $0.count < $1.count }) {
+        if words.count == 2 { needles.append(words.joined(separator: " ")) }
+        if let longest = plainWords.filter({ $0.count >= 6 }).max(by: { $0.count < $1.count }) {
             needles.append(longest)
         }
         needles = needles.filter { $0.count >= 4 }
@@ -1290,7 +1320,7 @@ final class HeissRunnerUITests: XCTestCase {
             // that is inside the post's own body, so it opens that post rather
             // than an embedded quote card or an author link.
             for attempt in 0..<2 {
-                _ = try tapTextUsingOCR(surface: window, expected: needle)
+                _ = try tapTextUsingOCR(surface: window, expected: needle, tapMatchedText: true)
                 Thread.sleep(forTimeInterval: 1.8)
                 _ = attempt
                 // Detail-view markers, chosen from real screenshots. "Post your
@@ -1812,6 +1842,13 @@ final class HeissRunnerUITests: XCTestCase {
     }
 
     private func assertNoBlockingOverlay(app: XCUIApplication, platform: String) throws {
+        // Querying an app that has crashed tears down the XCTest host; fail
+        // this step cleanly instead so the Mac can relaunch and retry.
+        guard app.state != .notRunning else {
+            throw NSError(domain: "HeissRunner", code: 18, userInfo: [
+                NSLocalizedDescriptionKey: "\(platform) is not running (crashed)", "failureKind": "transport",
+            ])
+        }
         let observations = try recognizedTextObservationsUsingOCR()
         if try detectPlatformState(app: app, platform: platform, observations: observations) == .onboardingOverlay {
             throw NSError(domain: "HeissRunner", code: 24, userInfo: [
@@ -1827,7 +1864,7 @@ final class HeissRunnerUITests: XCTestCase {
         let tiktokModalMarkers = ["Allow Access", "Don't Allow", "Allow While Using", "Turn On Notifications"]
         let appAlertVisible = platform == "tiktok"
             ? tiktokModalMarkers.contains(where: { observationContains(observations, $0) })
-            : app.alerts.count > 0
+            : (app.state == .runningForeground && app.alerts.count > 0)
         if appAlertVisible || springboard.alerts.count > 0 {
             throw NSError(domain: "HeissRunner", code: 24, userInfo: [
                 NSLocalizedDescriptionKey: "Unexpected popup or permission alert is blocking \(platform)",
@@ -2473,8 +2510,8 @@ final class HeissRunnerUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.8)
             try openXDrawer(app: app, surface: window)
             var inspectedAccounts = [try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | ")]
-            if try drawerPublishesExactHandle(app, normalized: normalized)
-                || screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.72) {
+            if try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.72)
+                || drawerPublishesExactHandle(app, normalized: normalized) {
                 window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50)).tap()
                 activeHandles[platform] = handle
                 return
@@ -2493,8 +2530,8 @@ final class HeissRunnerUITests: XCTestCase {
                 // "@EvaAI_Labr", which correctly fails the exact-boundary test
                 // and aborted a whole run). Retrying costs seconds; loosening
                 // the boundary would let @thekuchh match @Thekuchhal.
-                if try drawerPublishesExactHandle(app, normalized: normalized)
-                    || waitForExactHandleUsingOCR(normalized: normalized, timeout: 3.0, minimumVisionY: 0.72) {
+                if try waitForExactHandleUsingOCR(normalized: normalized, timeout: 3.0, minimumVisionY: 0.72)
+                    || drawerPublishesExactHandle(app, normalized: normalized) {
                     window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50)).tap()
                     activeHandles[platform] = handle
                     return
@@ -2515,8 +2552,8 @@ final class HeissRunnerUITests: XCTestCase {
                 Thread.sleep(forTimeInterval: 1.2)
                 try openXDrawer(app: app, surface: window)
                 inspectedAccounts.append(try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | "))
-                if try drawerPublishesExactHandle(app, normalized: normalized)
-                    || waitForExactHandleUsingOCR(normalized: normalized, timeout: 3.0, minimumVisionY: 0.72) {
+                if try waitForExactHandleUsingOCR(normalized: normalized, timeout: 3.0, minimumVisionY: 0.72)
+                    || drawerPublishesExactHandle(app, normalized: normalized) {
                     window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50)).tap()
                     activeHandles[platform] = handle
                     return
@@ -3098,6 +3135,9 @@ final class HeissRunnerUITests: XCTestCase {
     }
 
     private func drawerPublishesExactHandle(_ app: XCUIApplication, normalized: String) -> Bool {
+        // OCR is tried first: snapshotting X's tree can hang X until it is
+        // killed, which takes the XCTest host down with it (2026-09-25).
+        guard app.state == .runningForeground else { return false }
         return drawerHandleQueries(app, normalized: normalized).contains { query in
             query.allElementsBoundByIndex.prefix(8).contains {
                 elementContainsExactHandle($0, normalized: normalized)
@@ -3340,7 +3380,8 @@ final class HeissRunnerUITests: XCTestCase {
         surface: XCUIElement,
         expected: String,
         minimumScreenY: CGFloat = 0,
-        maximumScreenY: CGFloat = 1
+        maximumScreenY: CGFloat = 1,
+        tapMatchedText: Bool = false
     ) throws -> Bool {
         guard let image = UIImage(data: XCUIScreen.main.screenshot().pngRepresentation)?.cgImage else { return false }
         let request = VNRecognizeTextRequest()
@@ -3354,7 +3395,15 @@ final class HeissRunnerUITests: XCTestCase {
                 $0.string.range(of: expected, options: [.caseInsensitive, .diacriticInsensitive]) != nil
             }
         }) else { return false }
-        let box = observation.boundingBox
+        var box = observation.boundingBox
+        // A line box spans links too; tapping its centre can hit a mention.
+        // Where asked, tap the matched words themselves.
+        if tapMatchedText, let candidate = observation.topCandidates(3).first(where: {
+            $0.string.range(of: expected, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }), let range = candidate.string.range(of: expected, options: [.caseInsensitive, .diacriticInsensitive]),
+           let matched = try? candidate.boundingBox(for: range) {
+            box = matched.boundingBox
+        }
         surface.coordinate(withNormalizedOffset: CGVector(dx: box.midX, dy: 1.0 - box.midY)).tap()
         return true
     }
