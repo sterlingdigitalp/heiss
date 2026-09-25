@@ -902,6 +902,13 @@ export class FarmOrchestrator {
     } else {
       updated = applyKeepWarm(account, runNow, calendarDay(runNow, this.store.state.settings.timeZone));
     }
+    // A parked session that now finishes was the account's attention cause.
+    // Leaving the flag set skipped the account every day after a manual resume.
+    const stillParked = this.store.state.sessions.some((other) => other.accountId === account.id
+      && other.status === "checkpointed" && other.requiresAttention);
+    if (updated.preflightStatus === "attention" && !stillParked) {
+      updated = { ...updated, preflightStatus: "ready", preflightNote: undefined };
+    }
     const ai = this.store.state.accounts.findIndex((a) => a.id === account.id);
     this.store.state.accounts[ai] = updated;
 
