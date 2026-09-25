@@ -94,3 +94,20 @@ describe("a controller that is busy, not dead", () => {
     assert.equal(assessControllerHeartbeat(ago(30_000), now, undefined, false).alive, true);
   });
 });
+
+describe("a deliberate overnight detach", () => {
+  const schedule = { timeZone: "America/Chicago", timesOfDay: ["09:00", "09:34"] };
+  const detach = { mode: "active", reason: "Detach from desktop", enteredAt: "2026-09-25T03:00:00.000Z" }; // 22:00 CDT
+  it("stays quiet overnight, however long the pause", () => {
+    assert.equal(stalePause(detach, "2026-09-25T13:30:00.000Z", undefined, schedule).stale, false); // 08:30 CDT
+  });
+  it("speaks up once a scheduled run comes due while still detached", () => {
+    const late = stalePause(detach, "2026-09-25T14:10:00.000Z", undefined, schedule); // 09:10 CDT
+    assert.equal(late.stale, true);
+    assert.match(late.detail, /09:00/);
+  });
+  it("ignores times earlier the same day than the detach", () => {
+    const evening = { ...detach, enteredAt: "2026-09-25T20:00:00.000Z" }; // 15:00 CDT
+    assert.equal(stalePause(evening, "2026-09-25T23:00:00.000Z", undefined, schedule).stale, false);
+  });
+});

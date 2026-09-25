@@ -1,3 +1,4 @@
+import { calendarDay, localTimeOfDay } from "./schedule.js";
 /**
  * Judge the controller from outside itself.
  *
@@ -80,16 +81,36 @@ export const MAINTENANCE_ALARM_AFTER_MS = 2 * 60 * 60_000;
  * whole window, 2026-08-19 to 09-17 hid four idle weeks, and a controller
  * restart on 2026-09-18 set it again unnoticed.
  */
+/** The reason the desktop's two-step detach sets. That pause is deliberate. */
+export const DETACH_REASON = "Detach from desktop";
+
 export function stalePause(
   maintenance: { mode: string; reason?: string; enteredAt?: string } | undefined,
   nowIso: string,
   afterMs = MAINTENANCE_ALARM_AFTER_MS,
+  schedule?: { timeZone: string; timesOfDay: string[] },
 ): { stale: boolean; detail: string } {
   if (!maintenance || maintenance.mode === "running") return { stale: false, detail: "not paused" };
   const enteredAt = maintenance.enteredAt;
   const age = enteredAt ? Date.parse(nowIso) - Date.parse(enteredAt) : Number.NaN;
   if (!Number.isFinite(age)) return { stale: true, detail: `paused (${maintenance.reason ?? "no reason given"})` };
+  // Detaching the phone overnight is the normal routine, not a fault. It only
+  // matters once a scheduled run comes due and the farm is still detached.
+  if (maintenance.reason === DETACH_REASON && schedule && enteredAt) {
+    const missed = missedScheduledTime(enteredAt, nowIso, schedule.timeZone, schedule.timesOfDay);
+    return missed
+      ? { stale: true, detail: `still detached at ${missed}, when a scheduled run was due` }
+      : { stale: false, detail: `detached ${Math.round(age / 60_000)} minutes ago` };
+  }
   if (age < afterMs) return { stale: false, detail: `paused ${Math.round(age / 60_000)} minutes ago` };
   const hours = Math.round(age / 3_600_000);
   return { stale: true, detail: `paused for ${hours}h (${maintenance.reason ?? "no reason given"})` };
+}
+
+/** The latest scheduled local time that fell between the pause and now. */
+export function missedScheduledTime(enteredAt: string, nowIso: string, timeZone: string, timesOfDay: string[]): string | undefined {
+  const today = calendarDay(nowIso, timeZone);
+  const now = localTimeOfDay(nowIso, timeZone);
+  const since = calendarDay(enteredAt, timeZone) === today ? localTimeOfDay(enteredAt, timeZone) : "00:00";
+  return timesOfDay.filter((time) => time > since && time <= now).sort().pop();
 }

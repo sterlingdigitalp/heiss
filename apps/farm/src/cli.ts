@@ -1099,7 +1099,17 @@ async function main(): Promise<void> {
       maintenance = (JSON.parse(readFileSync(statePath, "utf8")) as
         { settings?: { maintenance?: { mode: string; reason?: string; enteredAt?: string } } }).settings?.maintenance;
     } catch { maintenance = undefined; }
-    const pause = stalePause(maintenance, nowIso);
+    let schedule: { timeZone: string; timesOfDay: string[] } | undefined;
+    try {
+      const raw = JSON.parse(readFileSync(statePath, "utf8")) as {
+        settings?: { timeZone?: string }; warmupSchedules?: { timeOfDay: string; enabled?: boolean }[];
+      };
+      schedule = {
+        timeZone: raw.settings?.timeZone ?? "UTC",
+        timesOfDay: (raw.warmupSchedules ?? []).filter((item) => item.enabled !== false).map((item) => item.timeOfDay),
+      };
+    } catch { schedule = undefined; }
+    const pause = stalePause(maintenance, nowIso, undefined, schedule);
     const memoPath = join(dataDir, "watchdog-state.json");
     let memo: { alive: boolean; notifiedAt?: string; pausedNotifiedAt?: string } | undefined;
     let pausedNotifiedAt: string | undefined;
@@ -1129,19 +1139,20 @@ async function main(): Promise<void> {
     } else if (!health.alive && recovered && (!memo || memo.alive)) {
       notifyDesktop("Heiss controller restarted", `${health.detail}; it is running again`);
     }
+    // A farm left paused is as quiet as a dead one, so say so — but once per
+    // pause. The note used to be written before it was set, so it was never
+    // kept and the alert repeated on every 5-minute check.
+    const pauseKey = maintenance?.enteredAt ?? "unknown";
+    if (pause.stale && memo?.pausedNotifiedAt !== pauseKey) {
+      notifyDesktop("Heiss farm is paused", `${pause.detail} — press Reattach in Heiss, or run: heiss-farm maintenance exit`);
+      pausedNotifiedAt = pauseKey;
+    }
     writeFileSync(memoPath, JSON.stringify({
       alive: !stillDown,
       notifiedAt: stillDown && alarm ? nowIso : memo?.notifiedAt,
       pausedNotifiedAt: pausedNotifiedAt ?? (pause.stale ? memo?.pausedNotifiedAt : undefined),
       checkedAt: nowIso,
     }));
-    // A farm left paused is as quiet as a dead one, and the desktop detach flow
-    // has stranded it more than once.
-    if (pause.stale && shouldRaiseControllerAlarm(
-      { alive: !memo?.pausedNotifiedAt, notifiedAt: memo?.pausedNotifiedAt }, false, nowIso)) {
-      notifyDesktop("Heiss farm is paused", `${pause.detail} — resume with: heiss-farm maintenance exit`);
-      pausedNotifiedAt = nowIso;
-    }
     print({ ok: true, controller: health.alive ? "alive" : recovered ? "recovered" : "down",
       detail: health.detail, recovery: recovery?.detail, pause: pause.detail });
     return;
