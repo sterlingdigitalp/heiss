@@ -149,6 +149,53 @@ describe("absolute-dated posts", () => {
   });
 });
 
+describe("the real timestamp beats a relative phrase in the body", () => {
+  const now = new Date("2026-09-26T12:00:00Z");
+
+  it("prefers an older real relative timestamp over one mentioned in the body", () => {
+    // "finished 2 hours ago" is body text describing something else; the
+    // post's own age is the trailing "5 days ago".
+    const pair = selectXPostPair([
+      cell(0, "Nate. Verified. finished the migration 2 hours ago, finally. 5 days ago. 3 Likes"),
+    ], { now });
+    assert.equal(pair.mostRecent?.ageHours, 120);
+  });
+
+  it("lets an absolute date in the timestamp position win over a relative body phrase", () => {
+    const pair = selectXPostPair([
+      cell(0, "Nate. Verified. wrapped up 2 hours ago and shipped it. September 1, 2026. 3 Likes"),
+    ], { now });
+    // Sept 1 -> Sept 26 is 25 days, not ~2 hours.
+    assert.ok(pair.mostRecent!.ageHours > 500, `got ${pair.mostRecent!.ageHours}`);
+  });
+});
+
+describe("post keys are unique per author and per post", () => {
+  const now = new Date("2026-09-26T12:00:00Z");
+
+  it("does not collide two different authors whose posts open the same way", () => {
+    const alice = parseXTimelineCell(cell(0, "Alice. Verified. great news today. 2 hours ago. 3 Likes"),
+      { now, authorHandle: "@alice" })!;
+    const bob = parseXTimelineCell(cell(1, "Bob. Verified. great news today. 2 hours ago. 3 Likes"),
+      { now, authorHandle: "@bob" })!;
+    assert.notEqual(alice.key, bob.key);
+  });
+
+  it("does not collide two posts from the same author sharing their first 60 characters", () => {
+    const long = "x".repeat(80);
+    const first = parseXTimelineCell(
+      cell(0, `Nate. Verified. ${long} part one. 2 hours ago. 3 Likes`),
+      { now, authorHandle: "@nate" },
+    )!;
+    const second = parseXTimelineCell(
+      cell(1, `Nate. Verified. ${long} part two. 3 hours ago. 4 Likes`),
+      { now, authorHandle: "@nate" },
+    )!;
+    assert.equal(first.matchText, second.matchText, "first 60 chars should indeed be identical");
+    assert.notEqual(first.key, second.key);
+  });
+});
+
 describe("author preamble on an unverified account", () => {
   // Every row on one profile opens with the same author preamble, so the
   // longest shared prefix IS that preamble. The narrower "Verified." and

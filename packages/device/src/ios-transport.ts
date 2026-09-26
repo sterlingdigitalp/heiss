@@ -19,7 +19,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
-import { DeviceSessionError, type IosTransport } from "./ios-driver.js";
+import { DeviceActionError, DeviceSessionError, type IosTransport } from "./ios-driver.js";
 import { automationLogPath } from "./runner-install.js";
 import {
   RUNNER_BUILD,
@@ -179,8 +179,19 @@ export class RealUsbTransport implements IosTransport {
           screenshotNote = ` Screenshot saved to ${local}.`;
         } catch { /* retain the on-device screenshot name in result.detail */ }
       }
-      throw new Error(
-        `Runner did not execute ${action}: ${String(result.detail ?? "missing execution acknowledgement")}.${screenshotNote}`,
+      const detail = String(result.detail ?? "missing execution acknowledgement");
+      const kind = normalizeFailureKind(result.failureKind);
+      const commandId = typeof result.id === "string"
+        ? result.id
+        : typeof result.commandGeneration === "string"
+          ? result.commandGeneration
+          : undefined;
+      throw new DeviceActionError(
+        `Runner did not execute ${action}: ${detail}.${screenshotNote}`,
+        kind,
+        action,
+        commandId,
+        detail,
       );
     }
     return {

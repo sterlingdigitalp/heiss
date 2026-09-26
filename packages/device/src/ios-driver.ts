@@ -38,6 +38,25 @@ export class DeviceSessionError extends Error {
   }
 }
 
+/**
+ * Thrown by a single (non-batched) runner action failure. Carries the same
+ * `failureKind` property shape as DeviceSessionError so core's classification
+ * (classifyFailure) can read an explicit kind for both paths, instead of
+ * falling back to message-text regexes.
+ */
+export class DeviceActionError extends Error {
+  constructor(
+    message: string,
+    readonly failureKind: FailureKind,
+    readonly action?: string,
+    readonly commandId?: string,
+    readonly detail?: string,
+  ) {
+    super(message);
+    this.name = "DeviceActionError";
+  }
+}
+
 export class RealIosDriver implements DeviceDriver {
   readonly kind = "ios" as const;
   private transport: IosTransport;

@@ -398,7 +398,7 @@ async function runCuratedEngagementOnce(
     const cells = (scan.data?.cells ?? []) as Array<{ index: number; label: string }>;
     // Ages are derived against the run's own clock, not wall time at parse, so
     // a slow run cannot drift the freshness window mid-decision.
-    const pair = selectXPostPair(cells, { now: new Date(nowIso) });
+    const pair = selectXPostPair(cells, { now: new Date(nowIso), authorHandle: target.handle });
     // Records hold a fingerprint of the post key, never its text; map back to
     // the keys of the posts on screen for the planner.
     const engagedFingerprints = new Set(store.state.engagementTargets
@@ -1209,7 +1209,14 @@ async function main(): Promise<void> {
     const runnerRepairAttempts = new Map<string, number>();
     const runnerReinstallAttempts = new Map<string, number>();
     const authority = new SerialCommandAuthority();
-    const commandServer = startCommandAuthorityServer(getArg(args, "--data") ?? defaultDataDir(), authority);
+    let commandServer;
+    try {
+      commandServer = await startCommandAuthorityServer(getArg(args, "--data") ?? defaultDataDir(), authority);
+    } catch (error) {
+      console.error(JSON.stringify({ at: new Date().toISOString(), commandAuthorityRefused: String(error) }));
+      process.exitCode = 1;
+      return;
+    }
     // Liveness independent of tick phases: this keeps writing through a long
     // session because the tick awaits I/O, and stops if the process wedges or
     // dies — which is what the watchdog should judge.

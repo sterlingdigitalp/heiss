@@ -196,6 +196,57 @@ describe("farm orchestrator (shipped path)", () => {
     assert.deepEqual(reloaded.locks.snapshot().devices, {});
   });
 
+  it("escalates the retry delay on successive social/navigation failures instead of a flat interval", async () => {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");
+    store.state.slots = [];
+    let attempt = 0;
+    const flaky: DeviceDriver = {
+      kind: "ios",
+      async connect() {}, async disconnect() {},
+      async runAction() {
+        attempt += 1;
+        throw new Error(`app navigation stalled attempt ${attempt}`);
+      },
+    };
+    const orch = new FarmOrchestrator(store, flaky);
+    const first = await orch.runOnce({ runnerId: "r", timeOfDay: "09:00", now: "2026-07-12T14:00:00.000Z" });
+    const firstDelay = Date.parse(first.sessions[0]!.nextRetryAt!) - Date.parse("2026-07-12T14:00:00.000Z");
+    assert.equal(firstDelay, 5 * 60_000, "first retry uses the base 5 minute delay");
+
+    const second = await orch.runOnce({
+      runnerId: "r", timeOfDay: "09:00", now: "2026-07-12T14:10:00.000Z", resumeFirst: true,
+    });
+    const secondDelay = Date.parse(second.sessions[0]!.nextRetryAt!) - Date.parse("2026-07-12T14:10:00.000Z");
+    assert.equal(second.sessions[0]!.retryCount, 2);
+    assert.equal(secondDelay, 10 * 60_000, "second retry escalates to 10 minutes, not the flat 5 minute floor");
+    assert.ok(secondDelay > firstDelay, "escalating delay must grow, not stay pinned to the fixed floor");
+  });
+
+  it("schedules the retry from the actual failure time, not the tick start", async () => {
+    const store = new JsonStore(storePath());
+    seedDemoFarm(store);
+    store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");
+    store.state.slots = [];
+    const failing: DeviceDriver = {
+      kind: "ios",
+      async connect() {}, async disconnect() {},
+      async runAction() { throw new Error("action stalled"); },
+    };
+    const tickStart = "2026-07-12T14:00:00.000Z";
+    const failureTime = "2026-07-12T14:07:00.000Z"; // device action took 7 minutes before it failed
+    const result = await new FarmOrchestrator(store, failing).runOnce({
+      runnerId: "r", timeOfDay: "09:00", now: tickStart, clock: () => failureTime,
+    });
+    const session = result.sessions[0]!;
+    assert.equal(session.updatedAt, failureTime, "failure bookkeeping must stamp the actual failure time");
+    const delay = Date.parse(session.nextRetryAt!) - Date.parse(failureTime);
+    assert.equal(delay, 5 * 60_000, "delay is measured from the failure time");
+    assert.notEqual(session.nextRetryAt, new Date(Date.parse(tickStart) + 5 * 60_000).toISOString(),
+      "must not schedule the retry from the stale tick-start clock");
+  });
+
   it("honors emergency stop and daily action caps before device actions", async () => {
     const store = new JsonStore(storePath()); seedDemoFarm(store);
     store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");

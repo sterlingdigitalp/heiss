@@ -116,6 +116,13 @@ export interface RunOptions {
   accountId?: string;
   /** Clock override (ISO) for day-scoped slot fill; defaults to now. */
   now?: string;
+  /**
+   * Clock used for timestamps that must reflect the actual moment they are
+   * recorded (failure bookkeeping, session completion) rather than the tick
+   * start captured in `now`. Defaults to the real clock; tests can inject a
+   * controllable one to simulate time passing mid-tick.
+   */
+  clock?: () => string;
   /** Restrict newly planned warmups to scheduler-selected accounts. */
   warmupAccountIds?: string[];
   /** Run posting/recovery only. */
@@ -633,6 +640,7 @@ export class FarmOrchestrator {
     queueItem?: QueueItem,
   ): Promise<{ session: FarmSession; interrupted: boolean }> {
     const runNow = opts.now ?? new Date().toISOString();
+    const clock = opts.clock ?? (() => opts.now ?? new Date().toISOString());
     const cap = this.safetyCapStatus(account.id, runNow);
     if (cap.blocked) {
       const message = `safety_cap: ${cap.reason}; session paused before device connection`;
@@ -659,7 +667,7 @@ export class FarmOrchestrator {
         // device lock held — the daemon PID stays alive, so the crash-recovery
         // path in the store never reclaims it. Checkpoint with backoff instead.
         const message = `connect_failed: ${device.name} → ${error instanceof Error ? error.message : String(error)}`;
-        const paused = this.checkpointFailure(session, account, error, message, runNow, activity, "connect_failed");
+        const paused = this.checkpointFailure(session, account, error, message, clock(), activity, "connect_failed");
         return { session: paused, interrupted: true };
       }
     }
@@ -718,7 +726,7 @@ export class FarmOrchestrator {
         }
         const failedStep = script[s.checkpoint.stepIndex] ?? "session:complete";
         const message = `action_failed: ${failedStep} → ${error instanceof Error ? error.message : String(error)}`;
-        const paused = this.checkpointFailure(s, account, error, message, runNow, activity, "action_failed");
+        const paused = this.checkpointFailure(s, account, error, message, clock(), activity, "action_failed");
         if (device) await this.driver.disconnect(device.id).catch(() => undefined);
         return { session: paused, interrupted: true };
       }
@@ -820,7 +828,7 @@ export class FarmOrchestrator {
         });
       } catch (error) {
         const message = `action_failed: ${deviceAction} → ${error instanceof Error ? error.message : String(error)}`;
-        s = this.checkpointFailure(s, account, error, message, runNow, activity, "action_failed");
+        s = this.checkpointFailure(s, account, error, message, clock(), activity, "action_failed");
         if (device) await this.driver.disconnect(device.id).catch(() => undefined);
         return { session: s, interrupted: true };
       }
@@ -880,6 +888,7 @@ export class FarmOrchestrator {
     }
 
     // Complete session + update account lifecycle
+    const completedAt = clock();
     s = {
       ...s,
       status: "completed",
@@ -889,8 +898,8 @@ export class FarmOrchestrator {
       lastError: undefined,
       failureKind: undefined,
       requiresAttention: undefined,
-      completedAt: runNow,
-      updatedAt: runNow,
+      completedAt,
+      updatedAt: completedAt,
     };
     this.replaceSession(s);
 
@@ -1166,9 +1175,15 @@ export class FarmOrchestrator {
     const transportDelay = transportRetryCount
       ? Math.min(30 * 60_000, 60_000 * 2 ** Math.min(transportRetryCount - 1, 5))
       : undefined;
+    // For retryable social/navigation failures, classifyFailure's delay is a
+    // floor, not the whole story: the escalating per-retry delay must win once
+    // it exceeds that floor, or repeated failures would retry at the same
+    // fixed interval forever and never actually back off.
     const delay = isInfrastructure
       ? (transportDelay ?? disposition.retryDelayMs)
-      : (disposition.retryDelayMs ?? socialDelay);
+      : (socialDelay !== undefined && disposition.retryDelayMs !== undefined
+        ? Math.max(disposition.retryDelayMs, socialDelay)
+        : (disposition.retryDelayMs ?? socialDelay));
     // A recoverable failure that keeps recurring must not retry forever in
     // silence. After enough attempts, escalate to the human attention queue so
     // a genuinely stuck account stops consuming device time every cycle.
@@ -1201,7 +1216,7 @@ export class FarmOrchestrator {
       escalatedOnRunnerBuild: escalate ? RUNNER_BUILD : undefined,
       updatedAt: now,
       activityLog: [...session.activityLog, escalationNote],
-    });
+    }, now);
     if (escalate) {
       const storedAccount = this.store.state.accounts.find((candidate) => candidate.id === account.id);
       if (storedAccount) {

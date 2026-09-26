@@ -5,6 +5,7 @@ import { createConnection, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  commandLockPath,
   commandSocketPath,
   forwardToController,
   startCommandAuthorityServer,
@@ -80,7 +81,7 @@ describe("controller socket resilience", () => {
     // reply to the vanished socket (the failing path) without spawning a CLI
     // child, which under the test runner would re-run this file.
     const dir = dataDir();
-    const server = startCommandAuthorityServer(dir, new SerialCommandAuthority());
+    const server = await startCommandAuthorityServer(dir, new SerialCommandAuthority());
     await new Promise((resolve) => setTimeout(resolve, 150));
     const crashed: unknown[] = [];
     const onUncaught = (error: unknown) => crashed.push(error);
@@ -104,6 +105,76 @@ describe("controller socket resilience", () => {
     } finally {
       process.removeListener("uncaughtException", onUncaught);
       server.close();
+    }
+  });
+});
+
+describe("controller socket ownership", () => {
+  it("refuses to start a second server while the first is live", async () => {
+    const dir = dataDir();
+    const first = await startCommandAuthorityServer(dir, new SerialCommandAuthority());
+    try {
+      await assert.rejects(
+        startCommandAuthorityServer(dir, new SerialCommandAuthority()),
+        /another controller owns/,
+      );
+    } finally {
+      await new Promise<void>((resolve) => first.close(() => resolve()));
+    }
+  });
+
+  it("lets a new server start once the first has closed", async () => {
+    const dir = dataDir();
+    const first = await startCommandAuthorityServer(dir, new SerialCommandAuthority());
+    await new Promise<void>((resolve) => first.close(() => resolve()));
+    const second = await startCommandAuthorityServer(dir, new SerialCommandAuthority());
+    try {
+      assert.equal((await forwardToController(dir, ["no-such-command"], 5_000)).forwarded, true);
+    } finally {
+      await new Promise<void>((resolve) => second.close(() => resolve()));
+    }
+  });
+
+  it("never deletes a newer server's socket when an old server closes late", async () => {
+    const dir = dataDir();
+    const first = await startCommandAuthorityServer(dir, new SerialCommandAuthority());
+    await new Promise<void>((resolve) => first.close(() => resolve()));
+    const second = await startCommandAuthorityServer(dir, new SerialCommandAuthority());
+    try {
+      // Simulate the original race: the first server's close handler runs
+      // again (e.g. a delayed callback) after a second server already took
+      // the same socket path. It must not remove the second server's socket.
+      first.emit("close");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal((await forwardToController(dir, ["no-such-command"], 5_000)).forwarded, true,
+        "the second server's socket must still exist and answer");
+    } finally {
+      await new Promise<void>((resolve) => second.close(() => resolve()));
+    }
+  });
+
+  it("reclaims a stale socket file with no listener", async () => {
+    const dir = dataDir();
+    writeFileSync(commandSocketPath(dir), "");
+    const server = await startCommandAuthorityServer(dir, new SerialCommandAuthority());
+    try {
+      assert.equal((await forwardToController(dir, ["no-such-command"], 5_000)).forwarded, true);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("reclaims a stale lease file left by a dead pid", async () => {
+    const dir = dataDir();
+    // A pid essentially guaranteed not to be a live process on this host.
+    writeFileSync(commandLockPath(dir), JSON.stringify({
+      pid: 999_999, processStartedAt: Date.now(), acquiredAt: Date.now(), purpose: "command-authority",
+    }));
+    const server = await startCommandAuthorityServer(dir, new SerialCommandAuthority());
+    try {
+      assert.equal((await forwardToController(dir, ["no-such-command"], 5_000)).forwarded, true);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 });

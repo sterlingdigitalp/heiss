@@ -1,4 +1,4 @@
-export { RealIosDriver, DeviceSessionError, type IosTransport } from "./ios-driver.js";
+export { RealIosDriver, DeviceSessionError, DeviceActionError, type IosTransport } from "./ios-driver.js";
 export {
   listUsbIphones,
   pollUntilReady,

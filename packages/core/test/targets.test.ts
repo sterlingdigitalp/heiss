@@ -7,6 +7,7 @@ import {
   curatedTargetsFor,
   activeCuratedTargetsFor,
   checkCuratedTargetAddition,
+  curatedTargetStatus,
 } from "../src/targets.js";
 import { MAX_CURATED_TARGETS_PER_ACCOUNT } from "../src/types.js";
 import type { CuratedTarget } from "../src/types.js";
@@ -67,6 +68,57 @@ describe("curated target lists", () => {
       activeCuratedTargetsFor(targets, "persona-1").map((t) => t.handle),
       ["@a", "@b"],
     );
+  });
+});
+
+describe("curatedTargetStatus", () => {
+  it("reports active for a plain active target", () => {
+    assert.equal(curatedTargetStatus(target({ handle: "@a" })), "active");
+  });
+
+  it("reports auto_paused for an active target with an automatic pause", () => {
+    assert.equal(
+      curatedTargetStatus(target({ handle: "@a", autoPausedAt: "2026-07-27T00:00:00.000Z" })),
+      "auto_paused",
+    );
+  });
+
+  it("reports paused (not auto_paused) once a target is manually paused, even if it was auto-paused", () => {
+    assert.equal(
+      curatedTargetStatus(target({ handle: "@a", active: false, autoPausedAt: "2026-07-27T00:00:00.000Z" })),
+      "paused",
+    );
+  });
+});
+
+describe("auto-paused targets do not reserve capacity", () => {
+  it("excludes an auto-paused target from the engageable list, same as a manual pause", () => {
+    const targets = [
+      target({ handle: "@a" }),
+      target({ handle: "@auto", autoPausedAt: "2026-07-27T00:00:00.000Z" }),
+    ];
+    assert.deepEqual(
+      activeCuratedTargetsFor(targets, "persona-1").map((t) => t.handle),
+      ["@a"],
+    );
+  });
+
+  it("lets a new target in when the only thing filling the 7 slots is auto-paused", () => {
+    const full = [
+      ...Array.from({ length: MAX_CURATED_TARGETS_PER_ACCOUNT - 1 }, (_, i) =>
+        target({ handle: `@t${i}` }),
+      ),
+      target({ handle: "@stuck", autoPausedAt: "2026-07-27T00:00:00.000Z" }),
+    ];
+    // 6 active + 1 auto-paused == 7 rows, but only 6 count against the cap.
+    assert.equal(checkCuratedTargetAddition(full, "persona-1", "@replacement").ok, true);
+  });
+
+  it("still blocks at the cap when all 7 are genuinely active", () => {
+    const full = Array.from({ length: MAX_CURATED_TARGETS_PER_ACCOUNT }, (_, i) =>
+      target({ handle: `@t${i}` }),
+    );
+    assert.equal(checkCuratedTargetAddition(full, "persona-1", "@onemore").ok, false);
   });
 });
 

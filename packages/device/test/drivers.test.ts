@@ -2,6 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   RealIosDriver,
+  RealUsbTransport,
+  DeviceActionError,
   parseDeviceList,
   planSigning,
   buildXcodeSignArgs,
@@ -67,6 +69,38 @@ describe("RealIosDriver (physical path only)", () => {
     assert.equal(batchCalls, 1);
     assert.equal(result.completedSteps, 3);
     assert.equal(result.journal, "session-1.json");
+  });
+});
+
+describe("RealUsbTransport single-action failures", () => {
+  it("throws a DeviceActionError carrying the runner's explicit failureKind", async () => {
+    const { RUNNER_PROTOCOL_VERSION, RUNNER_BUILD } = await import("@heiss/core");
+    const transport = new RealUsbTransport();
+    // Bypass the real devicectl file-copy channel: no-op the outbound copy and
+    // make the "reply" copy hand back a fake runner failure payload directly.
+    (transport as unknown as { copyToDevice: (...args: unknown[]) => Promise<void> }).copyToDevice =
+      async () => undefined;
+    (transport as unknown as {
+      copyFromDevice: (udid: string, remotePath: string, localPath: string) => Promise<void>;
+    }).copyFromDevice = async (_udid, _remotePath, localPath) => {
+      writeFileSync(localPath, JSON.stringify({
+        ok: false,
+        executed: false,
+        protocolVersion: RUNNER_PROTOCOL_VERSION,
+        runnerBuild: RUNNER_BUILD,
+        failureKind: "account_mismatch",
+        detail: "Identity verification failed",
+      }));
+    };
+    await assert.rejects(
+      () => transport.runScriptAction("FAKE-UDID", "x:like"),
+      (error: unknown) => {
+        assert.ok(error instanceof DeviceActionError);
+        assert.equal(error.failureKind, "account_mismatch");
+        assert.match(error.message, /Identity verification failed/);
+        return true;
+      },
+    );
   });
 });
 

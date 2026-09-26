@@ -1,7 +1,16 @@
 import { spawn } from "node:child_process";
 import { createConnection, createServer, type Server } from "node:net";
-import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
+import {
+  isLockStale,
+  newLockRecord,
+  probeProcessAlive,
+  readLockRecord,
+  reclaimStaleLock,
+  releaseLockFile,
+  tryCreateLockFile,
+} from "@heiss/core";
 
 export const AUTHORIZED_MUTATION_ENV = "HEISS_AUTHORIZED_MUTATION";
 
@@ -134,13 +143,90 @@ const MAX_REQUEST_BYTES = 64 * 1024;
  */
 const MAX_CHILD_MS = 20 * 60_000;
 
-export function startCommandAuthorityServer(
+export function commandLockPath(dataDir: string): string {
+  return join(dataDir, "controller.lock");
+}
+
+/**
+ * The lease outlives any plausible daemon restart cadence; liveness is really
+ * judged by `probeProcessAlive` on the recorded pid, not by age. A generous
+ * ceiling only guards against a record whose pid check can never resolve.
+ */
+const LEASE_MAX_AGE_MS = 365 * 24 * 60 * 60_000;
+
+/**
+ * Connect to `socketPath` to find out whether a live server is listening.
+ * Resolves true when something answered the connection, false when the path
+ * is absent or nothing answers (stale socket file — ECONNREFUSED/ENOENT).
+ */
+function probeSocketAlive(socketPath: string, timeoutMs = 1_000): Promise<boolean> {
+  if (!existsSync(socketPath)) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (alive: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(alive);
+    };
+    const socket = createConnection(socketPath);
+    const timer = setTimeout(() => finish(true), timeoutMs); // no answer either way; treat as unknown/alive to be safe
+    socket.on("connect", () => finish(true));
+    socket.on("error", (error) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      // ECONNREFUSED/ENOENT: nothing is listening. ENOTSOCK: the path exists
+      // but is not a socket at all (e.g. a leftover empty file) — also stale.
+      finish(code !== "ECONNREFUSED" && code !== "ENOENT" && code !== "ENOTSOCK");
+    });
+  });
+}
+
+/**
+ * Claim the controller socket for this process, refusing to start when
+ * another server already owns it.
+ *
+ * Starting used to unconditionally `rmSync` the socket path before binding:
+ * a second server could steal the path out from under a first one that was
+ * still serving, and the first server's `close` handler then deleted the
+ * *second* server's socket out from under it. Now a live listener at
+ * `socketPath`, or a live pid holding `controller.lock`, refuses to start;
+ * only a dead socket/lock is reclaimed. `close` only removes the socket file
+ * (and releases the lease) when it still identifies as the one this server
+ * bound, by comparing dev/ino taken right after `listen()`.
+ */
+export async function startCommandAuthorityServer(
   dataDir: string,
   authority: SerialCommandAuthority,
-): Server {
+): Promise<Server> {
   mkdirSync(dataDir, { recursive: true });
   const socketPath = commandSocketPath(dataDir);
+  const lockPath = commandLockPath(dataDir);
+
+  if (await probeSocketAlive(socketPath)) {
+    throw new Error(`another controller owns ${socketPath}`);
+  }
+
+  const record = newLockRecord("command-authority");
+  const isStale = (current: import("@heiss/core").LockRecord | null) =>
+    isLockStale(current, Date.now(), LEASE_MAX_AGE_MS, probeProcessAlive);
+  if (!tryCreateLockFile(lockPath, record)) {
+    const current = readLockRecord(lockPath);
+    if (!isStale(current)) {
+      throw new Error(`another controller owns ${socketPath} (lease held by pid ${current?.pid})`);
+    }
+    if (!reclaimStaleLock(lockPath, record, current, isStale)) {
+      throw new Error(`another controller owns ${socketPath} (lease contested)`);
+    }
+  }
+
+  // The socket probe and the lease both came back dead/ours, so any leftover
+  // socket file at this path is stale — safe to remove before binding.
   rmSync(socketPath, { force: true });
+
+  let ourIdentity: { dev: number; ino: number } | null = null;
+  const releaseLease = () => releaseLockFile(lockPath, record);
+
   // Keep the writable side open after the client half-closes its request so
   // long-running canaries can return their complete JSON response.
   const server = createServer({ allowHalfOpen: true }, (socket) => {
@@ -207,7 +293,22 @@ export function startCommandAuthorityServer(
     // created with the default umask, and anything that can write to it runs
     // with mutation authority.
     try { chmodSync(socketPath, 0o600); } catch { /* best effort; the parent dir is already user-owned */ }
+    // Record which socket file is ours so `close` never deletes a newer
+    // server's socket at the same path (the original bug: two servers racing
+    // this path, the first one's close deleting the second's live socket).
+    try {
+      const stat = statSync(socketPath);
+      ourIdentity = { dev: stat.dev, ino: stat.ino };
+    } catch { /* best effort; close falls back to leaving the file alone */ }
   });
-  server.on("close", () => rmSync(socketPath, { force: true }));
+  server.on("close", () => {
+    try {
+      if (ourIdentity) {
+        const stat = statSync(socketPath);
+        if (stat.dev === ourIdentity.dev && stat.ino === ourIdentity.ino) rmSync(socketPath, { force: true });
+      }
+    } catch { /* already gone */ }
+    releaseLease();
+  });
   return server;
 }

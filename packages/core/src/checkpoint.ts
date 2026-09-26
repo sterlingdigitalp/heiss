@@ -62,11 +62,11 @@ export function resumeSession(session: FarmSession): FarmSession {
   };
 }
 
-export function checkpointSession(session: FarmSession): FarmSession {
+export function checkpointSession(session: FarmSession, now?: string): FarmSession {
   return {
     ...session,
     status: "checkpointed",
-    updatedAt: new Date().toISOString(),
+    updatedAt: now ?? new Date().toISOString(),
   };
 }
 

@@ -42,6 +42,7 @@ export interface ParsedXPost extends PostSnapshot {
 }
 
 const AGE = /(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago/i;
+const AGE_G = new RegExp(AGE.source, "gi");
 const AGE_HOURS: Record<string, number> = {
   second: 1 / 3600, minute: 1 / 60, hour: 1, day: 24, week: 168, month: 730, year: 8760,
 };
@@ -91,13 +92,24 @@ function metric(label: string, singular: string, plural: string): number {
  */
 export function parseXTimelineCell(
   cell: XTimelineCell,
-  opts: { now?: Date; authorPrefix?: string } = {},
+  opts: { now?: Date; authorPrefix?: string; authorHandle?: string } = {},
 ): ParsedXPost | null {
   const label = (cell.label ?? "").trim();
   if (!label) return null;
   const now = opts.now ?? new Date();
-  const ageMatch = label.match(AGE);
-  const absolute = ageMatch ? null : absoluteAge(label, now);
+  // The real timestamp sits in the tail of the label, after the author/body —
+  // never at the start. A relative phrase can also appear IN the body ("posted
+  // a fix, finished 2 hours ago, will follow up"), which used to win just
+  // because `.match` returns the first hit. Take the LAST relative occurrence
+  // and the last absolute occurrence, then let whichever sits FURTHER RIGHT in
+  // the string decide — that is structurally the actual timestamp, since a
+  // body-text mention can only ever precede it.
+  const ageMatches = [...label.matchAll(AGE_G)];
+  const lastAgeMatch = ageMatches[ageMatches.length - 1] ?? null;
+  const absolute = absoluteAge(label, now);
+  const ageMatch = lastAgeMatch && (!absolute || lastAgeMatch.index! > absolute.index)
+    ? lastAgeMatch
+    : null;
   const views = metric(label, "View", "Views");
   const likes = metric(label, "Like", "Likes");
   const replies = metric(label, "Reply", "Replies");
@@ -123,7 +135,7 @@ export function parseXTimelineCell(
   const hasMedia = /\b(Image|Video|GIF)\b\.?/i.test(label);
 
   // Body is everything before the media/age tail, minus the author preamble.
-  const tailIndex = ageMatch ? label.search(AGE) : absolute!.index;
+  const tailIndex = ageMatch ? ageMatch.index! : absolute!.index;
   let bodyText = tailIndex > 0 ? label.slice(0, tailIndex) : label;
   bodyText = bodyText
     .replace(/^pinned\.\s*/i, "")
@@ -154,10 +166,27 @@ export function parseXTimelineCell(
   // Identity comes from content, never position: the row index changes as soon
   // as the target posts again, and re-finding by index would engage whatever
   // slid into that slot.
-  const matchText = bodyText.replace(/\s+/g, " ").trim().slice(0, 60);
+  const normalizedBody = bodyText.replace(/\s+/g, " ").trim();
+  const matchText = normalizedBody.slice(0, 60);
+  // The key identifies THIS post uniquely for engagement dedup: it must not
+  // collide across different authors, nor across two different posts from the
+  // same author that happen to open the same way (a thread starter, a
+  // template caption). Earlier this used only the first 60 chars of the body,
+  // with no author at all, so two authors whose posts opened identically (or
+  // two of one author's posts sharing an opening line) hashed to the same
+  // fingerprint and looked like the same post to the dedup store. The author
+  // handle plus the FULL normalized body make the key specific to one post.
+  //
+  // Engagement history stores a one-way hash of this key (xPostTargetKey in
+  // engagement.ts), so widening it here means old fingerprints will not match
+  // the new keys for posts already engaged before this change. Worst case is
+  // one re-visit of an already-liked post, which X reports as already_liked —
+  // not a duplicate like or a broken run.
+  const authorHandle = (opts.authorHandle ?? "").toLowerCase();
+  const key = `x:${authorHandle}:${normalizedBody.toLowerCase()}`;
   return {
     index: cell.index,
-    key: `x:${matchText.toLowerCase()}`,
+    key,
     matchText,
     isPinned,
     isQuote,
@@ -220,7 +249,10 @@ function sharedAuthorPrefix(labels: string[]): string {
   return trimmed.length <= 80 ? trimmed : "";
 }
 
-export function selectXPostPair(cells: XTimelineCell[], opts: { now?: Date } = {}): XPostPair {
+export function selectXPostPair(
+  cells: XTimelineCell[],
+  opts: { now?: Date; authorHandle?: string } = {},
+): XPostPair {
   // Two passes: identify the post rows, learn the author preamble from them,
   // then re-parse with it stripped.
   const firstPass = cells

@@ -57,6 +57,23 @@ export function curatedTargetsFor(
     });
 }
 
+export type CuratedTargetStatus = "active" | "auto_paused" | "paused";
+
+/**
+ * The single source of truth for what state a curated target is in.
+ * Selection, capacity, and the desktop's rendering all derive from this so
+ * they cannot disagree about whether a target is really active.
+ *
+ * `active: false` (a manual pause) always wins over an automatic pause: once
+ * a target is manually paused, whether it was ever auto-paused is history,
+ * not current state.
+ */
+export function curatedTargetStatus(target: CuratedTarget): CuratedTargetStatus {
+  if (!target.active) return "paused";
+  if (target.autoPausedAt) return "auto_paused";
+  return "active";
+}
+
 /** Only active targets are ever engaged; paused ones stay for history. */
 export function activeCuratedTargetsFor(
   targets: CuratedTarget[],
@@ -64,7 +81,7 @@ export function activeCuratedTargetsFor(
 ): CuratedTarget[] {
   // Auto-paused targets stay in the list for history and for `targets resume`,
   // but the rotation must not keep spending days on them.
-  return curatedTargetsFor(targets, accountId).filter((target) => target.active && !target.autoPausedAt);
+  return curatedTargetsFor(targets, accountId).filter((target) => curatedTargetStatus(target) === "active");
 }
 
 export interface AddTargetCheck {
@@ -91,7 +108,11 @@ export function checkCuratedTargetAddition(
   if (existing.some((target) => targetHandleKey(target.handle) === targetHandleKey(handle))) {
     return { ok: false, error: `${handle} is already on this list` };
   }
-  const active = existing.filter((target) => target.active).length;
+  // Auto-paused targets do not reserve a capacity slot: they were pulled out
+  // of the rotation for lack of engagement, so a persona stuck at 7/7 with
+  // auto-paused dead weight could never add a live replacement without first
+  // noticing and manually pausing something itself.
+  const active = existing.filter((target) => curatedTargetStatus(target) === "active").length;
   if (active >= max) {
     return {
       ok: false,

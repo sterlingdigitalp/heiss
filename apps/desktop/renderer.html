@@ -47,13 +47,23 @@ function render(s){
   const targetCards=as.filter(a=>a.platform==='x').sort((l,r)=>(groups.find(g=>g.id===l.groupId)?.name||'').localeCompare(groups.find(g=>g.id===r.groupId)?.name||'')).map(a=>{
     const gname=groups.find(g=>g.id===a.groupId)?.name||'Ungrouped';
     const mine=curated.filter(t=>t.accountId===a.id).sort((l,r)=>l.addedAt.localeCompare(r.addedAt));
-    const live=mine.filter(t=>t.active).length;
+    // Mirrors packages/core/src/targets.ts curatedTargetStatus: the renderer
+    // reads status JSON and cannot import core, so the same three-state rule
+    // (manual pause beats auto-pause) is kept here in one place. An
+    // auto-paused target does not reserve a capacity slot — it is out of the
+    // rotation same as a manual pause — so it must not read as "ready".
+    const targetStatus=t=>!t.active?'paused':(t.autoPausedAt?'auto_paused':'active');
+    const live=mine.filter(t=>targetStatus(t)==='active').length;
     const rows=mine.map(t=>{
+      const status=targetStatus(t);
       const bits=[t.followedAt?'followed':'not followed yet'];
       if(t.engagedCount)bits.push(t.engagedCount+' touch'+(t.engagedCount===1?'':'es'));
       if(t.lastEngagedAt)bits.push('last '+new Date(t.lastEngagedAt).toLocaleDateString());
+      if(status==='auto_paused'&&t.autoPauseReason)bits.push(esc(t.autoPauseReason));
       if(t.note)bits.push(esc(t.note));
-      return '<div class="item"><div class="icon">'+esc(t.handle.replace(/^@/,'').slice(0,2).toUpperCase())+'</div><div><b>'+esc(t.handle)+'</b><small>'+bits.join(' · ')+'</small></div><div>'+badge(t.active?'ready':'paused')+' <button class="btn ghost small" data-action="'+(t.active?'target-pause':'target-resume')+'" data-id="'+esc(t.id)+'">'+(t.active?'Pause':'Resume')+'</button> <button class="btn ghost small" data-action="target-remove" data-id="'+esc(t.id)+'">Remove</button></div></div>';
+      const badgeLabel=status==='active'?'ready':status==='auto_paused'?'auto paused':'paused';
+      const canResume=status!=='active';
+      return '<div class="item"><div class="icon">'+esc(t.handle.replace(/^@/,'').slice(0,2).toUpperCase())+'</div><div><b>'+esc(t.handle)+'</b><small>'+bits.join(' · ')+'</small></div><div>'+badge(badgeLabel)+' <button class="btn ghost small" data-action="'+(canResume?'target-resume':'target-pause')+'" data-id="'+esc(t.id)+'">'+(canResume?'Resume':'Pause')+'</button> <button class="btn ghost small" data-action="target-remove" data-id="'+esc(t.id)+'">Remove</button></div></div>';
     }).join('');
     const full=live>=MAX_TARGETS;
     return '<div class="card"><h3>'+esc(gname)+' · '+esc(a.handle)+'</h3><p class="muted" style="font-size:11px;margin:.1rem 0 .6rem">niche: '+esc((a.searchTerms||[]).join(', ')||'none set')+' · '+live+'/'+MAX_TARGETS+' active</p><div class="list">'+(rows||'<div class="empty">No targets yet. Add the people this persona should engage with.</div>')+'</div><div class="field" style="margin-top:10px"><label>Add a target</label><div class="actions"><input id="tgt-'+esc(a.id)+'" placeholder="@handle" style="flex:1"'+(full?' disabled':'')+'><input id="tgtnote-'+esc(a.id)+'" placeholder="note (optional)" style="flex:1"'+(full?' disabled':'')+'><button class="btn ghost small" data-action="target-add" data-id="'+esc(a.id)+'"'+(full?' disabled':'')+'>Add</button></div><span class="saved" id="tgtmsg-'+esc(a.id)+'">'+(full?'List is full — pause one to swap in a replacement.':'')+'</span></div></div>';
