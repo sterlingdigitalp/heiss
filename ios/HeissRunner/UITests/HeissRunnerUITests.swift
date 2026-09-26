@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.09.26.2"
+private let heissRunnerBuild = "heiss-runner-2026.09.26.4"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -889,8 +889,10 @@ final class HeissRunnerUITests: XCTestCase {
                         .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.58)))
                     Thread.sleep(forTimeInterval: 0.7)
                 }
+                // X: tap the tab by position. Querying X's tree while the home
+                // feed is loaded can hang and crash it (2026-09-26).
                 let searchButtons = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search"))
-                if searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
+                if platform != "x", searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
                 else {
                     let fallback = platform == "x" ? CGVector(dx: 0.30, dy: 0.95) : CGVector(dx: 0.50, dy: 0.94)
                     window.coordinate(withNormalizedOffset: point(command, "search", fallback)).tap()
@@ -1839,7 +1841,9 @@ final class HeissRunnerUITests: XCTestCase {
         let obs = try observations ?? recognizedTextObservationsUsingOCR()
         let onboardingTerms = ["Choose your interests", "Sync contacts", "Swipe up", "Default Account", "Save your login"]
         if onboardingTerms.contains(where: { observationContains(obs, $0) }) { return .onboardingOverlay }
-        if platform != "tiktok", app.keyboards.firstMatch.exists { return .search }
+        // X and TikTok are read by OCR only: with some feeds loaded, any
+        // snapshot of X's tree hangs and then crashes it (2026-09-26).
+        if platform != "tiktok", platform != "x", app.keyboards.firstMatch.exists { return .search }
         if observationContains(obs, "Search", minimumVisionY: 0.72, maximumVisionY: 0.96) { return .search }
         let switcherTerms = ["Add Instagram account", "Manage accounts", "Switch account", "Add account"]
         if switcherTerms.contains(where: { observationContains(obs, $0) }) { return .accountSwitcher }
@@ -1871,6 +1875,7 @@ final class HeissRunnerUITests: XCTestCase {
         let tiktokModalMarkers = ["Allow Access", "Don't Allow", "Allow While Using", "Turn On Notifications"]
         let appAlertVisible = platform == "tiktok"
             ? tiktokModalMarkers.contains(where: { observationContains(observations, $0) })
+            : platform == "x" ? false
             : (app.state == .runningForeground && app.alerts.count > 0)
         if appAlertVisible || springboard.alerts.count > 0 {
             throw NSError(domain: "HeissRunner", code: 24, userInfo: [
