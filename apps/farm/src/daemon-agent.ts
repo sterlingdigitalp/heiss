@@ -272,3 +272,28 @@ export function controllerLastExitCode(): number | undefined {
   const match = /last exit code = (\d+)/.exec(result.stdout ?? "");
   return match ? Number(match[1]) : undefined;
 }
+
+/**
+ * The built CLI the launchd agents should run. Heiss.app bundles its own CLI,
+ * so resolving relative to the running file there would point inside the app
+ * bundle, which packaging deletes and rebuilds (robustness review 2026-09-26,
+ * finding 5). Prefer a real checkout: beside this file, HEISS_REPO_ROOT, or
+ * whatever the installed controller already runs. Throws rather than
+ * installing an agent that cannot start.
+ */
+export function locateFarmCli(here: string, opts: {
+  repoRoot?: string; installedPlist?: string; exists?: (path: string) => boolean;
+} = {}): { distCliPath: string; srcCliPath: string } {
+  const exists = opts.exists ?? existsSync;
+  const roots: string[] = [join(here, "..")];
+  if (opts.repoRoot) roots.push(join(opts.repoRoot, "apps", "farm"));
+  const installed = opts.installedPlist?.match(/<string>([^<]*apps\/farm\/dist\/cli\.js)<\/string>/)?.[1];
+  if (installed) roots.push(join(dirname(installed), ".."));
+  for (const root of roots) {
+    const distCliPath = join(root, "dist", "cli.js");
+    if (!distCliPath.includes(".app/") && exists(distCliPath)) {
+      return { distCliPath, srcCliPath: join(root, "src", "cli.ts") };
+    }
+  }
+  throw new Error("daemon install: no built farm CLI outside the app bundle; run `npm run build` in the Heiss checkout or set HEISS_REPO_ROOT");
+}

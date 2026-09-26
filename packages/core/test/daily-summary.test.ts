@@ -56,6 +56,18 @@ describe("daily summary", () => {
     assert.equal(summaryIsBad(summary), false);
   });
 
+  it("counts a scheduled persona that never started (was a clean 0/0)", () => {
+    const state = farm();
+    state.curatedTargets.push(
+      { id: "t1", accountId: "a1", handle: "@x", active: true, addedAt: at("00:00"), engagedCount: 0 },
+    );
+    const summary = buildDailySummary(state, at("15:30"));
+    assert.equal(summary.engagementsExpected, 1);
+    assert.deepEqual(summary.engagementsMissed, ["@one"]);
+    assert.match(summary.headline, /engagements 0\/1 · never attempted: @one/);
+    assert.equal(summaryIsBad(summary), true);
+  });
+
   it("replays 2026-09-18: warmups fine, every engagement failed, one persona stopped", () => {
     const state = farm();
     for (const account of state.accounts) account.lastWarmupAt = at("08:00");

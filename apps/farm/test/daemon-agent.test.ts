@@ -42,3 +42,18 @@ describe("controller LaunchAgent", () => {
     assert.match(xml, /<key>HEISS_DATA<\/key><string>\/Users\/x\/.heiss\/live<\/string>/);
   });
 });
+
+describe("locateFarmCli", () => {
+  it("never picks a CLI inside the app bundle; falls back to what the controller already runs", async () => {
+    const { locateFarmCli } = await import("../src/daemon-agent.js");
+    const plist = "<string>/repo/apps/farm/dist/cli.js</string>";
+    const found = locateFarmCli("/Applications/Heiss.app/Contents/Resources/app/cli", {
+      installedPlist: plist, exists: (path) => path.startsWith("/repo/") || path.includes(".app/"),
+    });
+    assert.equal(found.distCliPath, "/repo/apps/farm/dist/cli.js");
+  });
+  it("refuses to install an agent that cannot start", async () => {
+    const { locateFarmCli } = await import("../src/daemon-agent.js");
+    assert.throws(() => locateFarmCli("/Applications/Heiss.app/x", { exists: () => false }), /no built farm CLI/);
+  });
+});

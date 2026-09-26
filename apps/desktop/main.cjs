@@ -5,7 +5,7 @@ const { app, BrowserWindow, ipcMain, shell } = require("electron");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("path");
-const { spawn, spawnSync } = require("child_process");
+const { spawn } = require("child_process");
 const QRCode = require("qrcode");
 const { validateFarmArgs, isTrustedSender } = require("./ipc-guard.cjs");
 
@@ -14,9 +14,6 @@ const FARM_CLI = app.isPackaged
   ? path.join(__dirname, "farm-cli.mjs")
   : path.join(ROOT, "apps/farm/src/cli.ts");
 const CANONICAL_DATA = path.join(os.homedir(), ".heiss", "live");
-const CONTROLLER_LABEL = "so.heiss.controller";
-const CONTROLLER_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", `${CONTROLLER_LABEL}.plist`);
-const CONTROLLER_LOG = path.join(CANONICAL_DATA, "controller.log");
 const RENDERER = path.join(__dirname, "renderer.html");
 
 function farmEnvironment(extra = {}) {
@@ -60,58 +57,22 @@ function runFarm(args) {
   });
 }
 
-function controllerProgramArguments() {
-  return app.isPackaged
-    ? [process.execPath, FARM_CLI, "daemon", "--data", CANONICAL_DATA]
-    : ["/usr/bin/env", "npx", "tsx", FARM_CLI, "daemon", "--data", CANONICAL_DATA];
-}
-
-function xml(value) {
-  return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
+// The controller's launchd agent is installed/removed/inspected through the
+// same `heiss-farm daemon` command a person would run by hand (apps/farm/src/
+// cli.ts, backed by apps/farm/src/daemon-agent.ts). That installer waits out
+// the launchd teardown race, retries loading the agent, and installs the
+// watchdog agent too — the desktop app used to duplicate a thinner, racier
+// version of this and does so no longer.
 function startDaemon() {
-  fs.mkdirSync(path.dirname(CONTROLLER_PLIST), { recursive: true });
-  fs.mkdirSync(CANONICAL_DATA, { recursive: true });
-  const argumentsXml = controllerProgramArguments().map((arg) => `<string>${xml(arg)}</string>`).join("");
-  const environment = app.isPackaged
-    ? `<key>ELECTRON_RUN_AS_NODE</key><string>1</string><key>HEISS_DATA</key><string>${xml(CANONICAL_DATA)}</string>`
-    : `<key>HEISS_DATA</key><string>${xml(CANONICAL_DATA)}</string><key>PATH</key><string>${xml(process.env.PATH || "/usr/local/bin:/usr/bin:/bin")}</string>`;
-  fs.writeFileSync(CONTROLLER_PLIST, `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>${CONTROLLER_LABEL}</string><key>ProgramArguments</key><array>${argumentsXml}</array><key>EnvironmentVariables</key><dict>${environment}</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>StandardOutPath</key><string>${xml(CONTROLLER_LOG)}</string><key>StandardErrorPath</key><string>${xml(CONTROLLER_LOG)}</string></dict></plist>`);
-  spawnSync("launchctl", ["bootout", `gui/${process.getuid()}/${CONTROLLER_LABEL}`], { stdio: "ignore" });
-  const loaded = spawnSync("launchctl", ["bootstrap", `gui/${process.getuid()}`, CONTROLLER_PLIST], { encoding: "utf8" });
-  if (loaded.status !== 0) throw new Error(loaded.stderr || `launchctl bootstrap failed (${loaded.status})`);
-  spawnSync("launchctl", ["kickstart", "-k", `gui/${process.getuid()}/${CONTROLLER_LABEL}`], { stdio: "ignore" });
-  return daemonStatus();
+  return runFarm(["daemon", "install", "--data", CANONICAL_DATA]);
 }
 
 function stopDaemon() {
-  spawnSync("launchctl", ["bootout", `gui/${process.getuid()}/${CONTROLLER_LABEL}`], { stdio: "ignore" });
-  fs.rmSync(CONTROLLER_PLIST, { force: true });
-  return { ok: true, running: false, log: readControllerLog() };
-}
-
-function readControllerLog() {
-  // Read only the tail; the log grows without bound and this runs on every status poll.
-  const bytes = 12_000;
-  let fd;
-  try {
-    fd = fs.openSync(CONTROLLER_LOG, "r");
-    const size = fs.fstatSync(fd).size;
-    const length = Math.min(size, bytes);
-    const buffer = Buffer.alloc(length);
-    fs.readSync(fd, buffer, 0, length, size - length);
-    return buffer.toString("utf8");
-  } catch {
-    return "";
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
+  return runFarm(["daemon", "uninstall", "--data", CANONICAL_DATA]);
 }
 
 function daemonStatus() {
-  const result = spawnSync("launchctl", ["print", `gui/${process.getuid()}/${CONTROLLER_LABEL}`], { encoding: "utf8" });
-  return { ok: true, running: result.status === 0, persistent: fs.existsSync(CONTROLLER_PLIST), dataDir: CANONICAL_DATA, log: readControllerLog() };
+  return runFarm(["daemon", "status", "--data", CANONICAL_DATA]);
 }
 
 function createWindow() {

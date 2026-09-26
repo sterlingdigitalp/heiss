@@ -96,6 +96,8 @@ import {
   reviveController,
   controllerLastExitCode,
   uninstallControllerAgent,
+  controllerPlistPath,
+  locateFarmCli,
 } from "./daemon-agent.js";
 import { createHmac, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -347,14 +349,12 @@ async function runCuratedEngagementOnce(
   // (The previous comment here claimed a freshly loaded store has empty
   // in-memory locks. It does not — load() calls locks.restore(), store.ts:256 —
   // so the real API is safe to use and is what persists on save.)
-  const lockHolder = `curated-${randomUUID()}`;
-  try {
-    store.locks.acquireDevice(device.id, lockHolder);
-  } catch {
-    return { ok: true, persona: account.handle, engaged: false, reason: "device_busy" };
+  // The same admission rules as every other device path. This one used to
+  // skip them, so it could like/follow on X during an emergency stop
+  // (robustness review 2026-09-26, finding 1).
+  if (store.state.settings.emergencyStop) {
+    return { ok: true, persona: account.handle, engaged: false, reason: "emergency_stop" };
   }
-  store.save();
-
   const plan = planDailyEngagement(
     store.state.curatedTargets, account.id, nowIso, store.state.settings.timeZone,
   );
@@ -366,6 +366,16 @@ async function runCuratedEngagementOnce(
     return { ok: true, persona: account.handle, engaged: false,
       reason: opts.explicitHandle ? "not_on_curated_list" : plan.reason };
   }
+  // Take the lock only once there is work to do: the no-target return above
+  // used to leave the device locked.
+  const lockHolder = `curated-${randomUUID()}`;
+  try {
+    store.locks.acquireDevice(device.id, lockHolder);
+  } catch {
+    return { ok: true, persona: account.handle, engaged: false, reason: "device_busy" };
+  }
+  store.save();
+
   const shouldFollow = opts.explicitHandle ? !target.followedAt : plan.shouldFollow;
 
   // Generous budget: this runs a full scan AND a full engage back to back, each
@@ -1160,10 +1170,12 @@ async function main(): Promise<void> {
 
   if (cmd === "daemon" && ["install", "uninstall", "status"].includes(args[1] ?? "")) {
     const dataDir = getArg(args, "--data") ?? defaultDataDir();
-    const here = dirname(fileURLToPath(import.meta.url));
-    const distCliPath = resolve(here, "..", "dist", "cli.js");
-    const srcCliPath = resolve(here, "..", "src", "cli.ts");
     if (args[1] === "install") {
+      let installedPlist: string | undefined;
+      try { installedPlist = readFileSync(controllerPlistPath(), "utf8"); } catch { installedPlist = undefined; }
+      const { distCliPath, srcCliPath } = locateFarmCli(dirname(fileURLToPath(import.meta.url)), {
+        repoRoot: process.env.HEISS_REPO_ROOT, installedPlist,
+      });
       const intervalSec = getArg(args, "--interval-sec");
       const controller = installControllerAgent({
         dataDir,
@@ -1303,6 +1315,22 @@ async function main(): Promise<void> {
             ? `${reviewCount} candidate${reviewCount === 1 ? " is" : "s are"} ready for exact approval.`
             : "No candidates were captured tonight; check Attention for paused accounts.");
           store.pushActivity({ kind: "candidate_review_ready", message: `10 p.m. candidate review ready (${reviewCount} candidates)` });
+        }
+        // One report per local day once the last window has passed, good day
+        // or bad: a silent farm and a healthy idle one look identical, which
+        // is how 2026-09-18 went unnoticed from 09:08 to 10:28. It runs before the
+        // maintenance return and outside the device branch, so a paused or
+        // disconnected day still gets its report.
+        if (summaryDue(store.state, nowIso)) {
+          const summary = buildDailySummary(store.state, nowIso);
+          store.state.settings.notificationKeys.dailySummary = summary.day;
+          store.pushActivity({ kind: "daily_summary", message: summary.headline });
+          store.save();
+          notifyDesktop(
+            summaryIsBad(summary) ? "Heiss day finished with problems" : "Heiss day complete",
+            summary.headline,
+          );
+          console.log(JSON.stringify({ at: nowIso, dailySummary: summary }));
         }
         const maintenance = store.state.settings.maintenance;
         if (maintenance.mode !== "running") {
@@ -1525,20 +1553,6 @@ async function main(): Promise<void> {
                 }
               }
             }
-          }
-          // One report per local day once the last window has passed, good day
-          // or bad: a silent farm and a healthy idle one look identical, which
-          // is how 2026-09-18 went unnoticed from 09:08 to 10:28.
-          if (summaryDue(store.state, nowIso)) {
-            const summary = buildDailySummary(store.state, nowIso);
-            store.state.settings.notificationKeys.dailySummary = summary.day;
-            store.pushActivity({ kind: "daily_summary", message: summary.headline });
-            store.save();
-            notifyDesktop(
-              summaryIsBad(summary) ? "Heiss day finished with problems" : "Heiss day complete",
-              summary.headline,
-            );
-            console.log(JSON.stringify({ at: nowIso, dailySummary: summary }));
           }
           const cloud = await pushCloudCompletions(store).catch((error) => ({ warning: String(error), pushed: 0 }));
           const completed = result.sessions.filter((session) => session.status === "completed").length;
