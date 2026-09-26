@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.09.26.1"
+private let heissRunnerBuild = "heiss-runner-2026.09.26.2"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1772,10 +1772,13 @@ final class HeissRunnerUITests: XCTestCase {
         // clear it first, unconditionally, before the OCR gate.
         dismissSystemStorageAlert(systemUI)
         // System prompts and passkey sheets are cheap SpringBoard element
-        // queries; always sweep them.
+        // queries; always sweep them. Never query X's own tree here: this ran
+        // before every step, and snapshotting @rbts4all's feed hung and then
+        // crashed X three times running (2026-09-26). SpringBoard and OCR
+        // still catch the prompt.
         _ = try dismissStaleLimitedPhotosSystemPrompt(
             surface: systemUI.windows.firstMatch,
-            app: platform == "tiktok" ? nil : app
+            app: (platform == "tiktok" || platform == "x") ? nil : app
         )
         if platform == "instagram" { dismissInstagramSetupPrompt(app) }
         if platform == "tiktok" { dismissTikTokPasskey() }
