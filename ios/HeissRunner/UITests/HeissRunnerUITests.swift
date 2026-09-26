@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.09.25.3"
+private let heissRunnerBuild = "heiss-runner-2026.09.26.1"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1231,23 +1231,27 @@ final class HeissRunnerUITests: XCTestCase {
         let body = postMatch.replacingOccurrences(of: "\n", with: " ")
         // Mentions, hashtags and links are tappable: a needle containing one
         // (or a tap on the line centre over one) opens that profile instead of
-        // the post — 3 of 5 post_did_not_open failures by 2026-09-25. Build the
-        // phrase needles from the plain words before the first such token.
+        // the post — 3 of 5 post_did_not_open failures by 2026-09-25.
         let allWords = body.split(separator: " ").map(String.init)
         func isLink(_ word: String) -> Bool {
             let w = word.lowercased()
             return w.hasPrefix("@") || w.hasPrefix(".@") || w.hasPrefix("#") || w.hasPrefix("http") || w.contains("://")
         }
-        let words = Array(allWords.prefix(while: { !isLink($0) }))
-        let plainWords = allWords.filter { !isLink($0) }
+        // Phrases come from the longest run of consecutive plain words, so a
+        // post that opens with a mention still gets a multi-word needle. A
+        // single word is never used: "Artificial" matched the author's own
+        // name in the profile header (2026-09-26) and tapped that instead.
+        var runs: [[String]] = [[]]
+        for word in allWords {
+            if isLink(word) { if !runs[runs.count - 1].isEmpty { runs.append([]) } }
+            else { runs[runs.count - 1].append(word) }
+        }
+        let words = runs.max(by: { $0.count < $1.count }) ?? []
         var needles: [String] = []
         if words.count >= 4 { needles.append(words.prefix(4).joined(separator: " ")) }
         if words.count >= 3 { needles.append(words.prefix(3).joined(separator: " ")) }
-        if words.count == 2 { needles.append(words.joined(separator: " ")) }
-        if let longest = plainWords.filter({ $0.count >= 6 }).max(by: { $0.count < $1.count }) {
-            needles.append(longest)
-        }
-        needles = needles.filter { $0.count >= 4 }
+        if words.count >= 2 { needles.append(words.prefix(2).joined(separator: " ")) }
+        needles = needles.filter { $0.count >= 8 }
         report["needles"] = needles
         guard !needles.isEmpty else {
             report["stoppedAt"] = "no_usable_needle"

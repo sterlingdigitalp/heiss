@@ -94,12 +94,12 @@ describe("choosing the candidate pair from a profile", () => {
     assert.deepEqual(pair.posts.map((p) => p.index), [7, 15, 21, 22]);
   });
 
-  it("feeds the selection rule, which keeps the newest here", () => {
+  it("feeds the selection rule, which passes over the newest here because it is a quote", () => {
     const pair = selectXPostPair(rows);
     const choice = choosePostForEngagement(pair.mostRecent, pair.preceding);
-    // Newest has 4+4+19=27; preceding has 7+1+26=34 — under the 3x bar.
-    assert.equal(choice.post?.index, 7);
-    assert.equal(choice.reason, "most_recent");
+    assert.equal(pair.mostRecent?.isQuote, true);
+    assert.equal(choice.post?.index, 15);
+    assert.equal(choice.reason, "avoided_quote");
   });
 
   it("handles a profile with no posts at all", () => {

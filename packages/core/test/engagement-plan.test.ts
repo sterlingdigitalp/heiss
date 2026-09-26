@@ -440,3 +440,14 @@ describe("freshness cap", () => {
     assert.equal(choosePostForEngagement(null, null).reason, "no_eligible_post");
   });
 });
+
+describe("quote posts", () => {
+  it("prefers a plain post over a quote post when both qualify", async () => {
+    const { choosePostForEngagement } = await import("../src/index.js");
+    const quote = { key: "q", ageHours: 2, likes: 5, hasReadableText: true, isQuote: true };
+    const plain = { key: "p", ageHours: 20, likes: 1, hasReadableText: true };
+    assert.equal(choosePostForEngagement(quote, plain).reason, "avoided_quote");
+    assert.equal(choosePostForEngagement(plain, quote).post?.key, "p");
+    assert.equal(choosePostForEngagement(quote, null).post?.key, "q", "a lone quote post is still fine");
+  });
+});

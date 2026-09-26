@@ -43,6 +43,9 @@ export interface PostSnapshot {
   isRepost?: boolean;
   /** A post with no readable text gives the comment writer nothing to work with. */
   hasReadableText?: boolean;
+  /** Quote posts embed another post, and a tap on the body can open that one
+   *  instead: 4 of 17 quote-post likes failed to open vs 2 of 24 plain posts. */
+  isQuote?: boolean;
 }
 
 export function postEngagementScore(post: PostSnapshot): number {
@@ -58,6 +61,7 @@ export interface PostChoice {
   /** Machine-readable reason, surfaced in the session activity log. */
   reason:
     | "most_recent"
+    | "avoided_quote"
     | "preceding_is_hotter"
     | "fell_back_to_preceding"
     | "no_fresh_post"
@@ -115,6 +119,10 @@ export function choosePostForEngagement(
     // `> 0` matters: with both at zero the multiple is trivially satisfied and
     // the older post would win on no evidence at all.
     const hotter = precedingScore > 0 && precedingScore >= HOTTER_POST_MULTIPLE * recentScore;
+    // Both qualify: when only one is a quote post, take the one that opens
+    // reliably, ahead of popularity.
+    if (mostRecent.isQuote && !preceding.isQuote) return { post: preceding, reason: "avoided_quote" };
+    if (preceding.isQuote && !mostRecent.isQuote) return { post: mostRecent, reason: "most_recent" };
     if (fresh && hotter) return { post: preceding, reason: "preceding_is_hotter" };
     return { post: mostRecent, reason: "most_recent" };
   }
