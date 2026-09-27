@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.09.26.4"
+private let heissRunnerBuild = "heiss-runner-2026.09.27.1"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1640,8 +1640,14 @@ final class HeissRunnerUITests: XCTestCase {
     ) throws {
         let handle = command["handle"] as? String ?? ""
         if platform == "instagram" {
-            let notNow = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Not now"))
-            if notNow.count > 0, notNow.firstMatch.isHittable { notNow.firstMatch.tap() }
+            if platform == "x" {
+                // Never snapshot X's tree over its feed (it hangs, then X is
+                // killed — 2026-09-27 cost @manxlab's engagement three times).
+                _ = try tapTextUsingOCR(surface: window, expected: "Not now")
+            } else {
+                let notNow = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Not now"))
+                if notNow.count > 0, notNow.firstMatch.isHittable { notNow.firstMatch.tap() }
+            }
             let explore = app.buttons["explore-tab"]
             if explore.waitForExistence(timeout: 3), explore.isHittable { explore.tap() }
             else { window.coordinate(withNormalizedOffset: point(command, "search", .init(dx: 0.70, dy: 0.95))).tap() }
@@ -1672,8 +1678,14 @@ final class HeissRunnerUITests: XCTestCase {
                     }
                 }
             }
-            let notNow = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Not now"))
-            if notNow.count > 0, notNow.firstMatch.isHittable { notNow.firstMatch.tap() }
+            if platform == "x" {
+                // Never snapshot X's tree over its feed (it hangs, then X is
+                // killed — 2026-09-27 cost @manxlab's engagement three times).
+                _ = try tapTextUsingOCR(surface: window, expected: "Not now")
+            } else {
+                let notNow = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Not now"))
+                if notNow.count > 0, notNow.firstMatch.isHittable { notNow.firstMatch.tap() }
+            }
             if platform == "youtube" {
                 try openYouTubeSearch(app: app, surface: window, command: command)
             } else {
