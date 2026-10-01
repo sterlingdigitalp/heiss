@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.09.27.1"
+private let heissRunnerBuild = "heiss-runner-2026.10.01.1"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1267,6 +1267,15 @@ final class HeissRunnerUITests: XCTestCase {
             if let hit = try needles.first(where: { try screenContainsTextUsingOCR($0) }) {
                 foundNeedle = hit
                 break
+            }
+            // A tap can hand off to another app (an X card linking to TikTok
+            // did on 2026-09-28), and blind swipes would then scroll it.
+            // app.state needs no tree snapshot, so it is safe to check on X.
+            if app.state != .runningForeground {
+                app.activate()
+                guard app.wait(for: .runningForeground, timeout: 8) else {
+                    throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "x lost foreground while looking for the post"])
+                }
             }
             // Blind scroll through SpringBoard coordinates — no element queries.
             window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
@@ -3468,8 +3477,29 @@ final class HeissRunnerUITests: XCTestCase {
         return observations.first(where: { observation in
             observation.boundingBox.midY >= minimumVisionY &&
             observation.boundingBox.midY <= maximumVisionY &&
-            observation.topCandidates(3).contains { textContainsExactHandle($0.string, normalized: normalized) }
+            observation.topCandidates(3).contains { ocrTextContainsHandle($0.string, normalized: normalized) }
         })
+    }
+
+    /// OCR-only variant of textContainsExactHandle that forgives the misreads
+    /// Vision makes on handles: "_" as a space, dot or nothing, and I/l/1 and
+    /// O/0 swapped. Without it @EvaAI_Lab never verified by OCR and always
+    /// fell back to snapshotting X's tree, which can hang and crash X
+    /// (2026-10-01). It requires the "@" and strict boundaries, so a display
+    /// name, an email or a longer handle still cannot match.
+    private func ocrTextContainsHandle(_ raw: String, normalized: String) -> Bool {
+        if textContainsExactHandle(raw, normalized: normalized) { return true }
+        var body = ""
+        for ch in normalized.lowercased() {
+            switch ch {
+            case "_": body += "[_ .]?"
+            case "i", "l", "1": body += "[il1|]"
+            case "o", "0": body += "[o0]"
+            default: body += NSRegularExpression.escapedPattern(for: String(ch))
+            }
+        }
+        let pattern = "(^|[^a-z0-9._])@\(body)(?!@)($|[^a-z0-9._])"
+        return raw.lowercased().range(of: pattern, options: .regularExpression) != nil
     }
 
     private func point(_ command: [String: Any], _ key: String, _ fallback: CGVector) -> CGVector {
