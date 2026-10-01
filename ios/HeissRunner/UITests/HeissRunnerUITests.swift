@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.01.2"
+private let heissRunnerBuild = "heiss-runner-2026.10.01.3"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -256,7 +256,7 @@ final class HeissRunnerUITests: XCTestCase {
         let latePromptTimeout: TimeInterval = platform == "tiktok" ? 20 : 3
         _ = try dismissStaleLimitedPhotosSystemPrompt(
             surface: systemUI.windows.firstMatch,
-            app: platform == "tiktok" ? nil : app,
+            app: (platform == "tiktok" || platform == "x") ? nil : app,
             appearanceTimeout: latePromptTimeout
         )
         if app.state != .runningForeground {
@@ -438,8 +438,12 @@ final class HeissRunnerUITests: XCTestCase {
                         }
                     }
                 }
-                let notNow = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Not now"))
-                if notNow.count > 0, notNow.firstMatch.isHittable { notNow.firstMatch.tap() }
+                if platform == "x" {
+                    _ = try tapTextUsingOCR(surface: window, expected: "Not now")
+                } else {
+                    let notNow = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "Not now"))
+                    if notNow.count > 0, notNow.firstMatch.isHittable { notNow.firstMatch.tap() }
+                }
                 if platform == "youtube" {
                     try openYouTubeSearch(app: app, surface: window, command: command)
                 } else {
@@ -2544,8 +2548,7 @@ final class HeissRunnerUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.8)
             try openXDrawer(app: app, surface: window)
             var inspectedAccounts = [try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | ")]
-            if try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.72)
-                || drawerPublishesExactHandle(app, normalized: normalized) {
+            if try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.72) {
                 window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50)).tap()
                 activeHandles[platform] = handle
                 return
@@ -2564,8 +2567,7 @@ final class HeissRunnerUITests: XCTestCase {
                 // "@EvaAI_Labr", which correctly fails the exact-boundary test
                 // and aborted a whole run). Retrying costs seconds; loosening
                 // the boundary would let @thekuchh match @Thekuchhal.
-                if try waitForExactHandleUsingOCR(normalized: normalized, timeout: 3.0, minimumVisionY: 0.72)
-                    || drawerPublishesExactHandle(app, normalized: normalized) {
+                if try waitForExactHandleUsingOCR(normalized: normalized, timeout: 3.0, minimumVisionY: 0.72) {
                     window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50)).tap()
                     activeHandles[platform] = handle
                     return
@@ -2580,24 +2582,22 @@ final class HeissRunnerUITests: XCTestCase {
             // avatar row. Search that account list by exact rendered handle.
             window.coordinate(withNormalizedOffset: CGVector(dx: 0.74, dy: 0.075)).tap()
             Thread.sleep(forTimeInterval: 1.0)
-            // OCR first (it now forgives handle misreads); the tree is the
-            // last resort because snapshotting X can hang and crash it.
+            // OCR only (it forgives handle misreads). Snapshotting X's tree
+            // here hung and crashed X; an unreadable handle now fails as an
+            // account mismatch for a human instead (2026-10-01 audit).
             let selected = try tapExactHandleUsingOCR(surface: window, normalized: normalized)
-                || tapExactHandleUsingAccessibility(app, normalized: normalized)
             if selected {
                 Thread.sleep(forTimeInterval: 1.2)
                 try openXDrawer(app: app, surface: window)
                 inspectedAccounts.append(try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | "))
-                if try waitForExactHandleUsingOCR(normalized: normalized, timeout: 3.0, minimumVisionY: 0.72)
-                    || drawerPublishesExactHandle(app, normalized: normalized) {
+                if try waitForExactHandleUsingOCR(normalized: normalized, timeout: 3.0, minimumVisionY: 0.72) {
                     window.coordinate(withNormalizedOffset: CGVector(dx: 0.90, dy: 0.50)).tap()
                     activeHandles[platform] = handle
                     return
                 }
             }
             let summary = inspectedAccounts.enumerated().map { "slot\($0.offset): \($0.element)" }.joined(separator: "; ")
-            let tree = drawerHandleDiagnostics(app, normalized: normalized)
-            throw NSError(domain: "HeissRunner", code: 15, userInfo: [NSLocalizedDescriptionKey: "X signed-in accounts did not verify exact handle \(handle). OCR headers: \(summary). Accessibility: \(tree)"])
+            throw NSError(domain: "HeissRunner", code: 15, userInfo: [NSLocalizedDescriptionKey: "X signed-in accounts did not verify exact handle \(handle). OCR headers: \(summary)"])
         }
         if platform == "youtube" {
             try ensureYouTubeAccount(app, surface: window, handle: handle, normalized: normalized, command: command)
