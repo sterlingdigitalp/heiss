@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.01.1"
+private let heissRunnerBuild = "heiss-runner-2026.10.01.2"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -452,7 +452,7 @@ final class HeissRunnerUITests: XCTestCase {
                         Thread.sleep(forTimeInterval: 0.7)
                     }
                     let searchButtons = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search"))
-                    if searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
+                    if platform != "x", searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
                     else {
                         let fallback = platform == "x" ? CGVector(dx: 0.30, dy: 0.95) : CGVector(dx: 0.50, dy: 0.94)
                         window.coordinate(withNormalizedOffset: point(command, "search", fallback)).tap()
@@ -1708,8 +1708,9 @@ final class HeissRunnerUITests: XCTestCase {
                         .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.58)))
                     Thread.sleep(forTimeInterval: 0.7)
                 }
+                // X: tap the tab by position; never snapshot X over its feed.
                 let searchButtons = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search"))
-                if searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
+                if platform != "x", searchButtons.count > 0, searchButtons.firstMatch.isHittable { searchButtons.firstMatch.tap() }
                 else {
                     let fallback = platform == "x" ? CGVector(dx: 0.30, dy: 0.95) : CGVector(dx: 0.50, dy: 0.94)
                     window.coordinate(withNormalizedOffset: point(command, "search", fallback)).tap()
@@ -2579,8 +2580,10 @@ final class HeissRunnerUITests: XCTestCase {
             // avatar row. Search that account list by exact rendered handle.
             window.coordinate(withNormalizedOffset: CGVector(dx: 0.74, dy: 0.075)).tap()
             Thread.sleep(forTimeInterval: 1.0)
-            let selected = try tapExactHandleUsingAccessibility(app, normalized: normalized)
-                || tapExactHandleUsingOCR(surface: window, normalized: normalized)
+            // OCR first (it now forgives handle misreads); the tree is the
+            // last resort because snapshotting X can hang and crash it.
+            let selected = try tapExactHandleUsingOCR(surface: window, normalized: normalized)
+                || tapExactHandleUsingAccessibility(app, normalized: normalized)
             if selected {
                 Thread.sleep(forTimeInterval: 1.2)
                 try openXDrawer(app: app, surface: window)
