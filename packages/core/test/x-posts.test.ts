@@ -309,3 +309,17 @@ describe("ordering by age rather than row position", () => {
     assert.equal(pair.mostRecent?.matchText, "the real newest.");
   });
 });
+
+describe("author preamble with an affiliation badge", () => {
+  it("strips the badge even when a repost by someone else is on the profile", async () => {
+    const { selectXPostPair } = await import("../src/index.js");
+    const own = (body: string, age: string) => ({ index: 0, label: `Feross Verified. Socket. ${body}. ${age}. 3 Replies. 4 Reposts. 12 Likes. 2K Views` });
+    const cells = [
+      { ...own("Capital One operates in one of the most demanding security environments", "1 day ago"), index: 1 },
+      { index: 2, label: "Pari Singh Verified. Flow has raised a $50M Series B at a $750M valuation. 2 days ago. 3 Replies. 1 Repost. 9 Likes. 1K Views" },
+      { ...own("npm 12's hidden trap: it silently skips install scripts", "8 days ago"), index: 3 },
+    ];
+    const pair = selectXPostPair(cells as never, { now: new Date("2026-10-03T15:00:00Z"), authorHandle: "@feross" });
+    assert.match(pair.mostRecent!.matchText, /^Capital One operates/);
+  });
+});

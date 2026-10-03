@@ -233,20 +233,26 @@ export interface XPostPair {
 function sharedAuthorPrefix(labels: string[]): string {
   const cleaned = labels.map((label) => label.replace(/^pinned\.\s*/i, ""));
   if (cleaned.length < 2) return "";
-  let prefix = cleaned[0]!;
-  for (const label of cleaned.slice(1)) {
-    let i = 0;
-    while (i < prefix.length && i < label.length && prefix[i] === label[i]) i += 1;
-    prefix = prefix.slice(0, i);
-    if (!prefix) return "";
+  // The preamble ("<name> Verified. <affiliation badge>. ") is shared by the
+  // author's own rows, but a repost or a quote by someone else breaks a
+  // prefix shared by ALL rows, and the badge then leaked into the post text
+  // the runner searches for (2026-10-03: "Socket. ...", "AI Engineer 🔜 ...").
+  // Take the longest sentence-bounded opening that most rows share.
+  const needed = Math.max(2, Math.ceil(cleaned.length / 2));
+  let best = "";
+  for (const label of cleaned) {
+    let at = label.indexOf(". ");
+    // A preamble is a name and maybe a badge. Anything long is shared body text.
+    while (at >= 0 && at + 2 <= 80) {
+      const candidate = label.slice(0, at + 2);
+      if (candidate.length > best.length
+        && cleaned.filter((other) => other.startsWith(candidate)).length >= needed) {
+        best = candidate;
+      }
+      at = label.indexOf(". ", at + 2);
+    }
   }
-  // Cut back to a sentence boundary: without this, two posts that happen to
-  // open with the same word would strip half of a real sentence.
-  const cut = prefix.lastIndexOf(". ");
-  if (cut < 0) return "";
-  const trimmed = prefix.slice(0, cut + 2);
-  // A preamble is a name and maybe a badge. Anything long is shared body text.
-  return trimmed.length <= 80 ? trimmed : "";
+  return best;
 }
 
 export function selectXPostPair(

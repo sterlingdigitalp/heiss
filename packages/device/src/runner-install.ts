@@ -10,9 +10,12 @@ import {
   writeFileSync,
   cpSync,
   rmSync,
+  copyFileSync,
+  readdirSync,
+  statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { withRunnerBuildLock } from "./runner-lock.js";
@@ -538,7 +541,10 @@ export async function launchAutomationRunner(
     }
   }
   // Rotate the log so readiness checks only ever read this launch's output.
+  // Keep a dated copy too: with only ".previous", the next day's first launch
+  // destroyed the evidence of a failure before anyone could read it.
   if (existsSync(logPath)) {
+    archiveRunnerLog(logPath);
     renameSync(logPath, `${logPath}.previous`);
   }
   const args = [
@@ -655,3 +661,23 @@ const SCHEME = `<?xml version="1.0" encoding="UTF-8"?>
   </LaunchAction>
 </Scheme>
 `;
+
+/** Days of dated runner logs kept under automation-logs/archive. */
+export const RUNNER_LOG_ARCHIVE_DAYS = 14;
+
+/** Copy a runner log into a dated archive and prune archives past the window. */
+export function archiveRunnerLog(logPath: string, now = new Date()): void {
+  try {
+    const dir = join(dirname(logPath), "archive");
+    mkdirSync(dir, { recursive: true });
+    const stamp = now.toISOString().replace(/[:.]/g, "-");
+    copyFileSync(logPath, join(dir, `${basename(logPath, ".log")}-${stamp}.log`));
+    const cutoff = now.getTime() - RUNNER_LOG_ARCHIVE_DAYS * 86_400_000;
+    for (const name of readdirSync(dir)) {
+      const file = join(dir, name);
+      if (statSync(file).mtimeMs < cutoff) rmSync(file, { force: true });
+    }
+  } catch {
+    // Archiving is diagnostic only; never block a runner launch on it.
+  }
+}
