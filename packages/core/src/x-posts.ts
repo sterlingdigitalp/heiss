@@ -230,6 +230,12 @@ export interface XPostPair {
  * then matched the PROFILE HEADER, the tap hit the header instead of a post,
  * and the like failed with post_did_not_open.
  */
+/** A short first sentence, the shape of an affiliation badge. */
+function leadingBadge(body: string): string {
+  const at = body.indexOf(". ");
+  return at > 0 && at + 2 <= 40 ? body.slice(0, at + 2) : "";
+}
+
 function sharedAuthorPrefix(labels: string[]): string {
   const cleaned = labels.map((label) => label.replace(/^pinned\.\s*/i, ""));
   if (cleaned.length < 2) return "";
@@ -265,9 +271,25 @@ export function selectXPostPair(
     .map((cell) => ({ cell, post: parseXTimelineCell(cell, opts) }))
     .filter((row) => row.post !== null);
   const authorPrefix = sharedAuthorPrefix(firstPass.map((row) => row.cell.label ?? ""));
-  const parsed = firstPass
+  let parsed = firstPass
     .map((row) => parseXTimelineCell(row.cell, { ...opts, authorPrefix }))
     .filter((post): post is ParsedXPost => post !== null);
+  // An affiliation badge ("Socket.", "AI Engineer 🔜 NYC 🗽.") can survive
+  // the preamble strip when most rows are other people's reposts. A short
+  // opening sentence repeated across two or more posts is that badge, never
+  // what the runner should search the screen for (2026-10-04, @swyx).
+  const openings = new Map<string, number>();
+  for (const post of parsed) {
+    const opening = leadingBadge(post.bodyText);
+    if (opening) openings.set(opening, (openings.get(opening) ?? 0) + 1);
+  }
+  parsed = parsed.map((post) => {
+    const opening = leadingBadge(post.bodyText);
+    if (!opening || (openings.get(opening) ?? 0) < 2) return post;
+    const bodyText = post.bodyText.slice(opening.length).trim();
+    const normalized = bodyText.replace(/\s+/g, " ").trim();
+    return { ...post, bodyText, matchText: normalized.slice(0, 60), hasReadableText: bodyText.length >= 20 };
+  });
   const pinned = parsed.find((post) => post.isPinned) ?? null;
   // Order by age, not by the order the accessibility tree happened to return.
   // X lists a profile reverse-chronologically so the two usually agree, and the

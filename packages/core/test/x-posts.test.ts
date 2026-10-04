@@ -323,3 +323,16 @@ describe("author preamble with an affiliation badge", () => {
     assert.match(pair.mostRecent!.matchText, /^Capital One operates/);
   });
 });
+
+describe("affiliation badge on a profile mostly of reposts", () => {
+  it("strips a short opening repeated across the author's posts", async () => {
+    const { selectXPostPair } = await import("../src/index.js");
+    const own = (i: number, body: string, age: string) => ({ index: i, label: `swyx Verified. AI Engineer 🔜 NYC 🗽. ${body}. ${age}. 75 Replies. 6 Reposts. 87 Likes. 20K Views` });
+    const other = (i: number, who: string) => ({ index: i, label: `${who} Verified. Some unrelated announcement about funding rounds today. 3 days ago. 3 Replies. 1 Repost. 9 Likes. 1K Views` });
+    const cells = [own(1, "It's time to get serious about Security for agents", "1 day ago"),
+      other(2, "Pari Singh"), other(3, "Alex Doe"), other(4, "Sam Roe"),
+      own(5, "Shipping the new conference schedule this week", "4 days ago")];
+    const pair = selectXPostPair(cells as never, { now: new Date("2026-10-04T15:00:00Z"), authorHandle: "@swyx" });
+    assert.match(pair.mostRecent!.matchText, /^It's time to get serious/);
+  });
+});
