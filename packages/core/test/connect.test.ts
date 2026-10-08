@@ -6,7 +6,7 @@ import {
   CONNECT_REPLY_VARIANTS, type ScreenLine,
 } from "../src/index.js";
 
-const line = (t: string, y: number, x = 0.2): ScreenLine => ({ t, x, y, w: 0.6, h: 0.02 });
+const line = (t: string, y: number, x = 0.15): ScreenLine => ({ t, x, y, w: 0.6, h: 0.02 });
 
 describe("#connect: reading a results page", () => {
   it("finds post headers, ignores mentions in bodies, and sorts newest first", () => {
@@ -116,5 +116,19 @@ describe("#connect: finding the icon row", () => {
   it("falls back to a fixed step under the Views line when no counts show", () => {
     const none = parseConnectPostPage([...header, at("2:12 PM • 10/8/26 • 18 Views", 0.02, 0.60)]);
     assert.ok(Math.abs(none.replyButton!.y - 0.66) < 0.006, `bubble at ${none.replyButton!.y}`);
+  });
+});
+
+describe("#connect: text inside a post's picture", () => {
+  const at = (t: string, x: number, y: number): ScreenLine => ({ t, x, y, w: 0.3, h: 0.019 });
+  it("is not mistaken for a search result (real capture, 2026-10-08)", () => {
+    const found = parseConnectResults([[
+      at("Kritish Mohapatra", 0.155, 0.10), at("@KritishIoT • 1h", 0.45, 0.101),
+      // The post's image: a screenshot of a notifications page, inset from the edge.
+      at("J.Miray", 0.23, 0.23), at("and 11 others liked your post • 5m", 0.32, 0.23),
+      at("Zrout", 0.24, 0.34), at("@zroutisnomore • 17m", 0.31, 0.35),
+      at("matt batt", 0.24, 0.58), at("@BattMatter • 28m", 0.37, 0.58),
+    ]]);
+    assert.deepEqual(found.map((c) => c.handle), ["@KritishIoT"]);
   });
 });

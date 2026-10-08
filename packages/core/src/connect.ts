@@ -64,6 +64,14 @@ export function parseConnectResults(pages: ScreenLine[][]): ConnectCandidate[] {
       const age = ageMinutes(afterHandle);
       // A mention inside a post body has no timestamp after it; only headers do.
       if (age === undefined) return;
+      // A real header starts at the left edge of the post's text column, where
+      // the display name is. OCR also reads text inside a post's images, and a
+      // screenshot of a notifications page is full of "@handle · 17m" lines —
+      // but inset, never at that edge (2026-10-08: it was tapped five times).
+      const atNameColumn = (other: ScreenLine) => other.x > 0.13 && other.x < 0.185;
+      const anchored = atNameColumn(line)
+        || lines.some((other) => other !== line && Math.abs(other.y - line.y) < 0.012 && atNameColumn(other));
+      if (!anchored) return;
       let displayName = line.t.slice(0, handleMatch.index).trim();
       if (!displayName) {
         // X draws "Name  @handle · 7m" on one row, which OCR returns as two
