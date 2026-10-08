@@ -126,6 +126,14 @@ describe("#connect session", () => {
     assert.ok(remembered.includes("@maya_builds"), "so they are never tapped again");
   });
 
+  it("a tap that opens a picture is backed out of, and the session carries on", async () => {
+    const viewer = [L("Notifications", 0.1, 0.07), L("@zrout • 17m", 0.2, 0.4)];
+    const phone = fakePhone({ "@maya_builds": viewer });
+    const run = await runConnectSession(phone.step, { ...base, max: 1, live: true });
+    assert.equal(run.outcomes.find((o) => o.handle === "@maya_builds")?.reason, "opened_something_else");
+    assert.equal(run.outcomes.find((o) => o.result === "connected")?.handle, "@samroe");
+  });
+
   it("never posts when the reply box holds anything but the intended reply", async () => {
     const phone = fakePhone({});
     const step = async (action: string, input: Record<string, unknown>) => {

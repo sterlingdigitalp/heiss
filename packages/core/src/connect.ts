@@ -203,7 +203,10 @@ export function parseConnectPostPage(lines: ScreenLine[]): ConnectPostPage {
   const isFollow = placeholder !== undefined && placeholder.w <= CONNECT_FOLLOW_MAX_WIDTH;
   // The icon row sits a fixed step under the "time · date · N Views" line; the
   // bubble is its first icon. Without that line on screen there is no safe tap.
-  const views = lines.find((line) => /\bviews?\b/i.test(line.t) && /\d/.test(line.t) && line.y > 0.2);
+  // Match the whole "2:12 PM · 10/8/26 · 62 Views" shape: OCR also reads text
+  // inside a post's images, and a screenshot in a post can contain "Views".
+  const views = lines.find((line) => line.y > 0.2
+    && /\d{1,2}:\d{2}\s?[AP]M/i.test(line.t) && /\d{1,2}\/\d{1,2}\/\d{2}/.test(line.t) && /\bviews?\b/i.test(line.t));
   const viewsY = views ? views.y + views.h / 2 : undefined;
   const bubbleY = viewsY === undefined ? undefined : viewsY + 0.11 * (viewsY - 0.05);
   return {

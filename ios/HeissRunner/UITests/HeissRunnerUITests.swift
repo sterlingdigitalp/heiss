@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.08.9"
+private let heissRunnerBuild = "heiss-runner-2026.10.08.10"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1661,10 +1661,22 @@ final class HeissRunnerUITests: XCTestCase {
                 let composer = try recognizedTextObservationsUsingOCR()
                 report["composer"] = try screenLinesUsingOCR()
                 // The reply screen names who it replies to; refuse anyone else.
-                let expected = ((command["connectExpectHandle"] as? String) ?? "").lowercased()
-                    .replacingOccurrences(of: "@", with: "").replacingOccurrences(of: "_", with: "")
-                let replyingTo = composer.compactMap { $0.topCandidates(1).first?.string.lowercased() }
-                    .first(where: { $0.contains("replying to") })?.replacingOccurrences(of: "_", with: "") ?? ""
+                // OCR swaps I/l/1 and O/0 and drops underscores ("@KritishIoT"
+                // read as "@KritishloT" cancelled a correct reply, 2026-10-08),
+                // so compare with those folded together.
+                func folded(_ value: String) -> String {
+                    String(value.lowercased().compactMap { ch -> Character? in
+                        switch ch {
+                        case "i", "l", "1", "|": return "l"
+                        case "o", "0": return "o"
+                        case "@", "_", " ": return nil
+                        default: return ch
+                        }
+                    })
+                }
+                let expected = folded((command["connectExpectHandle"] as? String) ?? "")
+                let replyingTo = composer.compactMap { $0.topCandidates(1).first?.string }
+                    .first(where: { $0.lowercased().contains("replying to") }).map(folded) ?? ""
                 let field = composer.first(where: {
                     $0.topCandidates(1).first?.string.range(of: "Post your reply", options: .caseInsensitive) != nil
                 })

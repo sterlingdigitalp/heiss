@@ -104,8 +104,16 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
       page = shown;
       continue;
     }
-    // Neither the results nor a post: stop rather than tap anything blind.
-    if (!isConnectPostPage(shown)) return { outcomes, stoppedBecause: "unknown_page" };
+    // Neither the results nor a post. The usual cause is a "result" that was
+    // really text inside a post's image (a screenshot of someone's
+    // notifications read as handles and ages), so the tap opened the picture.
+    // One back closes it; if that does not return to the results, stop.
+    if (!isConnectPostPage(shown)) {
+      outcomes.push({ handle: candidate.handle, result: "skipped", reason: "opened_something_else" });
+      page = linesOf((await step("x:connect_commit", { connectRehearse: true })).lines);
+      if (!isConnectResultsPage(page)) return { outcomes, stoppedBecause: "unknown_page" };
+      continue;
+    }
     const opened = parseConnectPostPage(shown);
     const handle = opened.handle!;
     handled.add(handle.toLowerCase());
