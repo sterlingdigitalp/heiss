@@ -275,3 +275,55 @@ export function sameConnectHandle(a: string, b: string): boolean {
   if (Math.min(left.length, right.length) < 4) return left === right;
   return left.startsWith(right) || right.startsWith(left);
 }
+
+// ── Supply: when are there the most fresh posts? ─────────────────────────
+
+/** One scan's reading of how busy "#connect" is right now. */
+export interface ConnectSupplySample {
+  at: string;
+  /** Distinct authors whose post is at most this many minutes old. */
+  fresh15: number;
+  fresh30: number;
+  fresh60: number;
+  /** Authors read in the scan, and the oldest post it reached (minutes). */
+  read: number;
+  reachedMinutes: number;
+}
+
+/**
+ * Posts per window are counted from the posts' own ages, so the figure does
+ * not depend on how often scans run. `fresh30` is only trustworthy when the
+ * scan scrolled back at least 30 minutes (`reachedMinutes`).
+ */
+export function connectSupplySample(candidates: ConnectCandidate[], nowIso: string): ConnectSupplySample {
+  const within = (minutes: number) => candidates.filter((candidate) => candidate.ageMinutes <= minutes).length;
+  return {
+    at: nowIso, fresh15: within(15), fresh30: within(30), fresh60: within(60),
+    read: candidates.length,
+    reachedMinutes: candidates.reduce((oldest, candidate) => Math.max(oldest, candidate.ageMinutes), 0),
+  };
+}
+
+export interface ConnectSupplyHour { hour: number; samples: number; postsPerHour: number }
+
+/**
+ * Average new posts per hour for each local hour of the day. Uses the widest
+ * window each scan actually covered, scaled to an hour, so a scan that only
+ * reached 20 minutes back still counts for what it saw.
+ */
+export function connectSupplyByHour(samples: ConnectSupplySample[], timeZone: string): ConnectSupplyHour[] {
+  const hours = new Map<number, number[]>();
+  for (const sample of samples) {
+    const rate = sample.reachedMinutes >= 60 ? sample.fresh60
+      : sample.reachedMinutes >= 30 ? sample.fresh30 * 2
+      : sample.reachedMinutes >= 15 ? sample.fresh15 * 4
+      : undefined;
+    if (rate === undefined) continue;
+    const hour = Number(new Intl.DateTimeFormat("en-GB", { hour: "2-digit", hourCycle: "h23", timeZone }).format(new Date(sample.at)));
+    hours.set(hour, [...(hours.get(hour) ?? []), rate]);
+  }
+  return [...hours.entries()].sort((a, b) => a[0] - b[0]).map(([hour, rates]) => ({
+    hour, samples: rates.length,
+    postsPerHour: Math.round((rates.reduce((sum, rate) => sum + rate, 0) / rates.length) * 10) / 10,
+  }));
+}

@@ -346,6 +346,8 @@ export interface FarmSettings {
   /** One-time marker: legacy accounts were backfilled with a warmup schedule
    *  and X posting slot. Once set, removed schedules stay removed. */
   scheduleBackfillVersion: number;
+  /** Periodic read-only "#connect" scans that log how many fresh posts there are, by time of day. */
+  connectSupply?: { accountId: string; everyMinutes: number; lastSampleAt?: string };
   /** Likes/follows and other engagement are omitted unless a human enables them. */
   /** Last observed state is persisted so disconnect alerts fire once per transition. */
   deviceStates: Record<string, "online" | "offline">;

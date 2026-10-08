@@ -47,6 +47,10 @@ import {
   recordTargetAttempt,
   clearAutoPause,
   parseConnectResults,
+  connectSupplyByHour,
+  connectSupplySample,
+  isConnectResultsPage,
+  type ConnectSupplySample,
   connectTargetKey,
   connectEligibility,
   connectReply,
@@ -163,6 +167,7 @@ Farm:
   heiss-farm targets remove <targetId>
   heiss-farm targets scan <xAccountId> @targetHandle   # read-only: what do their latest posts look like
   heiss-farm targets connect-scan <xAccountId> [--query "#connect"] [--pages 3]   # read-only #connect dry run
+  heiss-farm targets connect-supply [--enable <xAccountId> [--every 30] | --disable]   # fresh #connect posts by hour of day
   heiss-farm targets connect <xAccountId> [--max 5] [--live]   # #connect follow + reply; a rehearsal without --live
   heiss-farm targets engage <xAccountId> [@handle] [--live]   # dry run unless --live
   heiss-farm targets pause <targetId> | resume <targetId>
@@ -337,6 +342,73 @@ async function pushCloudCompletions(store: JsonStore, licenseOverride?: string) 
  * never drift — an unattended path that differs from the one used for manual
  * testing is a path nobody has actually tested.
  */
+/** The supply log: one line per scan, appended, never rewritten. */
+function connectSupplyPath(dataDir: string): string { return join(dataDir, "connect-supply.jsonl"); }
+
+function readConnectSupply(dataDir: string): ConnectSupplySample[] {
+  try {
+    return readFileSync(connectSupplyPath(dataDir), "utf8").split("\n").filter(Boolean)
+      .map((row) => JSON.parse(row) as ConnectSupplySample);
+  } catch { return []; }
+}
+
+/**
+ * The read-only #connect scan: search, read the Latest results, and report who
+ * qualifies. Appends a supply sample for every successful scan.
+ */
+async function runConnectScan(
+  store: ReturnType<typeof openStore>,
+  account: { id: string; handle: string; deviceId: string; displayName?: string; loginEmail?: string;
+    switcherHint?: string; searchTerms?: string[] },
+  opts: { dataDir: string; query?: string; pages?: number; raw?: boolean },
+): Promise<Record<string, unknown>> {
+  if (store.state.settings.emergencyStop) return { ok: true, persona: account.handle, reason: "emergency_stop" };
+  const device = store.state.devices.find((candidate) => candidate.id === account.deviceId);
+  if (!device) return { ok: false, persona: account.handle, reason: "device_missing" };
+  const lockHolder = `connect-${randomUUID()}`;
+  try { store.locks.acquireDevice(device.id, lockHolder); } catch {
+    return { ok: true, persona: account.handle, reason: "device_busy" };
+  }
+  store.save();
+  const driver = new RealIosDriver(new RealUsbTransport({ commandTimeoutMs: 300_000 }));
+  try {
+    await driver.connect(device.id, device.udid);
+    const query = opts.query ?? "filter:blue_verified #connect";
+    const result = await driver.runAction(device.id, account.id, "x:connect_scan", {
+      platform: "x", handle: account.handle, displayName: account.displayName,
+      loginEmail: account.loginEmail, switcherHint: account.switcherHint,
+      searchTerms: account.searchTerms, uiProfile: store.state.uiProfiles.x,
+      connectQuery: query, connectPages: opts.pages ?? 3,
+    } as never);
+    const pages = (result.data?.pages ?? []) as ScreenLine[][];
+    const alreadyConnected = store.state.engagementTargets.map((record) => record.targetKey);
+    const ownedHandles = store.state.accounts.map((candidate) => candidate.handle);
+    const found = parseConnectResults(pages);
+    // Only a scan that really reached the results says anything about supply.
+    const onResults = pages.some((page) => isConnectResultsPage(page));
+    const supply = onResults ? connectSupplySample(found, new Date().toISOString()) : undefined;
+    if (supply) appendFileSync(connectSupplyPath(opts.dataDir), `${JSON.stringify(supply)}\n`);
+    let lastVariant: number | undefined;
+    const candidates = found.map((candidate) => {
+      const verdict = connectEligibility(candidate, { ownedHandles, alreadyConnected });
+      if (!verdict.ok) return { ...candidate, verdict: verdict.reason };
+      const reply = connectReply(candidate.firstName, Math.random(), lastVariant);
+      lastVariant = reply.variant;
+      return { ...candidate, verdict: verdict.reason, wouldReply: reply.text };
+    });
+    return {
+      ok: true, dryRun: true, persona: account.handle, query,
+      openedBy: result.data?.openedBy, latestTapped: result.data?.latestTapped, linesRead: pages.map((page) => page.length),
+      supply, eligible: candidates.filter((candidate) => candidate.verdict === "eligible").length,
+      candidates,
+      ...(opts.raw ? { pages } : {}),
+    };
+  } finally {
+    await driver.disconnect(device.id).catch(() => undefined);
+    try { store.locks.releaseDevice(device.id, lockHolder); store.save(); } catch { /* reclaimed on load */ }
+  }
+}
+
 async function runCuratedEngagementOnce(
   store: ReturnType<typeof openStore>,
   account: { id: string; handle: string; platform: string; deviceId: string;
@@ -1510,6 +1582,7 @@ async function main(): Promise<void> {
           // only when nothing else used the device this tick, so it never
           // contends with a warmup, and only against a runner we just saw
           // healthy. Fail-soft: an error here must not break the tick.
+          let deviceUsedForEngagement = false;
           if (result.sessions.length === 0) {
             const engageableDevices = new Set(store.state.devices
               .filter((row) => row.online && deviceRested(row.id)
@@ -1525,6 +1598,7 @@ async function main(): Promise<void> {
                   && !curatedEngagementBlocked(store.state.settings.curatedFailures ?? {}, candidate.id, localDayNow),
               });
               if (persona) {
+                deviceUsedForEngagement = true;
                 try {
                   // openPost drives the like, and stayed off while the like was
                   // unreliable — a possible hang against the 25-minute tick
@@ -1566,6 +1640,26 @@ async function main(): Promise<void> {
                   }
                   store.save();
                 }
+              }
+            }
+          }
+          // #connect supply log: a short read-only scan when the phone is
+          // otherwise idle, so the busiest hours of the day show up over time.
+          const supply = store.state.settings.connectSupply;
+          if (supply && result.sessions.length === 0 && !deviceUsedForEngagement
+            && (!supply.lastSampleAt || Date.parse(nowIso) - Date.parse(supply.lastSampleAt) >= supply.everyMinutes * 60_000)) {
+            const sampler = store.state.accounts.find((candidate) => candidate.id === supply.accountId);
+            const samplerDevice = sampler && store.state.devices.find((row) => row.id === sampler.deviceId);
+            if (sampler && samplerDevice?.online && deviceRested(samplerDevice.id)
+              && store.state.settings.deviceHealth[samplerDevice.id]?.ok === true) {
+              // Stamp first: a failing scan must not be retried every tick.
+              supply.lastSampleAt = nowIso;
+              store.save();
+              try {
+                const scan = await runConnectScan(store, sampler, { dataDir: getArg(args, "--data") ?? defaultDataDir(), pages: 6 });
+                console.log(JSON.stringify({ at: nowIso, connectSupply: scan.supply ?? scan.reason ?? "no_sample" }));
+              } catch (error) {
+                console.log(JSON.stringify({ at: nowIso, connectSupplyError: error instanceof Error ? error.message.slice(0, 200) : String(error) }));
               }
             }
           }
@@ -2085,50 +2179,40 @@ async function main(): Promise<void> {
   // ── #connect, stage 1: read-only dry run ───────────────
   // Searches, reads the Latest results by OCR and reports who the routine
   // WOULD follow and what it WOULD reply. Nothing is followed or posted.
+  // Every scan also logs a supply sample (how many fresh posts, and when).
   if (cmd === "targets" && args[1] === "connect-scan") {
     const store = openStore(args);
     const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
     if (!account || account.platform !== "x") throw new Error("Usage: targets connect-scan <xAccountId> [--query \"#connect\"] [--pages 3]");
-    if (store.state.settings.emergencyStop) { print({ ok: true, persona: account.handle, reason: "emergency_stop" }); return; }
-    const device = store.state.devices.find((candidate) => candidate.id === account.deviceId);
-    if (!device) throw new Error("Account device is missing");
-    const lockHolder = `connect-${randomUUID()}`;
-    try { store.locks.acquireDevice(device.id, lockHolder); } catch {
-      print({ ok: true, persona: account.handle, reason: "device_busy" }); return;
+    const scan = await runConnectScan(store, account, {
+      dataDir: getArg(args, "--data") ?? defaultDataDir(),
+      query: getArg(args, "--query"), pages: Number(getArg(args, "--pages") ?? 3), raw: hasFlag(args, "--raw"),
+    });
+    print(scan);
+    return;
+  }
+
+  // ── #connect supply: when is it busiest? ───────────────
+  if (cmd === "targets" && args[1] === "connect-supply") {
+    const store = openStore(args);
+    const dataDir = getArg(args, "--data") ?? defaultDataDir();
+    const enable = getArg(args, "--enable");
+    if (enable || hasFlag(args, "--disable")) {
+      if (enable) {
+        const account = store.state.accounts.find((candidate) => candidate.id === enable);
+        if (!account || account.platform !== "x") throw new Error("Usage: targets connect-supply --enable <xAccountId> [--every 30]");
+        store.state.settings.connectSupply = {
+          accountId: account.id, everyMinutes: Math.max(15, Number(getArg(args, "--every") ?? 30)),
+          lastSampleAt: store.state.settings.connectSupply?.lastSampleAt,
+        };
+      } else delete store.state.settings.connectSupply;
+      store.save();
     }
-    store.save();
-    const driver = new RealIosDriver(new RealUsbTransport({ commandTimeoutMs: 300_000 }));
-    try {
-      await driver.connect(device.id, device.udid);
-      const query = getArg(args, "--query") ?? "filter:blue_verified #connect";
-      const result = await driver.runAction(device.id, account.id, "x:connect_scan", {
-        platform: "x", handle: account.handle, displayName: account.displayName,
-        loginEmail: account.loginEmail, switcherHint: account.switcherHint,
-        searchTerms: account.searchTerms, uiProfile: store.state.uiProfiles.x,
-        connectQuery: query, connectPages: Number(getArg(args, "--pages") ?? 3),
-      } as never);
-      const pages = (result.data?.pages ?? []) as ScreenLine[][];
-      const alreadyConnected = store.state.engagementTargets.map((record) => record.targetKey);
-      const ownedHandles = store.state.accounts.map((candidate) => candidate.handle);
-      let lastVariant: number | undefined;
-      const candidates = parseConnectResults(pages).map((candidate) => {
-        const verdict = connectEligibility(candidate, { ownedHandles, alreadyConnected });
-        if (!verdict.ok) return { ...candidate, verdict: verdict.reason };
-        const reply = connectReply(candidate.firstName, Math.random(), lastVariant);
-        lastVariant = reply.variant;
-        return { ...candidate, verdict: verdict.reason, wouldReply: reply.text };
-      });
-      print({
-        ok: true, dryRun: true, persona: account.handle, query,
-        openedBy: result.data?.openedBy, latestTapped: result.data?.latestTapped, linesRead: pages.map((page) => page.length),
-        eligible: candidates.filter((candidate) => candidate.verdict === "eligible").length,
-        candidates,
-        ...(hasFlag(args, "--raw") ? { pages } : {}),
-      });
-    } finally {
-      await driver.disconnect(device.id).catch(() => undefined);
-      try { store.locks.releaseDevice(device.id, lockHolder); store.save(); } catch { /* reclaimed on load */ }
-    }
+    const samples = readConnectSupply(dataDir);
+    print({
+      ok: true, sampling: store.state.settings.connectSupply ?? "off", samples: samples.length,
+      since: samples[0]?.at, byHour: connectSupplyByHour(samples, store.state.settings.timeZone),
+    });
     return;
   }
 

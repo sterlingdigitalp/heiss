@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   connectEligibility, connectFirstName, connectFollowConfirmed, connectReply, connectTargetKey,
-  parseConnectPostPage, parseConnectResults,
+  connectSupplyByHour, connectSupplySample, parseConnectPostPage, parseConnectResults,
   CONNECT_REPLY_VARIANTS, type ScreenLine,
 } from "../src/index.js";
 
@@ -130,5 +130,17 @@ describe("#connect: text inside a post's picture", () => {
       at("matt batt", 0.24, 0.58), at("@BattMatter • 28m", 0.37, 0.58),
     ]]);
     assert.deepEqual(found.map((c) => c.handle), ["@KritishIoT"]);
+  });
+});
+
+describe("#connect: supply by time of day", () => {
+  const people = (ages: number[]) => ages.map((ageMinutes, i) => ({ handle: `@p${i}`, displayName: "", firstName: "", ageMinutes }));
+  it("counts fresh posts from their own ages, and scales to posts per hour", () => {
+    const busy = connectSupplySample(people([2, 5, 9, 14, 20, 28, 41, 55, 70]), "2026-10-09T14:10:00.000Z"); // 09:10 CDT
+    assert.deepEqual([busy.fresh15, busy.fresh30, busy.fresh60, busy.reachedMinutes], [4, 6, 8, 70]);
+    const quiet = connectSupplySample(people([8, 25]), "2026-10-09T21:10:00.000Z"); // 16:10 CDT, only reached 25 min
+    const shallow = connectSupplySample(people([3]), "2026-10-09T21:40:00.000Z"); // reached 3 min: too little to say
+    const byHour = connectSupplyByHour([busy, quiet, shallow], "America/Chicago");
+    assert.deepEqual(byHour, [{ hour: 9, samples: 1, postsPerHour: 8 }, { hour: 16, samples: 1, postsPerHour: 4 }]);
   });
 });
