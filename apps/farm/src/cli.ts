@@ -46,6 +46,10 @@ import {
   recordCuratedOutcome,
   recordTargetAttempt,
   clearAutoPause,
+  parseConnectResults,
+  connectEligibility,
+  connectReply,
+  type ScreenLine,
   summaryDue,
   buildDailySummary,
   summaryIsBad,
@@ -156,6 +160,7 @@ Farm:
   heiss-farm targets add <accountId> @handle [--note "why this person"]
   heiss-farm targets remove <targetId>
   heiss-farm targets scan <xAccountId> @targetHandle   # read-only: what do their latest posts look like
+  heiss-farm targets connect-scan <xAccountId> [--query "#connect"] [--pages 3]   # read-only #connect dry run
   heiss-farm targets engage <xAccountId> [@handle] [--live]   # dry run unless --live
   heiss-farm targets pause <targetId> | resume <targetId>
   heiss-farm platforms focus <platform>   # pause warmups/slots on every other platform
@@ -2070,6 +2075,56 @@ async function main(): Promise<void> {
       print({ ok: true, persona: account.handle, targetHandle, result });
     } finally {
       await driver.disconnect(device.id).catch(() => undefined);
+    }
+    return;
+  }
+
+  // ── #connect, stage 1: read-only dry run ───────────────
+  // Searches, reads the Latest results by OCR and reports who the routine
+  // WOULD follow and what it WOULD reply. Nothing is followed or posted.
+  if (cmd === "targets" && args[1] === "connect-scan") {
+    const store = openStore(args);
+    const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
+    if (!account || account.platform !== "x") throw new Error("Usage: targets connect-scan <xAccountId> [--query \"#connect\"] [--pages 3]");
+    if (store.state.settings.emergencyStop) { print({ ok: true, persona: account.handle, reason: "emergency_stop" }); return; }
+    const device = store.state.devices.find((candidate) => candidate.id === account.deviceId);
+    if (!device) throw new Error("Account device is missing");
+    const lockHolder = `connect-${randomUUID()}`;
+    try { store.locks.acquireDevice(device.id, lockHolder); } catch {
+      print({ ok: true, persona: account.handle, reason: "device_busy" }); return;
+    }
+    store.save();
+    const driver = new RealIosDriver(new RealUsbTransport({ commandTimeoutMs: 300_000 }));
+    try {
+      await driver.connect(device.id, device.udid);
+      const query = getArg(args, "--query") ?? "filter:blue_verified #connect";
+      const result = await driver.runAction(device.id, account.id, "x:connect_scan", {
+        platform: "x", handle: account.handle, displayName: account.displayName,
+        loginEmail: account.loginEmail, switcherHint: account.switcherHint,
+        searchTerms: account.searchTerms, uiProfile: store.state.uiProfiles.x,
+        connectQuery: query, connectPages: Number(getArg(args, "--pages") ?? 3),
+      } as never);
+      const pages = (result.data?.pages ?? []) as ScreenLine[][];
+      const alreadyConnected = store.state.engagementTargets.map((record) => record.targetKey);
+      const ownedHandles = store.state.accounts.map((candidate) => candidate.handle);
+      let lastVariant: number | undefined;
+      const candidates = parseConnectResults(pages).map((candidate) => {
+        const verdict = connectEligibility(candidate, { ownedHandles, alreadyConnected });
+        if (!verdict.ok) return { ...candidate, verdict: verdict.reason };
+        const reply = connectReply(candidate.firstName, Math.random(), lastVariant);
+        lastVariant = reply.variant;
+        return { ...candidate, verdict: verdict.reason, wouldReply: reply.text };
+      });
+      print({
+        ok: true, dryRun: true, persona: account.handle, query,
+        openedBy: result.data?.openedBy, latestTapped: result.data?.latestTapped, linesRead: pages.map((page) => page.length),
+        eligible: candidates.filter((candidate) => candidate.verdict === "eligible").length,
+        candidates,
+        ...(hasFlag(args, "--raw") ? { pages } : {}),
+      });
+    } finally {
+      await driver.disconnect(device.id).catch(() => undefined);
+      try { store.locks.releaseDevice(device.id, lockHolder); store.save(); } catch { /* reclaimed on load */ }
     }
     return;
   }

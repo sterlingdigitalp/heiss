@@ -17,6 +17,7 @@ export * from "./controller-health.js";
 export * from "./checkpoint.js";
 export * from "./failures.js";
 export * from "./stale-attention.js";
+export * from "./connect.js";
 export * from "./auth.js";
 export * from "./store.js";
 export * from "./orchestrator.js";

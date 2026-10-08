@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.08.1"
+private let heissRunnerBuild = "heiss-runner-2026.10.08.3"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -384,6 +384,8 @@ final class HeissRunnerUITests: XCTestCase {
             // Mac already chose. Every step is a verified match or a refusal —
             // this runs unattended against real accounts.
             return try performXTargetEngage(app: app, window: window, command: command)
+        } else if action == "x:connect_scan" {
+            return try performXConnectScan(app: app, window: window, command: command)
         } else if action == "x:target_scan" {
             // Read-only reconnaissance for curated engagement: open a target's
             // profile and report what their two most recent posts look like.
@@ -1489,6 +1491,66 @@ final class HeissRunnerUITests: XCTestCase {
     /// counts into those labels, which survives layout changes that would break
     /// coordinate or band-based reading. Raw labels are returned untouched so
     /// the parser can be written against real output instead of a guess.
+    /// Read-only: search X, switch to Latest, and return what is rendered on
+    /// each of a few result pages as OCR lines with positions. The Mac decides
+    /// who is on the page; nothing is tapped except the search itself and the
+    /// Latest tab. OCR and coordinates only — a results page is a feed, and
+    /// snapshotting X's tree over a feed hangs and crashes it.
+    private func performXConnectScan(
+        app: XCUIApplication,
+        window: XCUIElement,
+        command: [String: Any]
+    ) throws -> [String: Any] {
+        let query = (command["connectQuery"] as? String) ?? "#connect"
+        let pageCount = min(max((command["connectPages"] as? Int) ?? 3, 1), 8)
+        // Open the search by link rather than typing it. Typing fell back to
+        // key-by-key taps, each of which snapshots X's tree: ~2s a key at best,
+        // two minutes a key when X stalled (2026-10-08). A link needs no tree.
+        var openedBy = "link"
+        var onResults = false
+        if let encoded = query.addingPercentEncoding(withAllowedCharacters: .alphanumerics),
+           let url = URL(string: "twitter://search?query=\(encoded)") {
+            XCUIDevice.shared.system.open(url)
+            Thread.sleep(forTimeInterval: 3.0)
+            // The results tab strip (Top / Latest / People) sits under the field.
+            onResults = try app.state == .runningForeground
+                && screenContainsTextUsingOCR("Latest", minimumVisionY: 0.76, maximumVisionY: 0.92)
+        }
+        if !onResults {
+            openedBy = "typed"
+            try openSearchAndType(app: app, window: window, platform: "x", command: command, term: query)
+            Thread.sleep(forTimeInterval: 1.5)
+        }
+        let latestTapped = try tapTextUsingOCR(surface: window, expected: "Latest", minimumScreenY: 0.08, maximumScreenY: 0.24)
+        Thread.sleep(forTimeInterval: 2.0)
+
+        var pages: [[[String: Any]]] = []
+        for page in 0..<pageCount {
+            guard app.state == .runningForeground else {
+                throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "x lost foreground during connect scan"])
+            }
+            let observations = try recognizedTextObservationsUsingOCR()
+            let lines: [[String: Any]] = observations.compactMap { observation in
+                guard let text = observation.topCandidates(1).first?.string, !text.isEmpty else { return nil }
+                let box = observation.boundingBox
+                // Screen coordinates, origin top-left, normalised 0...1.
+                return ["t": text, "x": Double(box.minX), "y": Double(1.0 - box.maxY),
+                        "w": Double(box.width), "h": Double(box.height)]
+            }
+            pages.append(lines)
+            if page < pageCount - 1 {
+                window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.78))
+                    .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30)))
+                Thread.sleep(forTimeInterval: 1.4)
+            }
+        }
+        return [
+            "ok": true, "executed": true,
+            "detail": "x:connect_scan:read:pages:\(pages.count)",
+            "data": ["query": query, "openedBy": openedBy, "latestTapped": latestTapped, "pages": pages],
+        ]
+    }
+
     private func performXTargetScan(
         app: XCUIApplication,
         window: XCUIElement,
