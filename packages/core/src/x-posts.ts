@@ -161,6 +161,9 @@ export function parseXTimelineCell(
       bodyText = bodyText.slice(verified).replace(/^\bVerified\.\s*/i, "");
     }
   }
+  // X announces a poll as "<name> is running a poll for the following
+  // question: <question>". Only the question is on screen (2026-10-07, @swyx).
+  bodyText = bodyText.replace(/^.{0,60}?\bis running a poll for the following question:\s*/i, "");
   bodyText = bodyText.trim();
 
   // Identity comes from content, never position: the row index changes as soon

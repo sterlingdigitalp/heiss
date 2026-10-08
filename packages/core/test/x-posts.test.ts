@@ -336,3 +336,11 @@ describe("affiliation badge on a profile mostly of reposts", () => {
     assert.match(pair.mostRecent!.matchText, /^It's time to get serious/);
   });
 });
+
+describe("poll posts", () => {
+  it("searches for the question, not X's spoken description of the poll", async () => {
+    const { parseXTimelineCell } = await import("../src/index.js");
+    const post = parseXTimelineCell({ index: 1, label: "swyx Verified. swyx is running a poll for the following question: what is your favourite agent framework this year. 1 day ago. 22 Replies. 3 Reposts. 40 Likes. 9.7K Views" } as never, { now: new Date("2026-10-07T15:00:00Z"), authorHandle: "@swyx" });
+    assert.match(post!.matchText, /^what is your favourite agent framework/);
+  });
+});
