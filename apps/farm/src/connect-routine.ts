@@ -147,8 +147,9 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
     }
     page = linesOf(done.lines);
     acted += 1;
-    // The Follow button looks the same once followed, so the tap is how we
-    // learn it: X answered with an Unfollow sheet, which the runner cancelled.
+    // The hidden button looks the same once followed, so the tap is how we
+    // learn it: X answered with an Unfollow sheet or a message screen, which
+    // the runner backed out of. If it could not get back, stop.
     if (done.follow === "unfollow_sheet_stuck") {
       outcomes.push({ handle, result: "skipped", reason: "unfollow_sheet_stuck" });
       return { outcomes, stoppedBecause: "unfollow_sheet_stuck" };

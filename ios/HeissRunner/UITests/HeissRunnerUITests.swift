@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.08.8"
+private let heissRunnerBuild = "heiss-runner-2026.10.08.9"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1616,14 +1616,28 @@ final class HeissRunnerUITests: XCTestCase {
                     Thread.sleep(forTimeInterval: 1.6)
                     report["follow"] = "tapped"
                     report["afterFollow"] = try screenLinesUsingOCR()
-                    // X hides "Following" behind the same placeholder as "Follow",
-                    // so the button looks identical either way. Tapping it for
-                    // someone already followed raises an Unfollow sheet: cancel
-                    // it, and treat them as already followed — never unfollow.
+                    // The hidden button looks the same whoever the author is,
+                    // but it is only Follow for someone not yet followed. For
+                    // someone already followed it is the message button (it
+                    // opened a DM screen on 2026-10-08) or "Following" (an
+                    // Unfollow sheet). So: after the tap, anything other than
+                    // the same post page means "already followed" — back out,
+                    // and do nothing else to them. Never unfollow, never message.
+                    func onPostPage() throws -> Bool {
+                        try recognizedTextObservationsUsingOCR().contains { observation in
+                            observation.boundingBox.maxY > 0.90
+                                && observation.topCandidates(1).first?.string.trimmingCharacters(in: .whitespaces).lowercased() == "post"
+                        }
+                    }
                     if try screenContainsTextUsingOCR("Unfollow") {
                         _ = try tapTextUsingOCR(surface: window, expected: "Cancel", minimumScreenY: 0.5, maximumScreenY: 1.0)
                         Thread.sleep(forTimeInterval: 1.0)
                         report["follow"] = try screenContainsTextUsingOCR("Unfollow") ? "unfollow_sheet_stuck" : "already_following"
+                    } else if try !onPostPage() {
+                        // One back: a DM or profile screen returns to the post.
+                        tap(number("connectBackX") ?? 0.06, number("connectBackY") ?? 0.075)
+                        Thread.sleep(forTimeInterval: 1.4)
+                        report["follow"] = try onPostPage() ? "already_following" : "unfollow_sheet_stuck"
                     }
                 }
             }
