@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.08.10"
+private let heissRunnerBuild = "heiss-runner-2026.10.08.11"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1753,9 +1753,24 @@ final class HeissRunnerUITests: XCTestCase {
                 }
             }
             if command["connectBack"] as? Bool ?? true {
-                // The post page's back arrow, top-left.
+                // The post page's back arrow, top-left. On a post scrolled down
+                // to its icon row the arrow did not respond (2026-10-08, the
+                // session then stopped on the post page), so confirm the
+                // results' tab strip is back and, if not, swipe back from the
+                // screen edge — that works wherever the page is scrolled to.
+                func onResults() throws -> Bool {
+                    try screenContainsTextUsingOCR("Latest", minimumVisionY: 0.80, maximumVisionY: 0.94)
+                }
                 tap(number("connectBackX") ?? 0.06, number("connectBackY") ?? 0.075)
                 Thread.sleep(forTimeInterval: 1.4)
+                var attempts = 0
+                while try !onResults(), attempts < 2 {
+                    attempts += 1
+                    window.coordinate(withNormalizedOffset: CGVector(dx: 0.004, dy: 0.5))
+                        .press(forDuration: 0.05, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5)))
+                    Thread.sleep(forTimeInterval: 1.4)
+                }
+                report["backAttempts"] = attempts
             }
         }
         guard app.state == .runningForeground else {

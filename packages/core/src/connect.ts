@@ -185,11 +185,18 @@ export interface ConnectPostPage {
  * X hides the button at the right of the author row from screen captures and
  * draws a placeholder (it reads "X.com") in its place. The button is "Follow"
  * for someone not yet followed and "Message" once they are, and the
- * placeholder is sized to the word under it. Measured on the SE across every
- * capture of 2026-10-08: Follow 0.160–0.163 wide, Message 0.168–0.173, no
- * overlap. Anything not clearly Follow-sized is treated as already followed.
+ * placeholder is sized and placed to fit the word under it. Measured on the
+ * SE across every capture of 2026-10-08 (10 people):
+ *
+ *   Follow   width 0.160–0.166   top 0.120–0.121
+ *   Message  width 0.168–0.173   top 0.124–0.128
+ *
+ * Width alone left a Follow at 0.1658 on the wrong side of the line, so both
+ * measurements are used and each must agree. Anything in between is treated
+ * as already followed: skipping is the safe mistake.
  */
-export const CONNECT_FOLLOW_MAX_WIDTH = 0.1655;
+export const CONNECT_BUTTON_WIDTH_SPLIT = 0.167;
+export const CONNECT_BUTTON_TOP_SPLIT = 0.1228;
 
 function authorRowPlaceholder(lines: ScreenLine[]): ScreenLine | undefined {
   return lines.find((line) => line.x > 0.6 && line.y > 0.08 && line.y < 0.22 && /^x\.com$/i.test(line.t.trim()));
@@ -200,7 +207,8 @@ export function parseConnectPostPage(lines: ScreenLine[]): ConnectPostPage {
   const top = lines.filter((line) => line.y < 0.36);
   const handleLine = top.find((line) => /^@[A-Za-z0-9_]{2,15}$/.test(line.t.trim()));
   const placeholder = authorRowPlaceholder(lines);
-  const isFollow = placeholder !== undefined && placeholder.w <= CONNECT_FOLLOW_MAX_WIDTH;
+  const isFollow = placeholder !== undefined
+    && placeholder.w < CONNECT_BUTTON_WIDTH_SPLIT && placeholder.y < CONNECT_BUTTON_TOP_SPLIT;
   // The icon row sits a fixed step under the "time · date · N Views" line; the
   // bubble is its first icon. Without that line on screen there is no safe tap.
   // Match the whole "2:12 PM · 10/8/26 · 62 Views" shape: OCR also reads text
@@ -228,7 +236,8 @@ export function connectFollowConfirmed(lines: ScreenLine[]): boolean {
   const refused = /unable to follow|cannot follow|can't follow|limit|try again later|something went wrong/i;
   if (lines.some((line) => refused.test(line.t))) return false;
   const placeholder = authorRowPlaceholder(lines);
-  return placeholder !== undefined && placeholder.w > CONNECT_FOLLOW_MAX_WIDTH;
+  return placeholder !== undefined
+    && placeholder.w >= CONNECT_BUTTON_WIDTH_SPLIT && placeholder.y >= CONNECT_BUTTON_TOP_SPLIT;
 }
 
 /** The search results screen: its tab strip (Top … Latest) is on show. */
