@@ -129,76 +129,77 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
     const reply = connectReply(candidate.firstName, random(), lastVariant);
     lastVariant = reply.variant;
     if (acted > 0) await opts.pause?.(acted);
-    // Like, then reply: both icons share a row, so they share a height.
-    const replyInput = (point: { x: number; y: number }) => ({
-      connectRehearse: !opts.live, connectReplyX: point.x, connectReplyY: point.y,
-      connectLikeX: 0.47, connectLikeY: point.y,
-      connectReply: reply.text, connectExpectHandle: handle,
-    });
-    const followInput = { connectFollowX: opened.followButton.x, connectFollowY: opened.followButton.y };
-    let done: Record<string, unknown>;
-    if (opened.replyButton) {
-      done = await step("x:connect_commit", { ...followInput, ...replyInput(opened.replyButton) });
-    } else {
-      // A long post pushes the comment bubble off screen. Follow while the
-      // button is in view, then scroll the post until the bubble shows.
-      const followed = await step("x:connect_commit", { connectRehearse: !opts.live, ...followInput, connectBack: false });
-      let bubble: { x: number; y: number } | undefined;
-      const stopHere = followed.follow === "already_following" || followed.follow === "unfollow_sheet_stuck";
-      for (let scroll = 0; scroll < 3 && !bubble && !stopHere; scroll++) {
-        bubble = parseConnectPostPage(linesOf((await step("x:connect_page", { connectScroll: true })).lines)).replyButton;
+
+    // Follow first, then like and reply — the operator's order, and the only
+    // one that works: X removes the Follow button from the post once you have
+    // replied. So everything the reply needs is PROVEN before the follow: the
+    // icon row is found, and the reply screen is opened, checked for the right
+    // person, and closed again with nothing typed. Each fault in the first
+    // five live runs would have been caught there, before anyone was followed.
+    const leave = async () => { page = linesOf((await step("x:connect_commit", { connectRehearse: true })).lines); };
+    const findBubble = async (first: { x: number; y: number } | undefined) => {
+      let found = first;
+      let moved = 0;
+      // A long post pushes the icon row off screen: scroll until it shows.
+      while (!found && moved < 3) {
+        moved += 1;
+        found = parseConnectPostPage(linesOf((await step("x:connect_page", { connectScroll: true })).lines)).replyButton;
       }
-      const replied = bubble
-        ? await step("x:connect_commit", replyInput(bubble))
-        : await step("x:connect_commit", { connectRehearse: true });
-      done = { ...replied, follow: followed.follow, afterFollow: followed.afterFollow, ...(bubble ? {} : { reply: "no_reply_button" }) };
+      return { found, moved };
+    };
+    const first = await findBubble(opened.replyButton);
+    if (!first.found) { await skip("no_reply_button"); continue; }
+    const probe = await step("x:connect_commit", {
+      connectRehearse: true, connectBack: false, connectProbe: true,
+      connectReplyX: first.found.x, connectReplyY: first.found.y, connectExpectHandle: handle,
+    });
+    if (probe.probe !== "ok") { await skip(String(probe.probe ?? "reply_screen_not_checked")); continue; }
+
+    // Back to the Follow button if the icons needed a scroll.
+    let follow = first.moved === 0 ? opened.followButton : parseConnectPostPage(linesOf(probe.lines)).followButton;
+    for (let up = 0; !follow && up < 4; up++) {
+      follow = parseConnectPostPage(linesOf((await step("x:connect_page", { connectScrollBack: true })).lines)).followButton;
     }
-    page = linesOf(done.lines);
+    if (!follow) { await skip("follow_button_not_found"); continue; }
+
     acted += 1;
-    // The hidden button looks the same once followed, so the tap is how we
-    // learn it: X answered with an Unfollow sheet or a message screen, which
-    // the runner backed out of. If it could not get back, stop.
-    if (done.follow === "unfollow_sheet_stuck") {
-      outcomes.push({ handle, result: "skipped", reason: "unfollow_sheet_stuck" });
-      return { outcomes, stoppedBecause: "unfollow_sheet_stuck" };
-    }
-    if (done.follow === "already_following") {
-      connected.add(connectTargetKey(handle));
-      if (opts.live) opts.onFollowed?.(handle);
-      outcomes.push({ handle, result: "skipped", reason: "already_following" });
-      acted -= 1;
-      continue;
-    }
-    // Record a follow the moment it was tapped, before anything can return:
-    // a stop after the tap must not leave a followed person unrecorded.
-    const followTapped = opts.live && done.follow === "tapped";
-    if (followTapped && connectFollowConfirmed(linesOf(done.afterFollow))) {
-      connected.add(connectTargetKey(handle));
-      opts.onFollowed?.(handle);
-    }
-    // The box did not hold exactly the intended reply: nothing was posted, and
-    // nothing more should be attempted until someone has looked.
-    if (done.reply === "reply_text_mismatch") {
-      outcomes.push({ handle, result: followTapped ? "followed_reply_failed" : "skipped", reason: "reply_text_mismatch", reply: reply.text });
-      return { outcomes, stoppedBecause: "reply_text_mismatch" };
-    }
     if (!opts.live) {
-      outcomes.push({ handle, result: "rehearsed", reply: reply.text, reason: done.pasted === true ? "typed_and_verified" : String(done.reply ?? "not_typed") });
+      const typed = await step("x:connect_commit", {
+        connectRehearse: true, connectReplyX: first.found.x, connectReplyY: first.found.y,
+        connectReply: reply.text, connectExpectHandle: handle,
+      });
+      page = linesOf(typed.lines);
+      if (typed.reply === "reply_text_mismatch") {
+        outcomes.push({ handle, result: "skipped", reason: "reply_text_mismatch", reply: reply.text });
+        return { outcomes, stoppedBecause: "reply_text_mismatch" };
+      }
+      outcomes.push({ handle, result: "rehearsed", reply: reply.text, reason: typed.pasted === true ? "typed_and_verified" : String(typed.reply ?? "not_typed") });
       continue;
     }
 
-    if (!connectFollowConfirmed(linesOf(done.afterFollow))) {
-      outcomes.push({ handle, result: "skipped", reason: "follow_not_confirmed" });
-      // An unconfirmed follow is the first sign of a limit: stop, do not push on.
+    const followed = await step("x:connect_commit", { connectRehearse: false, connectBack: false, connectFollowX: follow.x, connectFollowY: follow.y });
+    if (followed.follow !== "tapped" || !connectFollowConfirmed(linesOf(followed.afterFollow))) {
+      // The button was not Follow after all, or X did not take it: the first
+      // sign of a limit. Nothing was liked or said. Stop.
+      outcomes.push({ handle, result: "skipped", reason: String(followed.follow === "tapped" ? "follow_not_confirmed" : followed.follow ?? "follow_not_confirmed") });
+      await leave();
       return { outcomes, stoppedBecause: "follow_not_confirmed" };
     }
-    if (done.reply === "posted") outcomes.push({ handle, result: "connected", reply: reply.text });
-    else {
-      outcomes.push({ handle, result: "followed_reply_failed", reply: reply.text, reason: String(done.reply ?? "unknown") });
-      // A bubble that never scrolled into view is that one post's shape; any
-      // other failed reply may be X refusing, so stop.
-      if (done.reply !== "no_reply_button") return { outcomes, stoppedBecause: "reply_failed" };
-    }
+    connected.add(connectTargetKey(handle));
+    opts.onFollowed?.(handle);
+
+    const second = await findBubble(first.moved === 0 ? first.found : undefined);
+    const done = second.found
+      ? await step("x:connect_commit", {
+        connectRehearse: false, connectLikeX: 0.47, connectLikeY: second.found.y,
+        connectReplyX: second.found.x, connectReplyY: second.found.y,
+        connectReply: reply.text, connectExpectHandle: handle,
+      })
+      : { ...(await step("x:connect_commit", { connectRehearse: true })), reply: "no_reply_button" };
+    page = linesOf(done.lines);
+    if (done.reply === "posted") { outcomes.push({ handle, result: "connected", reply: reply.text }); continue; }
+    outcomes.push({ handle, result: "followed_reply_failed", reply: reply.text, reason: String(done.reply ?? "unknown") });
+    return { outcomes, stoppedBecause: done.reply === "reply_text_mismatch" ? "reply_text_mismatch" : "reply_failed" };
   }
   return { outcomes, stoppedBecause: "reached_max" };
 }

@@ -10,79 +10,144 @@ const results: ScreenLine[] = [
   L("Old Timer", 0.15, 0.40), L("@oldtimer • 5h", 0.48, 0.401), L("Been building for years, happy to meet you", 0.15, 0.43),
   L("Sam Roe", 0.15, 0.60), L("@samroe • 20m", 0.48, 0.601), L("Looking to meet other founders building here", 0.15, 0.63),
 ];
-// X hides the button from captures; the placeholder's width tells Follow
-// (0.161) from Message (0.170). Sizes measured on the SE, 2026-10-08.
-const postPage = (handle: string, following = false): ScreenLine[] => [
+// X hides the button from captures; the placeholder's size and position tell
+// Follow (0.161 wide, top 0.121) from Message (0.170, 0.128). Measured on the SE.
+const postPage = (handle: string, following = false, withIcons = true): ScreenLine[] => [
   L("Post", 0.45, 0.05), L("Someone", 0.2, 0.12), L(handle, 0.2, 0.15),
   { t: "X.com", x: 0.788, y: following ? 0.128 : 0.121, w: following ? 0.170 : 0.161, h: 0.028 },
-  L("2:12 PM · 10/8/26 · 18 Views", 0.04, 0.60),
+  ...(withIcons ? [L("2:12 PM · 10/8/26 · 18 Views", 0.04, 0.60)] : []),
 ];
 
-/** A fake phone: records what it was asked to do. */
-function fakePhone(pages: Record<string, ScreenLine[]>) {
-  const calls: Array<{ action: string; input: Record<string, unknown> }> = [];
+type Call = { action: string; input: Record<string, unknown> };
+
+/** A fake phone. It tracks which post is open and whether it was followed. */
+function fakePhone(opts: {
+  pages?: Record<string, ScreenLine[]>;
+  /** What a live reply step reports; default "posted". */
+  reply?: string;
+  /** What the pre-follow check of the reply screen reports; default "ok". */
+  probe?: string;
+  /** false: the follow tap leaves the button Follow-sized (X refused). */
+  followTakes?: boolean;
+} = {}) {
+  const calls: Call[] = [];
   let open = "";
+  const followed = new Set<string>();
+  const here = () => opts.pages?.[open] ?? postPage(open, followed.has(open));
   const step = async (action: string, input: Record<string, unknown>) => {
     calls.push({ action, input });
     if (action === "x:connect_scan") return { pages: [results] };
-    if (action === "x:connect_page") return { lines: results };
     if (action === "x:connect_open") {
       const y = input.connectTapY as number;
       open = y < 0.3 ? "@maya_builds" : y < 0.5 ? "@oldtimer" : "@samroe";
-      return { lines: pages[open] ?? postPage(open) };
+      return { lines: here() };
     }
+    if (action === "x:connect_page") return { lines: open ? postPage(open, followed.has(open)) : results };
     const live = input.connectRehearse === false;
-    return {
-      lines: results, pasted: true,
-      ...(live && input.connectFollowX !== undefined ? { follow: "tapped", afterFollow: postPage(open, true) } : {}),
-      ...(live && input.connectReply ? { reply: "posted" } : {}),
-    };
+    const out: Record<string, unknown> = {};
+    if (input.connectProbe) out.probe = opts.probe ?? "ok";
+    if (input.connectReply) {
+      out.pasted = true;
+      out.reply = live ? (opts.reply ?? "posted") : "rehearsed";
+      if (live) out.like = "tapped";
+    }
+    if (input.connectFollowX !== undefined && live) {
+      if (opts.followTakes !== false) followed.add(open);
+      out.follow = "tapped";
+      out.afterFollow = postPage(open, followed.has(open));
+    }
+    // Back to the results unless told to stay on the post.
+    if (input.connectBack === false) out.lines = here();
+    else { out.lines = results; open = ""; }
+    return out;
   };
-  return { step, calls };
+  return { step, calls, followed };
 }
 
 const base = { ownedHandles: ["@manxlab"], alreadyConnected: [] as string[], random: () => 0.1 };
+const commits = (calls: Call[]) => calls.filter((call) => call.action === "x:connect_commit");
 
 describe("#connect session", () => {
-  it("rehearsal never asks the phone to follow or post", async () => {
-    const phone = fakePhone({});
+  it("rehearsal never asks the phone to like, post or follow", async () => {
+    const phone = fakePhone();
     const run = await runConnectSession(phone.step, { ...base, max: 5, live: false, maxScrolls: 1 });
     assert.deepEqual(run.outcomes.filter((o) => o.result === "rehearsed").map((o) => o.handle), ["@maya_builds", "@samroe"]);
-    assert.ok(phone.calls.filter((c) => c.action === "x:connect_commit").every((c) => c.input.connectRehearse === true));
+    assert.ok(commits(phone.calls).every((call) => call.input.connectRehearse === true));
     assert.equal(run.outcomes.find((o) => o.handle === "@oldtimer")?.reason, "too_old");
+    assert.equal(phone.followed.size, 0);
   });
 
-  it("live: follows and replies, stops at the cap, and skips people already followed or connected", async () => {
-    const phone = fakePhone({ "@maya_builds": postPage("@maya_builds", true) });
-    const followed: string[] = [];
-    const run = await runConnectSession(phone.step, {
-      ...base, max: 1, live: true, onFollowed: (handle) => followed.push(handle),
-    });
-    assert.deepEqual(followed, ["@samroe"]);
-    assert.equal(run.outcomes.find((o) => o.handle === "@maya_builds")?.reason, "already_following");
-    assert.equal(run.stoppedBecause, "reached_max");
+  const kind = (call: Call) => call.action === "x:connect_page" ? "scroll"
+    : call.input.connectProbe ? "check" : call.input.connectReply ? "reply"
+    : call.input.connectFollowX !== undefined ? "follow" : call.action.replace("x:connect_", "");
 
-    const again = await runConnectSession(fakePhone({}).step, {
+  it("live: checks the reply screen, then follows, then likes and replies", async () => {
+    const phone = fakePhone();
+    const remembered: string[] = [];
+    const run = await runConnectSession(phone.step, { ...base, max: 1, live: true, onFollowed: (handle) => remembered.push(handle) });
+    assert.deepEqual(run.outcomes.filter((o) => o.result === "connected").map((o) => o.handle), ["@maya_builds"]);
+    assert.deepEqual(remembered, ["@maya_builds"]);
+    assert.deepEqual(phone.calls.slice(1).map(kind), ["open", "check", "follow", "reply"]);
+    const reply = commits(phone.calls).find((call) => call.input.connectReply)!;
+    assert.equal(reply.input.connectLikeY, reply.input.connectReplyY, "the like is on the reply's icon row");
+    assert.equal(commits(phone.calls).find((call) => call.input.connectProbe)!.input.connectRehearse, true, "the check types and posts nothing");
+    assert.equal(run.stoppedBecause, "reached_max");
+  });
+
+  it("if the reply screen will not open for the right person, nobody is followed", async () => {
+    const phone = fakePhone({ probe: "composer_not_open" });
+    const run = await runConnectSession(phone.step, { ...base, max: 5, live: true, maxScrolls: 0 });
+    assert.equal(phone.followed.size, 0, "no follow without a working reply");
+    assert.ok(commits(phone.calls).every((call) => call.input.connectFollowX === undefined && !call.input.connectReply));
+    assert.ok(run.outcomes.filter((o) => o.reason === "composer_not_open").length >= 2, "it moves on to the next person");
+  });
+
+  it("stops if a reply fails after the follow, and says so", async () => {
+    const phone = fakePhone({ reply: "post_button_not_found" });
+    const run = await runConnectSession(phone.step, { ...base, max: 5, live: true });
+    assert.equal(run.stoppedBecause, "reply_failed");
+    assert.equal(run.outcomes.find((o) => o.result === "followed_reply_failed")?.handle, "@maya_builds");
+    assert.equal(phone.followed.size, 1, "it does not go on to follow anyone else");
+  });
+
+  it("never posts when the reply box holds anything but the intended reply", async () => {
+    const phone = fakePhone({ reply: "reply_text_mismatch" });
+    const run = await runConnectSession(phone.step, { ...base, max: 5, live: true });
+    assert.equal(run.stoppedBecause, "reply_text_mismatch");
+    assert.equal(commits(phone.calls).filter((call) => call.input.connectReply).length, 1, "it stops after the first");
+  });
+
+  it("skips someone already followed without tapping anything, and people already connected", async () => {
+    const phone = fakePhone({ pages: { "@maya_builds": postPage("@maya_builds", true) } });
+    const run = await runConnectSession(phone.step, { ...base, max: 1, live: true });
+    assert.equal(run.outcomes.find((o) => o.handle === "@maya_builds")?.reason, "already_following");
+    assert.deepEqual(run.outcomes.filter((o) => o.result === "connected").map((o) => o.handle), ["@samroe"]);
+
+    const again = await runConnectSession(fakePhone().step, {
       ...base, max: 5, live: true, maxScrolls: 0,
       alreadyConnected: [connectTargetKey("@maya_builds"), connectTargetKey("@samroe")],
     });
     assert.ok(again.outcomes.every((o) => o.result === "skipped"), "nobody is connected with twice");
   });
 
-  it("stops the session the moment a follow is not confirmed", async () => {
-    const phone = fakePhone({});
-    const step = async (action: string, input: Record<string, unknown>) => {
-      const out = await phone.step(action, input);
-      // The button stayed Follow-sized: X did not take the follow.
-      return action === "x:connect_commit" ? { ...out, afterFollow: postPage("@x", false) } : out;
-    };
-    const run = await runConnectSession(step, { ...base, max: 5, live: true });
+  it("stops when a follow does not take, before liking or replying", async () => {
+    const phone = fakePhone({ followTakes: false });
+    const remembered: string[] = [];
+    const run = await runConnectSession(phone.step, { ...base, max: 5, live: true, onFollowed: (handle) => remembered.push(handle) });
     assert.equal(run.stoppedBecause, "follow_not_confirmed");
-    assert.equal(run.outcomes.filter((o) => o.result === "connected").length, 0);
+    assert.deepEqual(remembered, []);
+    assert.ok(commits(phone.calls).every((call) => !call.input.connectReply), "no reply to someone it could not follow");
   });
 
-  it("taps a long post twice (the first tap only expands it), and never backs out of the results", async () => {
-    const phone = fakePhone({});
+  it("on a long post: scrolls to check the reply screen, follows, scrolls again, replies", async () => {
+    const phone = fakePhone({ pages: { "@maya_builds": postPage("@maya_builds", false, false) } });
+    const run = await runConnectSession(phone.step, { ...base, max: 1, live: true });
+    assert.equal(run.outcomes.find((o) => o.handle === "@maya_builds")?.result, "connected");
+    assert.deepEqual(phone.calls.slice(1).map(kind), ["open", "scroll", "check", "follow", "scroll", "reply"]);
+  });
+
+  it("taps a long post twice (the first tap only expands it)", async () => {
+    const phone = fakePhone();
     let opens = 0;
     const step = async (action: string, input: Record<string, unknown>) => {
       if (action === "x:connect_open" && opens++ === 0) { phone.calls.push({ action, input }); return { lines: results }; }
@@ -90,69 +155,24 @@ describe("#connect session", () => {
     };
     const run = await runConnectSession(step, { ...base, max: 1, live: false });
     assert.equal(run.outcomes.find((o) => o.result === "rehearsed")?.handle, "@maya_builds");
-    assert.equal(phone.calls.filter((c) => c.action === "x:connect_open").length, 2);
-  });
-
-  it("on a long post: follows first, scrolls to the comment bubble, then replies", async () => {
-    const longPost = postPage("@maya_builds").filter((line) => !/Views/.test(line.t));
-    const phone = fakePhone({ "@maya_builds": longPost });
-    const step = async (action: string, input: Record<string, unknown>) => {
-      if (action === "x:connect_page") { phone.calls.push({ action, input }); return { lines: postPage("@maya_builds") }; }
-      return phone.step(action, input);
-    };
-    const followed: string[] = [];
-    const run = await runConnectSession(step, { ...base, max: 1, live: true, onFollowed: (handle) => followed.push(handle) });
-    assert.deepEqual(followed, ["@maya_builds"]);
-    assert.equal(run.outcomes.find((o) => o.handle === "@maya_builds")?.result, "connected");
-    const commits = phone.calls.filter((c) => c.action === "x:connect_commit");
-    assert.equal(commits[0]!.input.connectBack, false, "stays on the post after following");
-    assert.equal(commits[0]!.input.connectReply, undefined);
-    assert.ok(commits[1]!.input.connectReply, "replies once the bubble is in view");
-    assert.equal(commits[1]!.input.connectLikeY, commits[1]!.input.connectReplyY, "likes on the same icon row");
-    assert.equal(commits[0]!.input.connectLikeX, undefined, "does not like before the icon row is in view");
-  });
-
-  it("someone already followed: cancels the Unfollow sheet, never replies, and remembers them", async () => {
-    const phone = fakePhone({});
-    const step = async (action: string, input: Record<string, unknown>) => {
-      const out = await phone.step(action, input);
-      return action === "x:connect_commit" && input.connectFollowX !== undefined
-        ? { lines: out.lines, follow: "already_following" } : out;
-    };
-    const remembered: string[] = [];
-    const run = await runConnectSession(step, { ...base, max: 1, live: true, maxScrolls: 0, onFollowed: (handle) => remembered.push(handle) });
-    assert.equal(run.outcomes.filter((o) => o.result === "connected").length, 0);
-    assert.ok(run.outcomes.some((o) => o.reason === "already_following"));
-    assert.ok(remembered.includes("@maya_builds"), "so they are never tapped again");
+    assert.equal(phone.calls.filter((call) => call.action === "x:connect_open").length, 2);
   });
 
   it("a tap that opens a picture is backed out of, and the session carries on", async () => {
     const viewer = [L("Notifications", 0.1, 0.07), L("@zrout • 17m", 0.2, 0.4)];
-    const phone = fakePhone({ "@maya_builds": viewer });
+    const phone = fakePhone({ pages: { "@maya_builds": viewer } });
     const run = await runConnectSession(phone.step, { ...base, max: 1, live: true });
     assert.equal(run.outcomes.find((o) => o.handle === "@maya_builds")?.reason, "opened_something_else");
     assert.equal(run.outcomes.find((o) => o.result === "connected")?.handle, "@samroe");
   });
 
-  it("never posts when the reply box holds anything but the intended reply", async () => {
-    const phone = fakePhone({});
-    const step = async (action: string, input: Record<string, unknown>) => {
-      const out = await phone.step(action, input);
-      return action === "x:connect_commit" && input.connectReply ? { ...out, pasted: false, reply: "reply_text_mismatch" } : out;
-    };
-    const run = await runConnectSession(step, { ...base, max: 5, live: true });
-    assert.equal(run.stoppedBecause, "reply_text_mismatch");
-    assert.equal(run.outcomes.filter((o) => o.result === "connected").length, 0);
-    assert.equal(phone.calls.filter((c) => c.action === "x:connect_commit" && c.input.connectReply).length, 1, "it stops after the first");
-  });
-
   it("does not approach the same person twice when OCR reads their handle differently", async () => {
     const twice = [...results, L("Maya Lee", 0.15, 0.70), L("@maya_bui1ds • 9m", 0.48, 0.701), L("Another post from the same person today", 0.15, 0.73)];
-    const phone = fakePhone({});
+    const phone = fakePhone();
     const step = async (action: string, input: Record<string, unknown>) => {
       if (action === "x:connect_scan") return { pages: [twice] };
       const out = await phone.step(action, input);
-      return action === "x:connect_commit" || action === "x:connect_page" ? { ...out, lines: twice } : out;
+      return action === "x:connect_commit" && input.connectBack !== false ? { ...out, lines: twice } : out;
     };
     const run = await runConnectSession(step, { ...base, max: 5, live: false, maxScrolls: 0 });
     assert.equal(run.outcomes.filter((o) => o.result === "rehearsed" && /maya/i.test(o.handle)).length, 1);
@@ -168,7 +188,7 @@ describe("#connect session", () => {
   });
 
   it("refuses to act when the opened page is not the person it tapped", async () => {
-    const phone = fakePhone({ "@maya_builds": postPage("@someone_else") });
+    const phone = fakePhone({ pages: { "@maya_builds": postPage("@someone_else") } });
     const run = await runConnectSession(phone.step, { ...base, max: 1, live: true });
     assert.equal(run.outcomes.find((o) => o.handle === "@maya_builds")?.reason, "opened_a_different_page");
   });

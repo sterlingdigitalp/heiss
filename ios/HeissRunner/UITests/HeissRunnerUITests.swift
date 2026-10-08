@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.08.11"
+private let heissRunnerBuild = "heiss-runner-2026.10.08.12"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1602,6 +1602,12 @@ final class HeissRunnerUITests: XCTestCase {
                     .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30)))
                 Thread.sleep(forTimeInterval: 1.4)
             }
+            if command["connectScrollBack"] as? Bool == true {
+                // Towards the top of the page, to bring the Follow button back.
+                window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30))
+                    .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80)))
+                Thread.sleep(forTimeInterval: 1.4)
+            }
         } else if action == "x:connect_open" {
             guard let x = number("connectTapX"), let y = number("connectTapY") else {
                 throw NSError(domain: "HeissRunner", code: 42, userInfo: [NSLocalizedDescriptionKey: "connect_open needs connectTapX/Y"])
@@ -1644,7 +1650,8 @@ final class HeissRunnerUITests: XCTestCase {
             let skipRest = report["follow"] as? String == "already_following" || report["follow"] as? String == "unfollow_sheet_stuck"
             // Like the post before replying, as the operator does by hand. The
             // heart is in the same icon row as the comment bubble.
-            if !skipRest, let x = number("connectLikeX"), let y = number("connectLikeY") {
+            let probing = command["connectProbe"] as? Bool == true
+            if !skipRest, !probing, let x = number("connectLikeX"), let y = number("connectLikeY") {
                 if rehearse { report["like"] = "rehearsed" } else {
                     tap(x, y)
                     Thread.sleep(forTimeInterval: 1.0)
@@ -1653,7 +1660,7 @@ final class HeissRunnerUITests: XCTestCase {
             }
             if skipRest {
                 // No like and no reply for someone already followed.
-            } else if let reply = command["connectReply"] as? String, !reply.isEmpty,
+            } else if let reply = (probing ? "probe" : command["connectReply"] as? String), !reply.isEmpty,
                let x = number("connectReplyX"), let y = number("connectReplyY") {
                 // The comment bubble under the post opens the reply screen.
                 tap(x, y)
@@ -1680,7 +1687,16 @@ final class HeissRunnerUITests: XCTestCase {
                 let field = composer.first(where: {
                     $0.topCandidates(1).first?.string.range(of: "Post your reply", options: .caseInsensitive) != nil
                 })
-                if replyingTo.isEmpty || field == nil || (!expected.isEmpty && !replyingTo.contains(String(expected.prefix(10)))) {
+                if command["connectProbe"] as? Bool == true {
+                    // A check before following: is this the reply screen for the
+                    // right person? Then leave it, having typed nothing.
+                    let ok = !replyingTo.isEmpty && field != nil && (expected.isEmpty || replyingTo.contains(String(expected.prefix(10))))
+                    report["probe"] = ok ? "ok" : (replyingTo.isEmpty || field == nil ? "composer_not_open" : "composer_for_someone_else")
+                    if !replyingTo.isEmpty {
+                        _ = try tapTextUsingOCR(surface: window, expected: "Cancel", minimumScreenY: 0.03, maximumScreenY: 0.16)
+                        Thread.sleep(forTimeInterval: 1.0)
+                    }
+                } else if replyingTo.isEmpty || field == nil || (!expected.isEmpty && !replyingTo.contains(String(expected.prefix(10)))) {
                     report["reply"] = replyingTo.isEmpty || field == nil ? "composer_not_open" : "composer_for_someone_else"
                     if !replyingTo.isEmpty {
                         _ = try tapTextUsingOCR(surface: window, expected: "Cancel", minimumScreenY: 0.03, maximumScreenY: 0.16)

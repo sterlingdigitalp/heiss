@@ -85,10 +85,10 @@ describe("#connect: the hidden Follow button", () => {
     { t: "X.com", x: 0.788, y, w, h: 0.028 }, { t: "2:12 PM • 10/8/26 • 62 Views", x: 0.02, y: 0.52, w: 0.5, h: 0.02 },
   ];
   it("tells Follow from Message by the placeholder's width, without tapping", () => {
-    for (const [w, y] of [[0.160, 0.121], [0.161, 0.120], [0.163, 0.121], [0.1653, 0.120], [0.1658, 0.120]] as const) {
+    for (const [w, y] of [[0.160, 0.121], [0.161, 0.120], [0.163, 0.121], [0.1653, 0.120], [0.1658, 0.120], [0.1627, 0.121], [0.1626, 0.1231]] as const) {
       assert.ok(parseConnectPostPage(page(w, y)).followButton, `Follow at ${w}`);
     }
-    for (const [w, y] of [[0.168, 0.128], [0.170, 0.128], [0.173, 0.124], [0.1716, 0.125]] as const) {
+    for (const [w, y] of [[0.168, 0.128], [0.170, 0.128], [0.173, 0.124], [0.1716, 0.125], [0.1698, 0.128], [0.167, 0.122]] as const) {
       const read = parseConnectPostPage(page(w, y));
       assert.equal(read.followButton, undefined, `Message at ${w}`);
       assert.equal(read.alreadyFollowing, true);
