@@ -108,6 +108,20 @@ describe("#connect session", () => {
     assert.ok(commits[1]!.input.connectReply, "replies once the bubble is in view");
   });
 
+  it("someone already followed: cancels the Unfollow sheet, never replies, and remembers them", async () => {
+    const phone = fakePhone({});
+    const step = async (action: string, input: Record<string, unknown>) => {
+      const out = await phone.step(action, input);
+      return action === "x:connect_commit" && input.connectFollowX !== undefined
+        ? { lines: out.lines, follow: "already_following" } : out;
+    };
+    const remembered: string[] = [];
+    const run = await runConnectSession(step, { ...base, max: 1, live: true, maxScrolls: 0, onFollowed: (handle) => remembered.push(handle) });
+    assert.equal(run.outcomes.filter((o) => o.result === "connected").length, 0);
+    assert.ok(run.outcomes.some((o) => o.reason === "already_following"));
+    assert.ok(remembered.includes("@maya_builds"), "so they are never tapped again");
+  });
+
   it("never posts when the reply box holds anything but the intended reply", async () => {
     const phone = fakePhone({});
     const step = async (action: string, input: Record<string, unknown>) => {

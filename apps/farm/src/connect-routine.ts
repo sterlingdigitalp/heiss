@@ -134,7 +134,8 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
       // button is in view, then scroll the post until the bubble shows.
       const followed = await step("x:connect_commit", { connectRehearse: !opts.live, ...followInput, connectBack: false });
       let bubble: { x: number; y: number } | undefined;
-      for (let scroll = 0; scroll < 3 && !bubble; scroll++) {
+      const stopHere = followed.follow === "already_following" || followed.follow === "unfollow_sheet_stuck";
+      for (let scroll = 0; scroll < 3 && !bubble && !stopHere; scroll++) {
         bubble = parseConnectPostPage(linesOf((await step("x:connect_page", { connectScroll: true })).lines)).replyButton;
       }
       const replied = bubble
@@ -144,10 +145,30 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
     }
     page = linesOf(done.lines);
     acted += 1;
+    // The Follow button looks the same once followed, so the tap is how we
+    // learn it: X answered with an Unfollow sheet, which the runner cancelled.
+    if (done.follow === "unfollow_sheet_stuck") {
+      outcomes.push({ handle, result: "skipped", reason: "unfollow_sheet_stuck" });
+      return { outcomes, stoppedBecause: "unfollow_sheet_stuck" };
+    }
+    if (done.follow === "already_following") {
+      connected.add(connectTargetKey(handle));
+      if (opts.live) opts.onFollowed?.(handle);
+      outcomes.push({ handle, result: "skipped", reason: "already_following" });
+      acted -= 1;
+      continue;
+    }
+    // Record a follow the moment it was tapped, before anything can return:
+    // a stop after the tap must not leave a followed person unrecorded.
+    const followTapped = opts.live && done.follow === "tapped";
+    if (followTapped && connectFollowConfirmed(linesOf(done.afterFollow))) {
+      connected.add(connectTargetKey(handle));
+      opts.onFollowed?.(handle);
+    }
     // The box did not hold exactly the intended reply: nothing was posted, and
     // nothing more should be attempted until someone has looked.
     if (done.reply === "reply_text_mismatch") {
-      outcomes.push({ handle, result: "skipped", reason: "reply_text_mismatch", reply: reply.text });
+      outcomes.push({ handle, result: followTapped ? "followed_reply_failed" : "skipped", reason: "reply_text_mismatch", reply: reply.text });
       return { outcomes, stoppedBecause: "reply_text_mismatch" };
     }
     if (!opts.live) {
@@ -160,8 +181,6 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
       // An unconfirmed follow is the first sign of a limit: stop, do not push on.
       return { outcomes, stoppedBecause: "follow_not_confirmed" };
     }
-    connected.add(connectTargetKey(handle));
-    opts.onFollowed?.(handle);
     if (done.reply === "posted") outcomes.push({ handle, result: "connected", reply: reply.text });
     else {
       outcomes.push({ handle, result: "followed_reply_failed", reply: reply.text, reason: String(done.reply ?? "unknown") });

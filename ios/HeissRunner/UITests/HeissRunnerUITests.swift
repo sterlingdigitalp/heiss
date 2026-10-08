@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.08.6"
+private let heissRunnerBuild = "heiss-runner-2026.10.08.7"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1616,9 +1616,20 @@ final class HeissRunnerUITests: XCTestCase {
                     Thread.sleep(forTimeInterval: 1.6)
                     report["follow"] = "tapped"
                     report["afterFollow"] = try screenLinesUsingOCR()
+                    // X hides "Following" behind the same placeholder as "Follow",
+                    // so the button looks identical either way. Tapping it for
+                    // someone already followed raises an Unfollow sheet: cancel
+                    // it, and treat them as already followed — never unfollow.
+                    if try screenContainsTextUsingOCR("Unfollow") {
+                        _ = try tapTextUsingOCR(surface: window, expected: "Cancel", minimumScreenY: 0.5, maximumScreenY: 1.0)
+                        Thread.sleep(forTimeInterval: 1.0)
+                        report["follow"] = try screenContainsTextUsingOCR("Unfollow") ? "unfollow_sheet_stuck" : "already_following"
+                    }
                 }
             }
-            if let reply = command["connectReply"] as? String, !reply.isEmpty,
+            if report["follow"] as? String == "already_following" || report["follow"] as? String == "unfollow_sheet_stuck" {
+                // No reply for someone already followed.
+            } else if let reply = command["connectReply"] as? String, !reply.isEmpty,
                let x = number("connectReplyX"), let y = number("connectReplyY") {
                 // The comment bubble under the post opens the reply screen.
                 tap(x, y)
@@ -1653,9 +1664,17 @@ final class HeissRunnerUITests: XCTestCase {
                     }
                     let anchorY = typedLines.first(where: { (($0["t"] as? String) ?? "").lowercased().contains("replying to") })
                         .flatMap { $0["y"] as? Double } ?? 0
+                    // Read in reading order: by row, then left to right. An emoji
+                    // mid-line splits a row into pieces that sit a hair apart in
+                    // height; sorting by height alone read "followed you 👋🏻, let's
+                    // connect" backwards and stopped a correct reply (2026-10-08).
                     let boxText = typedLines
                         .filter { (($0["y"] as? Double) ?? 0) > anchorY + 0.01 && (($0["y"] as? Double) ?? 1) < 0.50 }
-                        .sorted { (($0["y"] as? Double) ?? 0) < (($1["y"] as? Double) ?? 0) }
+                        .sorted { a, b in
+                            let ay = (a["y"] as? Double) ?? 0, by = (b["y"] as? Double) ?? 0
+                            if abs(ay - by) > 0.015 { return ay < by }
+                            return ((a["x"] as? Double) ?? 0) < ((b["x"] as? Double) ?? 0)
+                        }
                         .map { letters(($0["t"] as? String) ?? "") }.joined()
                     let wanted = letters(reply)
                     // OCR misreads a letter or two ("Efrain" as "Etrain"); wrong
