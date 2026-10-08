@@ -100,3 +100,21 @@ describe("#connect: the hidden Follow button", () => {
     assert.equal(connectFollowConfirmed([...page(0.170, 0.128), { t: "You are unable to follow more people at this time.", x: 0.1, y: 0.5, w: 0.8, h: 0.02 }]), false);
   });
 });
+
+describe("#connect: finding the icon row", () => {
+  const at = (t: string, x: number, y: number): ScreenLine => ({ t, x, y, w: 0.1, h: 0.02 });
+  const header = [at("Post", 0.45, 0.05), at("@HemantDotDev", 0.16, 0.15)];
+  it("uses the counts beside the icons when they are readable (real pages, 2026-10-08)", () => {
+    // A post that fills the screen: Views at 0.75, counts at 0.80.
+    const full = parseConnectPostPage([...header, at("3:02PM • 10/8/26 • 186 Views", 0.02, 0.75), at("12", 0.08, 0.80), at("07", 0.48, 0.80)]);
+    assert.ok(Math.abs(full.replyButton!.y - 0.81) < 0.006, `bubble at ${full.replyButton!.y}`);
+    assert.equal(full.likeButton!.y, full.replyButton!.y);
+    // A short post: Views at 0.52, counts at 0.57.
+    const short = parseConnectPostPage([...header, at("2:12 PM • 10/8/26 • 62 Views", 0.02, 0.52), at("8", 0.54, 0.57), at("5", 0.09, 0.57)]);
+    assert.ok(Math.abs(short.replyButton!.y - 0.58) < 0.006, `bubble at ${short.replyButton!.y}`);
+  });
+  it("falls back to a fixed step under the Views line when no counts show", () => {
+    const none = parseConnectPostPage([...header, at("2:12 PM • 10/8/26 • 18 Views", 0.02, 0.60)]);
+    assert.ok(Math.abs(none.replyButton!.y - 0.66) < 0.006, `bubble at ${none.replyButton!.y}`);
+  });
+});

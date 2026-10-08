@@ -216,7 +216,15 @@ export function parseConnectPostPage(lines: ScreenLine[]): ConnectPostPage {
   const views = lines.find((line) => line.y > 0.2
     && /\d{1,2}:\d{2}\s?[AP]M/i.test(line.t) && /\d{1,2}\/\d{1,2}\/\d{2}/.test(line.t) && /\bviews?\b/i.test(line.t));
   const viewsY = views ? views.y + views.h / 2 : undefined;
-  const bubbleY = viewsY === undefined ? undefined : viewsY + 0.11 * (viewsY - 0.05);
+  // The icon row is a fixed 0.05 of the screen under that line. (It was first
+  // taken as proportional to how far down the page the line sat, which put the
+  // tap below the icons on a post that filled the screen — 2026-10-08.) When
+  // the reply or like counts are readable beside the icons, use their height.
+  const counts = viewsY === undefined ? [] : lines.filter((line) => /^\d{1,5}[KM]?$/i.test(line.t.trim())
+    && line.y + line.h / 2 > viewsY + 0.025 && line.y + line.h / 2 < viewsY + 0.08);
+  const bubbleY = viewsY === undefined ? undefined
+    : counts.length > 0 ? counts.reduce((sum, line) => sum + line.y + line.h / 2, 0) / counts.length
+    : viewsY + 0.05;
   return {
     handle: handleLine?.t.trim(),
     followButton: isFollow ? centre(placeholder!) : undefined,
