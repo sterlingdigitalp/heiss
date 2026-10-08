@@ -10,10 +10,11 @@ const results: ScreenLine[] = [
   L("Old Timer", 0.15, 0.40), L("@oldtimer • 5h", 0.48, 0.401), L("Been building for years, happy to meet you", 0.15, 0.43),
   L("Sam Roe", 0.15, 0.60), L("@samroe • 20m", 0.48, 0.601), L("Looking to meet other founders building here", 0.15, 0.63),
 ];
-// X hides Follow from captures: "X.com" in the author row stands in for it.
+// X hides the button from captures; the placeholder's width tells Follow
+// (0.161) from Message (0.170). Sizes measured on the SE, 2026-10-08.
 const postPage = (handle: string, following = false): ScreenLine[] => [
   L("Post", 0.45, 0.05), L("Someone", 0.2, 0.12), L(handle, 0.2, 0.15),
-  ...(following ? [] : [{ t: "X.com", x: 0.79, y: 0.12, w: 0.12, h: 0.02 }]),
+  { t: "X.com", x: 0.788, y: following ? 0.128 : 0.121, w: following ? 0.170 : 0.161, h: 0.028 },
   L("2:12 PM · 10/8/26 · 18 Views", 0.04, 0.60),
 ];
 
@@ -72,7 +73,8 @@ describe("#connect session", () => {
     const phone = fakePhone({});
     const step = async (action: string, input: Record<string, unknown>) => {
       const out = await phone.step(action, input);
-      return action === "x:connect_commit" ? { ...out, afterFollow: [L("You are unable to follow more people at this time.", 0.1, 0.5)] } : out;
+      // The button stayed Follow-sized: X did not take the follow.
+      return action === "x:connect_commit" ? { ...out, afterFollow: postPage("@x", false) } : out;
     };
     const run = await runConnectSession(step, { ...base, max: 5, live: true });
     assert.equal(run.stoppedBecause, "follow_not_confirmed");

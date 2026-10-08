@@ -182,19 +182,25 @@ export interface ConnectPostPage {
 }
 
 /**
- * Read an opened post page: who wrote it, the Follow button, the comment bubble.
- *
- * X hides the Follow button from screen captures, and a capture is all the
- * runner has. What shows in its place, at the right of the author row, is a
- * placeholder that reads "X.com" — so that placeholder IS the Follow button's
- * position. No placeholder there means the author is already followed.
+ * X hides the button at the right of the author row from screen captures and
+ * draws a placeholder (it reads "X.com") in its place. The button is "Follow"
+ * for someone not yet followed and "Message" once they are, and the
+ * placeholder is sized to the word under it. Measured on the SE across every
+ * capture of 2026-10-08: Follow 0.160–0.163 wide, Message 0.168–0.173, no
+ * overlap. Anything not clearly Follow-sized is treated as already followed.
  */
+export const CONNECT_FOLLOW_MAX_WIDTH = 0.1655;
+
+function authorRowPlaceholder(lines: ScreenLine[]): ScreenLine | undefined {
+  return lines.find((line) => line.x > 0.6 && line.y > 0.08 && line.y < 0.22 && /^x\.com$/i.test(line.t.trim()));
+}
+
+/** Read an opened post page: who wrote it, the Follow button, the icon row. */
 export function parseConnectPostPage(lines: ScreenLine[]): ConnectPostPage {
   const top = lines.filter((line) => line.y < 0.36);
   const handleLine = top.find((line) => /^@[A-Za-z0-9_]{2,15}$/.test(line.t.trim()));
-  const authorRow = (line: ScreenLine) => line.x > 0.6 && line.y > 0.08 && line.y < 0.22;
-  const follow = lines.find((line) => authorRow(line) && /^(x\.com|follow)$/i.test(line.t.trim()));
-  const following = lines.some((line) => authorRow(line) && /^following$/i.test(line.t.trim()));
+  const placeholder = authorRowPlaceholder(lines);
+  const isFollow = placeholder !== undefined && placeholder.w <= CONNECT_FOLLOW_MAX_WIDTH;
   // The icon row sits a fixed step under the "time · date · N Views" line; the
   // bubble is its first icon. Without that line on screen there is no safe tap.
   const views = lines.find((line) => /\bviews?\b/i.test(line.t) && /\d/.test(line.t) && line.y > 0.2);
@@ -202,8 +208,8 @@ export function parseConnectPostPage(lines: ScreenLine[]): ConnectPostPage {
   const bubbleY = viewsY === undefined ? undefined : viewsY + 0.11 * (viewsY - 0.05);
   return {
     handle: handleLine?.t.trim(),
-    followButton: follow && !following ? centre(follow) : undefined,
-    alreadyFollowing: following || (!follow && handleLine !== undefined),
+    followButton: isFollow ? centre(placeholder!) : undefined,
+    alreadyFollowing: !isFollow && handleLine !== undefined,
     replyButton: bubbleY !== undefined && bubbleY < 0.9 ? { x: 0.075, y: bubbleY } : undefined,
     // The row holds five evenly spaced icons: reply, repost, like, bookmark, share.
     likeButton: bubbleY !== undefined && bubbleY < 0.9 ? { x: 0.47, y: bubbleY } : undefined,
@@ -211,13 +217,15 @@ export function parseConnectPostPage(lines: ScreenLine[]): ConnectPostPage {
 }
 
 /**
- * Whether a follow can be told to have landed. The button is hidden from
- * captures before and after, so this only catches X refusing: a limit or
- * error message on screen. A plain tap reads as "no objection", not proof.
+ * A follow landed when the button is no longer Follow-sized: it has become
+ * "Message". Still Follow-sized, or an error on screen, means X did not take
+ * it — the first sign of a limit.
  */
 export function connectFollowConfirmed(lines: ScreenLine[]): boolean {
   const refused = /unable to follow|cannot follow|can't follow|limit|try again later|something went wrong/i;
-  return lines.length > 0 && !lines.some((line) => refused.test(line.t));
+  if (lines.some((line) => refused.test(line.t))) return false;
+  const placeholder = authorRowPlaceholder(lines);
+  return placeholder !== undefined && placeholder.w > CONNECT_FOLLOW_MAX_WIDTH;
 }
 
 /** The search results screen: its tab strip (Top … Latest) is on show. */

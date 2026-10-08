@@ -1,7 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  connectEligibility, connectFirstName, connectReply, connectTargetKey, parseConnectResults,
+  connectEligibility, connectFirstName, connectFollowConfirmed, connectReply, connectTargetKey,
+  parseConnectPostPage, parseConnectResults,
   CONNECT_REPLY_VARIANTS, type ScreenLine,
 } from "../src/index.js";
 
@@ -74,5 +75,28 @@ describe("#connect: the reply", () => {
         assert.ok(!nameless.includes("<name>") && !nameless.includes("  "), nameless);
       }
     }
+  });
+});
+
+describe("#connect: the hidden Follow button", () => {
+  // Real measurements from the SE on 2026-10-08, before and after following.
+  const page = (w: number, y: number): ScreenLine[] => [
+    { t: "Post", x: 0.45, y: 0.05, w: 0.1, h: 0.02 }, { t: "@KanishkGiri2", x: 0.16, y: 0.15, w: 0.3, h: 0.02 },
+    { t: "X.com", x: 0.788, y, w, h: 0.028 }, { t: "2:12 PM • 10/8/26 • 62 Views", x: 0.02, y: 0.52, w: 0.5, h: 0.02 },
+  ];
+  it("tells Follow from Message by the placeholder's width, without tapping", () => {
+    for (const [w, y] of [[0.160, 0.121], [0.161, 0.120], [0.163, 0.121]] as const) {
+      assert.ok(parseConnectPostPage(page(w, y)).followButton, `Follow at ${w}`);
+    }
+    for (const [w, y] of [[0.168, 0.128], [0.170, 0.128], [0.173, 0.124]] as const) {
+      const read = parseConnectPostPage(page(w, y));
+      assert.equal(read.followButton, undefined, `Message at ${w}`);
+      assert.equal(read.alreadyFollowing, true);
+    }
+  });
+  it("confirms a follow only once the button has become Message-sized", () => {
+    assert.equal(connectFollowConfirmed(page(0.170, 0.128)), true);
+    assert.equal(connectFollowConfirmed(page(0.161, 0.121)), false, "still Follow: X did not take it");
+    assert.equal(connectFollowConfirmed([...page(0.170, 0.128), { t: "You are unable to follow more people at this time.", x: 0.1, y: 0.5, w: 0.8, h: 0.02 }]), false);
   });
 });
