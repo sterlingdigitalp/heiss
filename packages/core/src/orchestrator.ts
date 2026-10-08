@@ -1188,14 +1188,15 @@ export class FarmOrchestrator {
     // silence. After enough attempts, escalate to the human attention queue so
     // a genuinely stuck account stops consuming device time every cycle.
     const RETRY_ESCALATION_LIMIT = 6;
-    const TRANSPORT_ESCALATION_LIMIT = 20;
     // Those ladders suit transient faults. A deterministic one repeats word for
     // word and only wastes the wait, so identical failures escalate sooner.
     const repeated = repeatedFailureCount(session.failureSignature, session.repeatedFailureCount, message);
+    // An unreachable phone or runner is the device's fault, not the account's.
+    // Parking the account for it cost @sterlingdgtl two days (2026-10-05) for a
+    // runner that was back within minutes: it keeps retrying on the transport
+    // backoff (capped at 30 minutes) and device health reports the outage.
     const escalate = disposition.requiresAttention
-      || repeated.deterministic
-      || (retryCount ?? 0) >= RETRY_ESCALATION_LIMIT
-      || (transportRetryCount ?? 0) >= TRANSPORT_ESCALATION_LIMIT;
+      || (!isInfrastructure && (repeated.deterministic || (retryCount ?? 0) >= RETRY_ESCALATION_LIMIT));
     const escalationNote = !disposition.requiresAttention && escalate
       ? (repeated.deterministic
         ? `${message} (unchanged across ${repeated.count} attempts — retrying will not help)`

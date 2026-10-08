@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.01.3"
+private let heissRunnerBuild = "heiss-runner-2026.10.08.1"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -2544,8 +2544,7 @@ final class HeissRunnerUITests: XCTestCase {
         if platform == "x" {
             // Inspect the stable navigation-drawer header to verify the
             // current X account without touching feed content.
-            window.coordinate(withNormalizedOffset: point(command, "home", .init(dx: 0.10, dy: 0.95))).tap()
-            Thread.sleep(forTimeInterval: 0.8)
+            try returnXToHomeFeed(window: window, command: command)
             try openXDrawer(app: app, surface: window)
             var inspectedAccounts = [try recognizedTextStringsUsingOCR(minimumVisionY: 0.72).joined(separator: " | ")]
             if try screenContainsExactHandleUsingOCR(normalized: normalized, minimumVisionY: 0.72) {
@@ -3168,6 +3167,32 @@ final class HeissRunnerUITests: XCTestCase {
             app.buttons.matching(predicate),
             app.otherElements.matching(predicate),
         ]
+    }
+
+    /// Bring X back to the root of its Home tab before the account check.
+    ///
+    /// One Home tap only switches tabs: if that tab still has a profile or a
+    /// post pushed on it, the drawer avatar is not there and the check reads
+    /// someone else's profile (2026-10-06 parked @zygosdev on @vlatdd's). A
+    /// second tap pops to the feed. OCR and coordinates only — never X's tree.
+    private func returnXToHomeFeed(window: XCUIElement, command: [String: Any]) throws {
+        let home = point(command, "home", .init(dx: 0.10, dy: 0.95))
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                // The tab bar hides after scrolling; a short swipe down shows it.
+                window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+                    .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.58)))
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+            window.coordinate(withNormalizedOffset: home).tap()
+            Thread.sleep(forTimeInterval: 0.9)
+            let observations = try recognizedTextObservationsUsingOCR()
+            // The feed's own tab strip sits at the top; a profile never shows it.
+            if ["For you", "Foryou"].contains(where: { observationContains(observations, $0, minimumVisionY: 0.78) }) {
+                return
+            }
+        }
+        // Not fatal: the drawer check that follows still refuses a wrong screen.
     }
 
     private func drawerPublishesExactHandle(_ app: XCUIApplication, normalized: String) -> Bool {

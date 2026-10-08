@@ -447,13 +447,14 @@ describe("farm orchestrator (shipped path)", () => {
     assert.equal(result.sessions.filter((s) => s.deviceId === deadDevice.id).length, 1);
   });
 
-  it("escalates infrastructure failures to attention after the transport ceiling", async () => {
+  it("keeps retrying an unreachable device without parking the account", async () => {
     const store = new JsonStore(storePath());
     seedDemoFarm(store);
     store.state.accounts = store.state.accounts.filter((a) => a.id === "acc-tt-fresh");
     store.state.slots = [];
     const account = store.state.accounts[0]!;
-    // 19 prior infrastructure attempts; the next one crosses the ceiling.
+    // Many prior infrastructure attempts: the device's fault, never the
+    // account's, so it must not be parked (2026-10-05 cost a persona two days).
     store.state.sessions.push({
       id: "flapping", accountId: account.id, deviceId: account.deviceId,
       kind: "warmup", status: "checkpointed",
@@ -470,9 +471,11 @@ describe("farm orchestrator (shipped path)", () => {
     const result = await new FarmOrchestrator(store, unreachable).runOnce({ runnerId: "r", timeOfDay: "09:00" });
     const paused = result.sessions.find((s) => s.id === "flapping")!;
     assert.equal(paused.transportRetryCount, 20);
-    assert.equal(paused.requiresAttention, true, "must stop retrying silently and reach a human");
-    assert.equal(paused.nextRetryAt, undefined, "an escalated session is not auto-retried");
-    assert.equal(
+    assert.equal(paused.requiresAttention, false, "an outage does not park the account");
+    assert.ok(paused.nextRetryAt, "it is retried on the transport backoff");
+    const waitMs = Date.parse(paused.nextRetryAt!) - Date.parse(paused.updatedAt);
+    assert.ok(waitMs > 0 && waitMs <= 30 * 60_000 + 1_000, `backoff is capped at 30 minutes (${waitMs})`);
+    assert.notEqual(
       store.state.accounts.find((a) => a.id === account.id)!.preflightStatus,
       "attention",
     );
