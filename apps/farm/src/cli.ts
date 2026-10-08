@@ -2,7 +2,7 @@
 /**
  * heiss-farm — local controller (physical iPhones only, no simulator).
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFile, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -47,6 +47,7 @@ import {
   recordTargetAttempt,
   clearAutoPause,
   parseConnectResults,
+  connectTargetKey,
   connectEligibility,
   connectReply,
   type ScreenLine,
@@ -92,6 +93,7 @@ import {
 } from "@heiss/device";
 import { controllerHeartbeatPath, defaultDataDir, farmStatePath } from "./paths.js";
 import { findProjectRoot } from "./project-root.js";
+import { runConnectSession } from "./connect-routine.js";
 import {
   controllerAgentStatus,
   installControllerAgent,
@@ -161,6 +163,7 @@ Farm:
   heiss-farm targets remove <targetId>
   heiss-farm targets scan <xAccountId> @targetHandle   # read-only: what do their latest posts look like
   heiss-farm targets connect-scan <xAccountId> [--query "#connect"] [--pages 3]   # read-only #connect dry run
+  heiss-farm targets connect <xAccountId> [--max 5] [--live]   # #connect follow + reply; a rehearsal without --live
   heiss-farm targets engage <xAccountId> [@handle] [--live]   # dry run unless --live
   heiss-farm targets pause <targetId> | resume <targetId>
   heiss-farm platforms focus <platform>   # pause warmups/slots on every other platform
@@ -2121,6 +2124,71 @@ async function main(): Promise<void> {
         eligible: candidates.filter((candidate) => candidate.verdict === "eligible").length,
         candidates,
         ...(hasFlag(args, "--raw") ? { pages } : {}),
+      });
+    } finally {
+      await driver.disconnect(device.id).catch(() => undefined);
+      try { store.locks.releaseDevice(device.id, lockHolder); store.save(); } catch { /* reclaimed on load */ }
+    }
+    return;
+  }
+
+  // ── #connect, stage 2: follow + reply ──────────────────
+  // Rehearsal by default: it opens each post, checks the follow state and puts
+  // the reply in the box, then cancels. Only --live taps Follow and Post.
+  if (cmd === "targets" && args[1] === "connect") {
+    const store = openStore(args);
+    const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
+    if (!account || account.platform !== "x") throw new Error("Usage: targets connect <xAccountId> [--max 5] [--live] [--query \"filter:blue_verified #connect\"]");
+    if (store.state.settings.emergencyStop) { print({ ok: true, persona: account.handle, reason: "emergency_stop" }); return; }
+    const device = store.state.devices.find((candidate) => candidate.id === account.deviceId);
+    if (!device) throw new Error("Account device is missing");
+    const live = hasFlag(args, "--live");
+    // One command stays within the forwarded-command time limit; bigger
+    // batches belong to the scheduler, not a single call.
+    const max = Math.min(Math.max(Number(getArg(args, "--max") ?? 5), 1), live ? 8 : 12);
+    const lockHolder = `connect-${randomUUID()}`;
+    try { store.locks.acquireDevice(device.id, lockHolder); } catch {
+      print({ ok: true, persona: account.handle, reason: "device_busy" }); return;
+    }
+    store.save();
+    const driver = new RealIosDriver(new RealUsbTransport({ commandTimeoutMs: 240_000 }));
+    const tracePath = getArg(args, "--trace");
+    const context = {
+      platform: "x" as const, handle: account.handle, displayName: account.displayName,
+      loginEmail: account.loginEmail, switcherHint: account.switcherHint,
+      searchTerms: account.searchTerms, uiProfile: store.state.uiProfiles.x,
+    };
+    try {
+      await driver.connect(device.id, device.udid);
+      const session = await runConnectSession(
+        async (action, input) => {
+          const data = (await driver.runAction(device.id, account.id, action, { ...context, ...input } as never)).data ?? {};
+          // --trace <file>: what the phone showed at every step, for diagnosis.
+          if (tracePath) appendFileSync(tracePath, `${JSON.stringify({ at: new Date().toISOString(), action, input, data })}\n`);
+          return data;
+        },
+        {
+          max, live, query: getArg(args, "--query"),
+          ownedHandles: store.state.accounts.map((candidate) => candidate.handle),
+          alreadyConnected: store.state.engagementTargets.map((record) => record.targetKey),
+          // Human pacing between people when live; a rehearsal has nothing to pace.
+          pause: live ? () => new Promise((resolve) => setTimeout(resolve, 45_000 + Math.random() * 60_000)) : undefined,
+          onFollowed: (handle) => {
+            const now = new Date().toISOString();
+            recordEngagementTarget(store.state.engagementTargets, {
+              accountId: account.id, platform: "x", action: "follow", targetKey: connectTargetKey(handle),
+            }, now);
+            store.pushActivity({ kind: "connect", accountId: account.id, deviceId: device.id, message: `${account.handle} connected with a #connect author` });
+            store.save();
+          },
+        },
+      );
+      const count = (result: string) => session.outcomes.filter((outcome) => outcome.result === result).length;
+      print({
+        ok: true, live, persona: account.handle, stoppedBecause: session.stoppedBecause,
+        connected: count("connected"), rehearsed: count("rehearsed"),
+        followedReplyFailed: count("followed_reply_failed"), skipped: count("skipped"),
+        outcomes: session.outcomes,
       });
     } finally {
       await driver.disconnect(device.id).catch(() => undefined);

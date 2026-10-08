@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.08.3"
+private let heissRunnerBuild = "heiss-runner-2026.10.08.6"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -207,7 +207,11 @@ final class HeissRunnerUITests: XCTestCase {
         }
         let platform = command["platform"] as? String ?? "tiktok"
         let xPostContinuation = platform == "x" && ["post:caption", "post:media_optional", "post:publish"].contains(action)
-        let xPostStateful = xPostContinuation || (platform == "x" && action == "post:verify_published")
+        // #connect works one person at a time across several commands (open the
+        // post, read it, act or back out). Relaunching X and re-verifying the
+        // account before each would add ~40s a person and lose the results page.
+        let xConnectContinuation = platform == "x" && ["x:connect_page", "x:connect_open", "x:connect_commit"].contains(action)
+        let xPostStateful = xPostContinuation || xConnectContinuation || (platform == "x" && action == "post:verify_published")
         let fallbackBundle = [
             "tiktok": "com.zhiliaoapp.musically",
             "instagram": "com.burbn.instagram",
@@ -299,7 +303,16 @@ final class HeissRunnerUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.8)
         }
         let handle = command["handle"] as? String ?? ""
-        if xPostContinuation {
+        if xConnectContinuation {
+            // Only ever continue as the account the scan verified.
+            guard activeHandles["x"]?.caseInsensitiveCompare(handle) == .orderedSame,
+                  app.state == .runningForeground else {
+                throw NSError(domain: "HeissRunner", code: 15, userInfo: [
+                    NSLocalizedDescriptionKey: "X #connect continuation lost its verified account or foreground; refusing to continue",
+                    "failureKind": "account_mismatch",
+                ])
+            }
+        } else if xPostContinuation {
             guard activeHandles["x"]?.caseInsensitiveCompare(command["handle"] as? String ?? "") == .orderedSame else {
                 throw NSError(domain: "HeissRunner", code: 15, userInfo: [
                     NSLocalizedDescriptionKey: "X composer continuation lost its verified account state; refusing to continue",
@@ -386,6 +399,8 @@ final class HeissRunnerUITests: XCTestCase {
             return try performXTargetEngage(app: app, window: window, command: command)
         } else if action == "x:connect_scan" {
             return try performXConnectScan(app: app, window: window, command: command)
+        } else if action == "x:connect_page" || action == "x:connect_open" || action == "x:connect_commit" {
+            return try performXConnectStep(action: action, app: app, window: window, command: command)
         } else if action == "x:target_scan" {
             // Read-only reconnaissance for curated engagement: open a target's
             // profile and report what their two most recent posts look like.
@@ -1549,6 +1564,150 @@ final class HeissRunnerUITests: XCTestCase {
             "detail": "x:connect_scan:read:pages:\(pages.count)",
             "data": ["query": query, "openedBy": openedBy, "latestTapped": latestTapped, "pages": pages],
         ]
+    }
+
+    /// What is on screen right now, as OCR lines with positions (0…1, top-left).
+    private func screenLinesUsingOCR() throws -> [[String: Any]] {
+        return try recognizedTextObservationsUsingOCR().compactMap { observation in
+            guard let text = observation.topCandidates(1).first?.string, !text.isEmpty else { return nil }
+            let box = observation.boundingBox
+            return ["t": text, "x": Double(box.minX), "y": Double(1.0 - box.maxY),
+                    "w": Double(box.width), "h": Double(box.height)]
+        }
+    }
+
+    /// One step of the #connect routine. The Mac decides everything — which
+    /// post to open, whether the person qualifies, the reply text, where the
+    /// buttons are — from the lines each step returns. This only taps, pastes
+    /// and reads, by coordinates and OCR; it never queries X's tree.
+    ///
+    ///   x:connect_page    optionally scroll the results, then read them
+    ///   x:connect_open    tap a result at (connectTapX, connectTapY), read the post page
+    ///   x:connect_commit  on the post page: optionally Follow, optionally reply
+    ///                     (connectRehearse stops before Follow and before Post),
+    ///                     then go back to the results
+    private func performXConnectStep(
+        action: String,
+        app: XCUIApplication,
+        window: XCUIElement,
+        command: [String: Any]
+    ) throws -> [String: Any] {
+        func number(_ key: String) -> CGFloat? { (command[key] as? NSNumber).map { CGFloat(truncating: $0) } }
+        func tap(_ x: CGFloat, _ y: CGFloat) { window.coordinate(withNormalizedOffset: CGVector(dx: x, dy: y)).tap() }
+        var report: [String: Any] = [:]
+
+        if action == "x:connect_page" {
+            if command["connectScroll"] as? Bool == true {
+                window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.78))
+                    .press(forDuration: 0.1, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30)))
+                Thread.sleep(forTimeInterval: 1.4)
+            }
+        } else if action == "x:connect_open" {
+            guard let x = number("connectTapX"), let y = number("connectTapY") else {
+                throw NSError(domain: "HeissRunner", code: 42, userInfo: [NSLocalizedDescriptionKey: "connect_open needs connectTapX/Y"])
+            }
+            tap(x, y)
+            Thread.sleep(forTimeInterval: 2.2)
+        } else {
+            let rehearse = command["connectRehearse"] as? Bool ?? true
+            if let x = number("connectFollowX"), let y = number("connectFollowY") {
+                if rehearse { report["follow"] = "rehearsed" } else {
+                    tap(x, y)
+                    Thread.sleep(forTimeInterval: 1.6)
+                    report["follow"] = "tapped"
+                    report["afterFollow"] = try screenLinesUsingOCR()
+                }
+            }
+            if let reply = command["connectReply"] as? String, !reply.isEmpty,
+               let x = number("connectReplyX"), let y = number("connectReplyY") {
+                // The comment bubble under the post opens the reply screen.
+                tap(x, y)
+                Thread.sleep(forTimeInterval: 1.8)
+                let composer = try recognizedTextObservationsUsingOCR()
+                report["composer"] = try screenLinesUsingOCR()
+                // The reply screen names who it replies to; refuse anyone else.
+                let expected = ((command["connectExpectHandle"] as? String) ?? "").lowercased()
+                    .replacingOccurrences(of: "@", with: "").replacingOccurrences(of: "_", with: "")
+                let replyingTo = composer.compactMap { $0.topCandidates(1).first?.string.lowercased() }
+                    .first(where: { $0.contains("replying to") })?.replacingOccurrences(of: "_", with: "") ?? ""
+                let field = composer.first(where: {
+                    $0.topCandidates(1).first?.string.range(of: "Post your reply", options: .caseInsensitive) != nil
+                })
+                if replyingTo.isEmpty || field == nil || (!expected.isEmpty && !replyingTo.contains(String(expected.prefix(10)))) {
+                    report["reply"] = replyingTo.isEmpty || field == nil ? "composer_not_open" : "composer_for_someone_else"
+                    if !replyingTo.isEmpty {
+                        _ = try tapTextUsingOCR(surface: window, expected: "Cancel", minimumScreenY: 0.03, maximumScreenY: 0.16)
+                        Thread.sleep(forTimeInterval: 1.0)
+                    }
+                } else {
+                    // Type into the focused reply box. Never the clipboard: it is
+                    // shared with the operator's other devices, and a paste once put
+                    // their private dictation into the box (2026-10-08 rehearsal).
+                    app.typeText(reply)
+                    Thread.sleep(forTimeInterval: 1.2)
+                    let typedLines = try screenLinesUsingOCR()
+                    report["afterPaste"] = typedLines
+                    // Post only if the box holds exactly the intended reply.
+                    func letters(_ value: String) -> String {
+                        String(value.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) && $0.isASCII })
+                    }
+                    let anchorY = typedLines.first(where: { (($0["t"] as? String) ?? "").lowercased().contains("replying to") })
+                        .flatMap { $0["y"] as? Double } ?? 0
+                    let boxText = typedLines
+                        .filter { (($0["y"] as? Double) ?? 0) > anchorY + 0.01 && (($0["y"] as? Double) ?? 1) < 0.50 }
+                        .sorted { (($0["y"] as? Double) ?? 0) < (($1["y"] as? Double) ?? 0) }
+                        .map { letters(($0["t"] as? String) ?? "") }.joined()
+                    let wanted = letters(reply)
+                    // OCR misreads a letter or two ("Efrain" as "Etrain"); wrong
+                    // content is nowhere near that close.
+                    func distance(_ a: String, _ b: String) -> Int {
+                        let x = Array(a), y = Array(b)
+                        if x.isEmpty { return y.count }
+                        if y.isEmpty { return x.count }
+                        var row = Array(0...y.count)
+                        for i in 1...x.count {
+                            var previous = row[0]
+                            row[0] = i
+                            for j in 1...y.count {
+                                let current = row[j]
+                                row[j] = min(row[j] + 1, row[j - 1] + 1, previous + (x[i - 1] == y[j - 1] ? 0 : 1))
+                                previous = current
+                            }
+                        }
+                        return row[y.count]
+                    }
+                    let pasted = wanted.count >= 8 && distance(boxText, wanted) <= 2
+                    report["pasted"] = pasted
+                    report["boxText"] = boxText
+                    if rehearse || !pasted {
+                        // Leave without posting: Cancel, then confirm discarding the draft.
+                        _ = try tapTextUsingOCR(surface: window, expected: "Cancel", minimumScreenY: 0.03, maximumScreenY: 0.16)
+                        Thread.sleep(forTimeInterval: 1.0)
+                        for label in ["Delete", "Discard"] {
+                            if try tapTextUsingOCR(surface: window, expected: label, minimumScreenY: 0.45, maximumScreenY: 1.0) { break }
+                        }
+                        Thread.sleep(forTimeInterval: 1.0)
+                        report["reply"] = !pasted ? "reply_text_mismatch" : "rehearsed"
+                    } else {
+                        // The reply screen's send button is labelled "Post", top-right.
+                        let sent = try tapTextUsingOCR(surface: window, expected: "Post", minimumScreenY: 0.03, maximumScreenY: 0.16)
+                        Thread.sleep(forTimeInterval: 2.5)
+                        report["reply"] = sent ? "posted" : "post_button_not_found"
+                        report["afterReply"] = try screenLinesUsingOCR()
+                    }
+                }
+            }
+            if command["connectBack"] as? Bool ?? true {
+                // The post page's back arrow, top-left.
+                tap(number("connectBackX") ?? 0.06, number("connectBackY") ?? 0.075)
+                Thread.sleep(forTimeInterval: 1.4)
+            }
+        }
+        guard app.state == .runningForeground else {
+            throw NSError(domain: "HeissRunner", code: 17, userInfo: [NSLocalizedDescriptionKey: "x lost foreground during \(action)"])
+        }
+        report["lines"] = try screenLinesUsingOCR()
+        return ["ok": true, "executed": true, "detail": "\(action):done", "data": report]
     }
 
     private func performXTargetScan(

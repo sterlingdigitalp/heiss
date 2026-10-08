@@ -145,3 +145,93 @@ export function connectReply(
   const chosen = usable[Math.min(usable.length - 1, Math.floor(pick * usable.length))]!;
   return { text: chosen.text.replace("<name>", firstName), variant: chosen.variant };
 }
+
+// ── Acting on one person ─────────────────────────────────────────────────
+
+export interface ScreenPoint { x: number; y: number }
+
+const centre = (line: ScreenLine): ScreenPoint => ({ x: line.x + line.w / 2, y: line.y + line.h / 2 });
+
+/**
+ * Where to tap on the results page to open a candidate's post: the first line
+ * of the post's own text, just under its header. Never the header itself (that
+ * opens the profile) and never a line carrying a link or mention.
+ */
+export function connectPostTapPoint(page: ScreenLine[], handle: string): ScreenPoint | undefined {
+  const lines = [...page].sort((a, b) => a.y - b.y || a.x - b.x);
+  const key = handle.toLowerCase();
+  const header = lines.find((line) => line.t.toLowerCase().includes(key));
+  // Too low on the screen: the post text is cut off by the tab bar — scroll first.
+  if (!header || header.y > 0.74) return undefined;
+  const body = lines.find((line) => line.y > header.y + 0.012 && line.y < header.y + 0.11
+    && line.x > 0.12 && line.t.trim().length >= 12
+    && !/[@#]|https?:|\.\w{2,3}\//i.test(line.t));
+  return body ? centre(body) : undefined;
+}
+
+export interface ConnectPostPage {
+  /** The author's full handle as shown on the post page. */
+  handle?: string;
+  /** Present only when the account does not follow the author yet. */
+  followButton?: ScreenPoint;
+  alreadyFollowing: boolean;
+  /** The comment bubble under the post, which opens the reply screen. */
+  replyButton?: ScreenPoint;
+}
+
+/**
+ * Read an opened post page: who wrote it, the Follow button, the comment bubble.
+ *
+ * X hides the Follow button from screen captures, and a capture is all the
+ * runner has. What shows in its place, at the right of the author row, is a
+ * placeholder that reads "X.com" — so that placeholder IS the Follow button's
+ * position. No placeholder there means the author is already followed.
+ */
+export function parseConnectPostPage(lines: ScreenLine[]): ConnectPostPage {
+  const top = lines.filter((line) => line.y < 0.36);
+  const handleLine = top.find((line) => /^@[A-Za-z0-9_]{2,15}$/.test(line.t.trim()));
+  const authorRow = (line: ScreenLine) => line.x > 0.6 && line.y > 0.08 && line.y < 0.22;
+  const follow = lines.find((line) => authorRow(line) && /^(x\.com|follow)$/i.test(line.t.trim()));
+  const following = lines.some((line) => authorRow(line) && /^following$/i.test(line.t.trim()));
+  // The icon row sits a fixed step under the "time · date · N Views" line; the
+  // bubble is its first icon. Without that line on screen there is no safe tap.
+  const views = lines.find((line) => /\bviews?\b/i.test(line.t) && /\d/.test(line.t) && line.y > 0.2);
+  const viewsY = views ? views.y + views.h / 2 : undefined;
+  const bubbleY = viewsY === undefined ? undefined : viewsY + 0.11 * (viewsY - 0.05);
+  return {
+    handle: handleLine?.t.trim(),
+    followButton: follow && !following ? centre(follow) : undefined,
+    alreadyFollowing: following || (!follow && handleLine !== undefined),
+    replyButton: bubbleY !== undefined && bubbleY < 0.9 ? { x: 0.075, y: bubbleY } : undefined,
+  };
+}
+
+/**
+ * Whether a follow can be told to have landed. The button is hidden from
+ * captures before and after, so this only catches X refusing: a limit or
+ * error message on screen. A plain tap reads as "no objection", not proof.
+ */
+export function connectFollowConfirmed(lines: ScreenLine[]): boolean {
+  const refused = /unable to follow|cannot follow|can't follow|limit|try again later|something went wrong/i;
+  return lines.length > 0 && !lines.some((line) => refused.test(line.t));
+}
+
+/** The search results screen: its tab strip (Top … Latest) is on show. */
+export function isConnectResultsPage(lines: ScreenLine[]): boolean {
+  const strip = lines.filter((line) => line.y > 0.07 && line.y < 0.18).map((line) => line.t.trim().toLowerCase());
+  return strip.includes("latest") && strip.includes("top");
+}
+
+/** A single post's own page: titled "Post", with the author's handle under it. */
+export function isConnectPostPage(lines: ScreenLine[]): boolean {
+  return lines.some((line) => line.y < 0.10 && /^post$/i.test(line.t.trim()))
+    && parseConnectPostPage(lines).handle !== undefined;
+}
+
+/** Same author? OCR drops underscores and X cuts handles short, so compare loosely. */
+export function sameConnectHandle(a: string, b: string): boolean {
+  const clean = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const left = clean(a), right = clean(b);
+  if (Math.min(left.length, right.length) < 4) return left === right;
+  return left.startsWith(right) || right.startsWith(left);
+}
