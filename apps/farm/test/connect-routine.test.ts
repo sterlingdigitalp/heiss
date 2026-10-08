@@ -106,6 +106,8 @@ describe("#connect session", () => {
     assert.equal(commits[0]!.input.connectBack, false, "stays on the post after following");
     assert.equal(commits[0]!.input.connectReply, undefined);
     assert.ok(commits[1]!.input.connectReply, "replies once the bubble is in view");
+    assert.equal(commits[1]!.input.connectLikeY, commits[1]!.input.connectReplyY, "likes on the same icon row");
+    assert.equal(commits[0]!.input.connectLikeX, undefined, "does not like before the icon row is in view");
   });
 
   it("someone already followed: cancels the Unfollow sheet, never replies, and remembers them", async () => {

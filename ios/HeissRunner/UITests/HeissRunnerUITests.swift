@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.08.7"
+private let heissRunnerBuild = "heiss-runner-2026.10.08.8"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1627,8 +1627,18 @@ final class HeissRunnerUITests: XCTestCase {
                     }
                 }
             }
-            if report["follow"] as? String == "already_following" || report["follow"] as? String == "unfollow_sheet_stuck" {
-                // No reply for someone already followed.
+            let skipRest = report["follow"] as? String == "already_following" || report["follow"] as? String == "unfollow_sheet_stuck"
+            // Like the post before replying, as the operator does by hand. The
+            // heart is in the same icon row as the comment bubble.
+            if !skipRest, let x = number("connectLikeX"), let y = number("connectLikeY") {
+                if rehearse { report["like"] = "rehearsed" } else {
+                    tap(x, y)
+                    Thread.sleep(forTimeInterval: 1.0)
+                    report["like"] = "tapped"
+                }
+            }
+            if skipRest {
+                // No like and no reply for someone already followed.
             } else if let reply = command["connectReply"] as? String, !reply.isEmpty,
                let x = number("connectReplyX"), let y = number("connectReplyY") {
                 // The comment bubble under the post opens the reply screen.

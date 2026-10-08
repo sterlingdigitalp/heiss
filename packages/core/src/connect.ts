@@ -177,6 +177,8 @@ export interface ConnectPostPage {
   alreadyFollowing: boolean;
   /** The comment bubble under the post, which opens the reply screen. */
   replyButton?: ScreenPoint;
+  /** The heart, third icon in the same row as the comment bubble. */
+  likeButton?: ScreenPoint;
 }
 
 /**
@@ -203,6 +205,8 @@ export function parseConnectPostPage(lines: ScreenLine[]): ConnectPostPage {
     followButton: follow && !following ? centre(follow) : undefined,
     alreadyFollowing: following || (!follow && handleLine !== undefined),
     replyButton: bubbleY !== undefined && bubbleY < 0.9 ? { x: 0.075, y: bubbleY } : undefined,
+    // The row holds five evenly spaced icons: reply, repost, like, bookmark, share.
+    likeButton: bubbleY !== undefined && bubbleY < 0.9 ? { x: 0.47, y: bubbleY } : undefined,
   };
 }
 

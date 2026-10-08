@@ -121,8 +121,10 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
     const reply = connectReply(candidate.firstName, random(), lastVariant);
     lastVariant = reply.variant;
     if (acted > 0) await opts.pause?.(acted);
+    // Like, then reply: both icons share a row, so they share a height.
     const replyInput = (point: { x: number; y: number }) => ({
       connectRehearse: !opts.live, connectReplyX: point.x, connectReplyY: point.y,
+      connectLikeX: 0.47, connectLikeY: point.y,
       connectReply: reply.text, connectExpectHandle: handle,
     });
     const followInput = { connectFollowX: opened.followButton.x, connectFollowY: opened.followButton.y };
