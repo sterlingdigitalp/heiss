@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.08.12"
+private let heissRunnerBuild = "heiss-runner-2026.10.09.1"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1682,8 +1682,14 @@ final class HeissRunnerUITests: XCTestCase {
                     })
                 }
                 let expected = folded((command["connectExpectHandle"] as? String) ?? "")
+                // The line X draws above the box: it STARTS "Replying to" and names
+                // a handle. A post whose own text said "Keep replying to posts"
+                // was taken for it (2026-10-09), so match the shape, not the words.
                 let replyingTo = composer.compactMap { $0.topCandidates(1).first?.string }
-                    .first(where: { $0.lowercased().contains("replying to") }).map(folded) ?? ""
+                    .last(where: {
+                        let line = $0.trimmingCharacters(in: .whitespaces).lowercased()
+                        return line.hasPrefix("replying to") && line.contains("@")
+                    }).map(folded) ?? ""
                 let field = composer.first(where: {
                     $0.topCandidates(1).first?.string.range(of: "Post your reply", options: .caseInsensitive) != nil
                 })
@@ -1714,7 +1720,10 @@ final class HeissRunnerUITests: XCTestCase {
                     func letters(_ value: String) -> String {
                         String(value.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) && $0.isASCII })
                     }
-                    let anchorY = typedLines.first(where: { (($0["t"] as? String) ?? "").lowercased().contains("replying to") })
+                    let anchorY = typedLines.last(where: {
+                        let line = (($0["t"] as? String) ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+                        return line.hasPrefix("replying to") && line.contains("@")
+                    })
                         .flatMap { $0["y"] as? Double } ?? 0
                     // Read in reading order: by row, then left to right. An emoji
                     // mid-line splits a row into pieces that sit a hair apart in

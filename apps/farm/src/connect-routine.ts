@@ -39,6 +39,9 @@ function nearlySameHandle(a: string, b: string): boolean {
   const clean = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
   const left = clean(a), right = clean(b);
   if (left === right) return true;
+  // X cuts a long handle short on the results page, so one can be the start
+  // of the other ("@thetechdeck…" and "@thetechdeckusa").
+  if (Math.min(left.length, right.length) >= 6 && (left.startsWith(right) || right.startsWith(left))) return true;
   if (left.length !== right.length || left.length < 6) return false;
   let different = 0;
   for (let i = 0; i < left.length; i++) if (left[i] !== right[i]) different += 1;
