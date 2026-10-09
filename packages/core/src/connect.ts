@@ -196,8 +196,8 @@ export interface ConnectPostPage {
  * placeholder is sized and placed to fit the word under it. Measured on the
  * SE across every capture of 2026-10-08 (10 people):
  *
- *   Follow   width 0.160–0.166
- *   Message  width 0.168–0.173
+ *   Follow   width 0.160–0.1658
+ *   Message  width 0.1677–0.173   (15 people by 2026-10-09)
  *
  * Twelve of twelve separate on width. Its height on the screen was tried as a
  * second test and dropped: a Follow sat at 0.1231 and a Message at 0.124, too
@@ -205,8 +205,9 @@ export interface ConnectPostPage {
  * gap between the two is treated as already followed: skipping is the safe
  * mistake.
  */
-export const CONNECT_FOLLOW_BELOW_WIDTH = 0.1665;
-export const CONNECT_MESSAGE_FROM_WIDTH = 0.1675;
+export const CONNECT_FOLLOW_BELOW_WIDTH = 0.1663;
+// A confirmed follow measured 0.1677, a hair over the old 0.1675 line.
+export const CONNECT_MESSAGE_FROM_WIDTH = 0.1670;
 
 function authorRowPlaceholder(lines: ScreenLine[]): ScreenLine | undefined {
   return lines.find((line) => line.x > 0.6 && line.y > 0.08 && line.y < 0.22 && /^x\.com$/i.test(line.t.trim()));

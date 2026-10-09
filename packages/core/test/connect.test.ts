@@ -88,7 +88,7 @@ describe("#connect: the hidden Follow button", () => {
     for (const [w, y] of [[0.160, 0.121], [0.161, 0.120], [0.163, 0.121], [0.1653, 0.120], [0.1658, 0.120], [0.1627, 0.121], [0.1626, 0.1231]] as const) {
       assert.ok(parseConnectPostPage(page(w, y)).followButton, `Follow at ${w}`);
     }
-    for (const [w, y] of [[0.168, 0.128], [0.170, 0.128], [0.173, 0.124], [0.1716, 0.125], [0.1698, 0.128], [0.167, 0.122]] as const) {
+    for (const [w, y] of [[0.168, 0.128], [0.170, 0.128], [0.173, 0.124], [0.1716, 0.125], [0.1698, 0.128], [0.1677, 0.125], [0.1665, 0.122]] as const) {
       const read = parseConnectPostPage(page(w, y));
       assert.equal(read.followButton, undefined, `Message at ${w}`);
       assert.equal(read.alreadyFollowing, true);
@@ -96,6 +96,7 @@ describe("#connect: the hidden Follow button", () => {
   });
   it("confirms a follow only once the button has become Message-sized", () => {
     assert.equal(connectFollowConfirmed(page(0.170, 0.128)), true);
+    assert.equal(connectFollowConfirmed(page(0.1677, 0.125)), true, "the narrowest real Message so far");
     assert.equal(connectFollowConfirmed(page(0.161, 0.121)), false, "still Follow: X did not take it");
     assert.equal(connectFollowConfirmed([...page(0.170, 0.128), { t: "You are unable to follow more people at this time.", x: 0.1, y: 0.5, w: 0.8, h: 0.02 }]), false);
   });
