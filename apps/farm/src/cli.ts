@@ -1744,7 +1744,14 @@ async function main(): Promise<void> {
               store.save();
               connectRanThisTick = true;
               try {
-                const batch = await runConnectBatch(store, connectAccount, { max: connectPlan.max, live: true });
+                // Keep what the phone showed at every step: an unattended batch
+                // that stops early is otherwise impossible to explain.
+                const traceDir = join(getArg(args, "--data") ?? defaultDataDir(), "connect-trace");
+                mkdirSync(traceDir, { recursive: true });
+                const batch = await runConnectBatch(store, connectAccount, {
+                  max: connectPlan.max, live: true,
+                  tracePath: join(traceDir, `${connectPlan.hourKey}-${connectAccount.handle.replace(/[^A-Za-z0-9_]/g, "")}.jsonl`),
+                });
                 console.log(JSON.stringify({ at: nowIso, connect: { persona: connectAccount.handle, asked: connectPlan.max, connected: batch.connected, stoppedBecause: batch.stoppedBecause ?? batch.reason } }));
                 const pushback = ["follow_not_confirmed", "reply_failed", "reply_text_mismatch", "unfollow_sheet_stuck"];
                 if (batch.stoppedBecause && pushback.includes(batch.stoppedBecause)) {

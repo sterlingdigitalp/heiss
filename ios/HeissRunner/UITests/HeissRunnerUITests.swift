@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.09.1"
+private let heissRunnerBuild = "heiss-runner-2026.10.09.2"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1783,13 +1783,20 @@ final class HeissRunnerUITests: XCTestCase {
                 // session then stopped on the post page), so confirm the
                 // results' tab strip is back and, if not, swipe back from the
                 // screen edge — that works wherever the page is scrolled to.
-                func onResults() throws -> Bool {
-                    try screenContainsTextUsingOCR("Latest", minimumVisionY: 0.80, maximumVisionY: 0.94)
+                // Swipe back only while a post page is positively on screen (its
+                // "Post" title). The first version swiped whenever it failed to
+                // read "Latest" on the results; one misread word then swiped the
+                // results page itself away and ended the batch (2026-10-09).
+                func stillOnPost() throws -> Bool {
+                    try recognizedTextObservationsUsingOCR().contains { observation in
+                        observation.boundingBox.maxY > 0.90
+                            && observation.topCandidates(1).first?.string.trimmingCharacters(in: .whitespaces).lowercased() == "post"
+                    }
                 }
                 tap(number("connectBackX") ?? 0.06, number("connectBackY") ?? 0.075)
                 Thread.sleep(forTimeInterval: 1.4)
                 var attempts = 0
-                while try !onResults(), attempts < 2 {
+                while try stillOnPost(), attempts < 2 {
                     attempts += 1
                     window.coordinate(withNormalizedOffset: CGVector(dx: 0.004, dy: 0.5))
                         .press(forDuration: 0.05, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5)))
