@@ -3,7 +3,7 @@
  * runs unchanged against a fake phone in tests.
  */
 import {
-  connectEligibility, connectFollowConfirmed, connectPostTapPoint, connectReply,
+  connectEligibility, connectFollowConfirmed, connectFollowingKey, connectPostTapPoint, connectReply,
   connectTargetKey, isConnectPostPage, isConnectResultsPage, parseConnectPostPage,
   parseConnectResults, sameConnectHandle, type ScreenLine,
 } from "@heiss/core";
@@ -25,6 +25,10 @@ export interface ConnectSessionOptions {
   ownedHandles: string[];
   /** connectTargetKey fingerprints of everyone already connected with. */
   alreadyConnected: string[];
+  /** connectFollowingKey fingerprints of people THIS account is known to follow already. */
+  knownFollowing?: string[];
+  /** Called when a post page shows this account already follows its author. */
+  onAlreadyFollowing?: (handle: string) => void;
   query?: string;
   /** Wait between people, in ms; injected so tests do not sleep. */
   pause?: (index: number) => Promise<void>;
@@ -55,6 +59,7 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
 }> {
   const random = opts.random ?? Math.random;
   const connected = new Set(opts.alreadyConnected);
+  const knownFollowing = new Set(opts.knownFollowing ?? []);
   const handled = new Set<string>();
   const outcomes: ConnectOutcome[] = [];
   let lastVariant: number | undefined;
@@ -77,9 +82,13 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
       .map((candidate) => ({ candidate, point: connectPostTapPoint(page, candidate.handle) }))
       .find((item) => {
         const verdict = connectEligibility(item.candidate, { ownedHandles: opts.ownedHandles, alreadyConnected: connected });
-        if (!verdict.ok) {
+        // Someone this account is already known to follow is passed over on
+        // the results page, without opening their post again.
+        const reason = !verdict.ok ? verdict.reason
+          : knownFollowing.has(connectFollowingKey(item.candidate.handle)) ? "already_following" : undefined;
+        if (reason) {
           handled.add(item.candidate.handle.toLowerCase());
-          outcomes.push({ handle: item.candidate.handle, result: "skipped", reason: verdict.reason });
+          outcomes.push({ handle: item.candidate.handle, result: "skipped", reason });
           return false;
         }
         return item.point !== undefined;
@@ -128,7 +137,11 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
     if (!sameConnectHandle(handle, candidate.handle)) { await skip("opened_a_different_page", candidate.handle); continue; }
     const verdict = connectEligibility({ ...candidate, handle }, { ownedHandles: opts.ownedHandles, alreadyConnected: connected });
     if (!verdict.ok) { await skip(verdict.reason); continue; }
-    if (opened.alreadyFollowing || !opened.followButton) { await skip(opened.alreadyFollowing ? "already_following" : "no_follow_button"); continue; }
+    if (opened.alreadyFollowing || !opened.followButton) {
+      if (opened.alreadyFollowing) { knownFollowing.add(connectFollowingKey(handle)); opts.onAlreadyFollowing?.(handle); }
+      await skip(opened.alreadyFollowing ? "already_following" : "no_follow_button");
+      continue;
+    }
     const reply = connectReply(candidate.firstName, random(), lastVariant);
     lastVariant = reply.variant;
     if (acted > 0) await opts.pause?.(acted);

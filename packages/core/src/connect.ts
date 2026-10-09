@@ -13,6 +13,15 @@ export function connectTargetKey(handle: string): string {
 }
 
 /** One OCR line from the runner: text plus its position on screen (0…1, top-left origin). */
+/**
+ * Fingerprint for "this account already follows them", learned by opening a
+ * post once. Kept apart from connectTargetKey: it is true of one account only
+ * and must not stop another account connecting with the same person.
+ */
+export function connectFollowingKey(handle: string): string {
+  return connectTargetKey(handle).replace(/^xconnect:/, "xfollowing:");
+}
+
 export interface ScreenLine { t: string; x: number; y: number; w: number; h: number }
 
 export interface ConnectCandidate {

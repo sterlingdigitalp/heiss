@@ -53,6 +53,7 @@ import {
   isConnectResultsPage,
   type ConnectSupplySample,
   connectTargetKey,
+  connectFollowingKey,
   connectEligibility,
   connectReply,
   type ScreenLine,
@@ -383,7 +384,7 @@ async function runConnectScan(
       connectQuery: query, connectPages: opts.pages ?? 3,
     } as never);
     const pages = (result.data?.pages ?? []) as ScreenLine[][];
-    const alreadyConnected = store.state.engagementTargets.map((record) => record.targetKey);
+    const alreadyConnected = store.state.engagementTargets.filter((record) => record.targetKey.startsWith("xconnect:")).map((record) => record.targetKey);
     const ownedHandles = store.state.accounts.map((candidate) => candidate.handle);
     const found = parseConnectResults(pages);
     // Only a scan that really reached the results says anything about supply.
@@ -450,7 +451,17 @@ async function runConnectBatch(
       {
         max: opts.max, live: opts.live, query: opts.query,
         ownedHandles: store.state.accounts.map((candidate) => candidate.handle),
-        alreadyConnected: store.state.engagementTargets.map((record) => record.targetKey),
+        // Only real connections block every account; "xfollowing:" records are
+        // one account's own and are passed separately.
+        alreadyConnected: store.state.engagementTargets.filter((record) => record.targetKey.startsWith("xconnect:")).map((record) => record.targetKey),
+        knownFollowing: store.state.engagementTargets
+          .filter((record) => record.accountId === account.id && record.targetKey.startsWith("xfollowing:")).map((record) => record.targetKey),
+        onAlreadyFollowing: (handle) => {
+          recordEngagementTarget(store.state.engagementTargets, {
+            accountId: account.id, platform: "x", action: "follow", targetKey: connectFollowingKey(handle),
+          }, new Date().toISOString());
+          store.save();
+        },
         // Human pacing between people when live; a rehearsal has nothing to pace.
         pause: opts.live ? () => new Promise((resolve) => setTimeout(resolve, 45_000 + Math.random() * 60_000)) : undefined,
         onFollowed: (handle) => {

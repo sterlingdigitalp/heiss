@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { connectTargetKey, type ScreenLine } from "@heiss/core";
+import { connectFollowingKey, connectTargetKey, type ScreenLine } from "@heiss/core";
 import { runConnectSession } from "../src/connect-routine.js";
 
 const L = (t: string, x: number, y: number): ScreenLine => ({ t, x, y, w: 0.4, h: 0.02 });
@@ -128,6 +128,18 @@ describe("#connect session", () => {
       alreadyConnected: [connectTargetKey("@maya_builds"), connectTargetKey("@samroe")],
     });
     assert.ok(again.outcomes.every((o) => o.result === "skipped"), "nobody is connected with twice");
+  });
+
+  it("remembers who this account already follows, and next time skips them without opening the post", async () => {
+    const first = fakePhone({ pages: { "@maya_builds": postPage("@maya_builds", true) } });
+    const learned: string[] = [];
+    await runConnectSession(first.step, { ...base, max: 1, live: true, onAlreadyFollowing: (handle) => learned.push(handle) });
+    assert.deepEqual(learned, ["@maya_builds"]);
+
+    const second = fakePhone({ pages: { "@maya_builds": postPage("@maya_builds", true) } });
+    const run = await runConnectSession(second.step, { ...base, max: 1, live: true, knownFollowing: learned.map(connectFollowingKey) });
+    assert.equal(run.outcomes.find((o) => o.handle === "@maya_builds")?.reason, "already_following");
+    assert.equal(second.calls.filter((call) => call.action === "x:connect_open").length, 1, "only @samroe's post was opened");
   });
 
   it("stops when a follow does not take, before liking or replying", async () => {
