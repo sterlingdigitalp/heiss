@@ -1738,6 +1738,9 @@ async function main(): Promise<void> {
               const schedule = store.state.settings.connectSchedule!;
               // Stamp the hour first: one attempt per account per hour, whatever happens.
               schedule.lastBatchHour = { ...schedule.lastBatchHour, [connectAccount.id]: connectPlan.hourKey };
+              if (!schedule.paceFrom?.[connectAccount.id]?.startsWith(localDayNow)) {
+                schedule.paceFrom = { ...schedule.paceFrom, [connectAccount.id]: connectPlan.hourKey };
+              }
               store.save();
               connectRanThisTick = true;
               try {

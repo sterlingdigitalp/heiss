@@ -180,8 +180,14 @@ describe("#connect: the hourly schedule", () => {
 
   it("takes 3 on pace, 4 when behind, and never passes the daily cap", () => {
     const only = { ...schedule(), accounts: [{ accountId: "manx", perHour: 3, dailyCap: 72 }] };
-    assert.equal(planConnectBatch(only, { nowIso: at("13:59"), timeZone: tz, doneToday: () => 39 })?.max, 3, "13 hours x 3 done");
-    assert.equal(planConnectBatch(only, { nowIso: at("13:59"), timeZone: tz, doneToday: () => 30 })?.max, 4, "a lean hour earlier");
+    const sinceMidnight = { ...only, paceFrom: { manx: "2026-10-09T00" } };
+    assert.equal(planConnectBatch(sinceMidnight, { nowIso: at("13:59"), timeZone: tz, doneToday: () => 39 })?.max, 3, "13 hours x 3 done");
+    assert.equal(planConnectBatch(sinceMidnight, { nowIso: at("13:59"), timeZone: tz, doneToday: () => 30 })?.max, 4, "a lean hour earlier");
+    // Switched on at 1 pm: by 3 pm two hours have finished, so 6 is on pace.
+    const sinceLunch = { ...only, paceFrom: { manx: "2026-10-09T13" } };
+    assert.equal(planConnectBatch(sinceLunch, { nowIso: at("15:59"), timeZone: tz, doneToday: () => 6 })?.max, 3);
+    assert.equal(planConnectBatch(sinceLunch, { nowIso: at("15:59"), timeZone: tz, doneToday: () => 4 })?.max, 4);
+    assert.equal(planConnectBatch(only, { nowIso: at("13:59"), timeZone: tz, doneToday: () => 0 })?.max, 3, "its first batch of the day is never 'behind'");
     const capped = { ...schedule(), accounts: [{ accountId: "sterling", perHour: 3, dailyCap: 10 }] };
     assert.equal(planConnectBatch(capped, { nowIso: at("13:59"), timeZone: tz, doneToday: () => 9 })?.max, 1);
     assert.equal(planConnectBatch(capped, { nowIso: at("13:59"), timeZone: tz, doneToday: () => 10 }), undefined);

@@ -355,6 +355,8 @@ export interface ConnectSchedule {
   accounts: ConnectScheduleAccount[];
   /** accountId → the local hour ("2026-10-09T14") of its last batch. */
   lastBatchHour?: Record<string, string>;
+  /** accountId → the local hour of its first batch of the day; pace is measured from here. */
+  paceFrom?: Record<string, string>;
   /** accountId → local day it was stopped on, after X pushed back. */
   stoppedDay?: Record<string, string>;
   stoppedReason?: Record<string, string>;
@@ -407,8 +409,12 @@ export function planConnectBatch(
     });
     if (nearOwnPost) continue;
     const done = opts.doneToday(account.accountId);
-    // On pace means perHour for every hour of the day that has finished.
-    const behind = done < now.hour * account.perHour;
+    // On pace means perHour for every finished hour since the account's first
+    // batch today. Counting from midnight made an account switched on in the
+    // afternoon "behind" all day, so it took the extra person every hour.
+    const from = schedule.paceFrom?.[account.accountId];
+    const startHour = from?.startsWith(now.day) ? Number(from.slice(11, 13)) : now.hour;
+    const behind = done < (now.hour - startHour) * account.perHour;
     const max = Math.min(account.perHour + (behind ? 1 : 0), account.dailyCap - done);
     if (max <= 0) continue;
     return { accountId: account.accountId, max, hourKey };
