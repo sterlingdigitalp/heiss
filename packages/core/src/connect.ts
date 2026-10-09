@@ -328,3 +328,81 @@ export function connectSupplyByHour(samples: ConnectSupplySample[], timeZone: st
     postsPerHour: Math.round((rates.reduce((sum, rate) => sum + rate, 0) / rates.length) * 10) / 10,
   }));
 }
+
+// ── Schedule: a few people an hour, at a different minute each hour ───────
+
+export interface ConnectScheduleAccount {
+  accountId: string;
+  /** People per hour on pace; one more is taken while behind. */
+  perHour: number;
+  dailyCap: number;
+  /** Local "HH:mm" times to stay clear of (the account's own scheduled posts). */
+  avoidTimes?: string[];
+}
+
+export interface ConnectSchedule {
+  enabled: boolean;
+  /** In running order: the account with the most followers first. */
+  accounts: ConnectScheduleAccount[];
+  /** accountId → the local hour ("2026-10-09T14") of its last batch. */
+  lastBatchHour?: Record<string, string>;
+  /** accountId → local day it was stopped on, after X pushed back. */
+  stoppedDay?: Record<string, string>;
+  stoppedReason?: Record<string, string>;
+}
+
+/** Minutes either side of an account's own post during which it does not connect. */
+export const CONNECT_AVOID_MINUTES = 15;
+/** A batch starts no later than this minute, so it finishes inside its hour. */
+export const CONNECT_LATEST_START_MINUTE = 40;
+
+function stableNumber(seed: string): number {
+  return Number.parseInt(createHash("sha256").update(seed).digest("hex").slice(0, 8), 16);
+}
+
+function localParts(iso: string, timeZone: string): { day: string; hour: number; minute: number } {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date(iso)).map((part) => [part.type, part.value]));
+  return { day: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour), minute: Number(parts.minute) };
+}
+
+/** The minute past the hour at which an account's batch starts; different every hour. */
+export function connectStartMinute(accountId: string, hourKey: string): number {
+  return stableNumber(`${accountId}:${hourKey}`) % (CONNECT_LATEST_START_MINUTE + 1);
+}
+
+/**
+ * Which account, if any, should run a batch now, and how many people.
+ *
+ * Each account gets one batch per local hour, starting at that hour's own
+ * minute. `doneToday` is how many it has connected with so far today. Behind
+ * pace (a lean hour earlier) it takes one more than `perHour`.
+ */
+export function planConnectBatch(
+  schedule: ConnectSchedule | undefined,
+  opts: { nowIso: string; timeZone: string; doneToday: (accountId: string) => number },
+): { accountId: string; max: number; hourKey: string } | undefined {
+  if (!schedule?.enabled) return undefined;
+  const now = localParts(opts.nowIso, opts.timeZone);
+  const hourKey = `${now.day}T${String(now.hour).padStart(2, "0")}`;
+  const nowMinutes = now.hour * 60 + now.minute;
+  for (const account of schedule.accounts) {
+    if (schedule.stoppedDay?.[account.accountId] === now.day) continue;
+    if (schedule.lastBatchHour?.[account.accountId] === hourKey) continue;
+    if (now.minute < connectStartMinute(account.accountId, hourKey)) continue;
+    const nearOwnPost = (account.avoidTimes ?? []).some((time) => {
+      const [hour, minute] = time.split(":").map(Number);
+      const gap = Math.abs(nowMinutes - (hour! * 60 + minute!));
+      return Math.min(gap, 1440 - gap) <= CONNECT_AVOID_MINUTES;
+    });
+    if (nearOwnPost) continue;
+    const done = opts.doneToday(account.accountId);
+    // On pace means perHour for every hour of the day that has finished.
+    const behind = done < now.hour * account.perHour;
+    const max = Math.min(account.perHour + (behind ? 1 : 0), account.dailyCap - done);
+    if (max <= 0) continue;
+    return { accountId: account.accountId, max, hourKey };
+  }
+  return undefined;
+}

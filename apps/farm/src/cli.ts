@@ -49,6 +49,7 @@ import {
   parseConnectResults,
   connectSupplyByHour,
   connectSupplySample,
+  planConnectBatch,
   isConnectResultsPage,
   type ConnectSupplySample,
   connectTargetKey,
@@ -168,6 +169,7 @@ Farm:
   heiss-farm targets scan <xAccountId> @targetHandle   # read-only: what do their latest posts look like
   heiss-farm targets connect-scan <xAccountId> [--query "#connect"] [--pages 3]   # read-only #connect dry run
   heiss-farm targets connect-supply [--enable <xAccountId> [--every 30] | --disable]   # fresh #connect posts by hour of day
+  heiss-farm targets connect-schedule [--set "@a=3/72,@b=3/72" [--avoid "@a=01:05|04:35"]] [--enable | --disable] [--clear-stops]   # hourly #connect batches
   heiss-farm targets connect <xAccountId> [--max 5] [--live]   # #connect follow + reply; a rehearsal without --live
   heiss-farm targets engage <xAccountId> [@handle] [--live]   # dry run unless --live
   heiss-farm targets pause <targetId> | resume <targetId>
@@ -402,6 +404,71 @@ async function runConnectScan(
       supply, eligible: candidates.filter((candidate) => candidate.verdict === "eligible").length,
       candidates,
       ...(opts.raw ? { pages } : {}),
+    };
+  } finally {
+    await driver.disconnect(device.id).catch(() => undefined);
+    try { store.locks.releaseDevice(device.id, lockHolder); store.save(); } catch { /* reclaimed on load */ }
+  }
+}
+
+/** People an account has connected with on a local day. */
+function connectedOnDay(store: ReturnType<typeof openStore>, accountId: string, localDay: string): number {
+  return store.state.activity.filter((event) => event.kind === "connect" && event.accountId === accountId
+    && calendarDay(event.at, store.state.settings.timeZone) === localDay).length;
+}
+
+/** One #connect session for one account: a rehearsal unless `live`. */
+async function runConnectBatch(
+  store: ReturnType<typeof openStore>,
+  account: { id: string; handle: string; deviceId: string; displayName?: string; loginEmail?: string;
+    switcherHint?: string; searchTerms?: string[] },
+  opts: { max: number; live: boolean; query?: string; tracePath?: string },
+): Promise<Record<string, unknown> & { stoppedBecause?: string; connected?: number }> {
+  if (store.state.settings.emergencyStop) return { ok: true, persona: account.handle, reason: "emergency_stop" };
+  const device = store.state.devices.find((candidate) => candidate.id === account.deviceId);
+  if (!device) return { ok: false, persona: account.handle, reason: "device_missing" };
+  const lockHolder = `connect-${randomUUID()}`;
+  try { store.locks.acquireDevice(device.id, lockHolder); } catch {
+    return { ok: true, persona: account.handle, reason: "device_busy" };
+  }
+  store.save();
+  const driver = new RealIosDriver(new RealUsbTransport({ commandTimeoutMs: 240_000 }));
+  const context = {
+    platform: "x" as const, handle: account.handle, displayName: account.displayName,
+    loginEmail: account.loginEmail, switcherHint: account.switcherHint,
+    searchTerms: account.searchTerms, uiProfile: store.state.uiProfiles.x,
+  };
+  try {
+    await driver.connect(device.id, device.udid);
+    const session = await runConnectSession(
+      async (action, input) => {
+        const data = (await driver.runAction(device.id, account.id, action, { ...context, ...input } as never)).data ?? {};
+        // --trace <file>: what the phone showed at every step, for diagnosis.
+        if (opts.tracePath) appendFileSync(opts.tracePath, `${JSON.stringify({ at: new Date().toISOString(), action, input, data })}\n`);
+        return data;
+      },
+      {
+        max: opts.max, live: opts.live, query: opts.query,
+        ownedHandles: store.state.accounts.map((candidate) => candidate.handle),
+        alreadyConnected: store.state.engagementTargets.map((record) => record.targetKey),
+        // Human pacing between people when live; a rehearsal has nothing to pace.
+        pause: opts.live ? () => new Promise((resolve) => setTimeout(resolve, 45_000 + Math.random() * 60_000)) : undefined,
+        onFollowed: (handle) => {
+          const now = new Date().toISOString();
+          recordEngagementTarget(store.state.engagementTargets, {
+            accountId: account.id, platform: "x", action: "follow", targetKey: connectTargetKey(handle),
+          }, now);
+          store.pushActivity({ kind: "connect", accountId: account.id, deviceId: device.id, message: `${account.handle} connected with a #connect author` });
+          store.save();
+        },
+      },
+    );
+    const count = (result: string) => session.outcomes.filter((outcome) => outcome.result === result).length;
+    return {
+      ok: true, live: opts.live, persona: account.handle, stoppedBecause: session.stoppedBecause,
+      connected: count("connected"), rehearsed: count("rehearsed"),
+      followedReplyFailed: count("followed_reply_failed"), skipped: count("skipped"),
+      outcomes: session.outcomes,
     };
   } finally {
     await driver.disconnect(device.id).catch(() => undefined);
@@ -1643,10 +1710,46 @@ async function main(): Promise<void> {
               }
             }
           }
+          // #connect schedule: a few people an hour per account, when nothing
+          // else used the phone this tick. A session that X pushes back on
+          // stops that account for the rest of the day.
+          let connectRanThisTick = false;
+          const connectPlan = result.sessions.length === 0 && !deviceUsedForEngagement
+            ? planConnectBatch(store.state.settings.connectSchedule, {
+              nowIso, timeZone: store.state.settings.timeZone,
+              doneToday: (accountId) => connectedOnDay(store, accountId, localDayNow),
+            })
+            : undefined;
+          if (connectPlan) {
+            const connectAccount = store.state.accounts.find((candidate) => candidate.id === connectPlan.accountId);
+            const connectDevice = connectAccount && store.state.devices.find((row) => row.id === connectAccount.deviceId);
+            if (connectAccount && connectDevice?.online && store.state.settings.deviceHealth[connectDevice.id]?.ok === true) {
+              const schedule = store.state.settings.connectSchedule!;
+              // Stamp the hour first: one attempt per account per hour, whatever happens.
+              schedule.lastBatchHour = { ...schedule.lastBatchHour, [connectAccount.id]: connectPlan.hourKey };
+              store.save();
+              connectRanThisTick = true;
+              try {
+                const batch = await runConnectBatch(store, connectAccount, { max: connectPlan.max, live: true });
+                console.log(JSON.stringify({ at: nowIso, connect: { persona: connectAccount.handle, asked: connectPlan.max, connected: batch.connected, stoppedBecause: batch.stoppedBecause ?? batch.reason } }));
+                const pushback = ["follow_not_confirmed", "reply_failed", "reply_text_mismatch", "unfollow_sheet_stuck"];
+                if (batch.stoppedBecause && pushback.includes(batch.stoppedBecause)) {
+                  schedule.stoppedDay = { ...schedule.stoppedDay, [connectAccount.id]: localDayNow };
+                  schedule.stoppedReason = { ...schedule.stoppedReason, [connectAccount.id]: batch.stoppedBecause };
+                  store.pushActivity({ kind: "connect_stopped", accountId: connectAccount.id, deviceId: connectDevice.id,
+                    message: `${connectAccount.handle}: #connect stopped for today — ${batch.stoppedBecause}` });
+                  store.save();
+                  notifyDesktop("Heiss #connect stopped", `${connectAccount.handle}: ${batch.stoppedBecause}. It will not run again today.`);
+                }
+              } catch (error) {
+                console.log(JSON.stringify({ at: nowIso, connectError: error instanceof Error ? error.message.slice(0, 200) : String(error) }));
+              }
+            }
+          }
           // #connect supply log: a short read-only scan when the phone is
           // otherwise idle, so the busiest hours of the day show up over time.
           const supply = store.state.settings.connectSupply;
-          if (supply && result.sessions.length === 0 && !deviceUsedForEngagement
+          if (supply && result.sessions.length === 0 && !deviceUsedForEngagement && !connectRanThisTick
             && (!supply.lastSampleAt || Date.parse(nowIso) - Date.parse(supply.lastSampleAt) >= supply.everyMinutes * 60_000)) {
             const sampler = store.state.accounts.find((candidate) => candidate.id === supply.accountId);
             const samplerDevice = sampler && store.state.devices.find((row) => row.id === sampler.deviceId);
@@ -2217,67 +2320,58 @@ async function main(): Promise<void> {
   }
 
   // ── #connect, stage 2: follow + reply ──────────────────
-  // Rehearsal by default: it opens each post, checks the follow state and puts
-  // the reply in the box, then cancels. Only --live taps Follow and Post.
+  // Rehearsal by default: it opens each post, checks the reply screen and types
+  // the reply, then cancels. Only --live taps Follow, Like and Post.
   if (cmd === "targets" && args[1] === "connect") {
     const store = openStore(args);
     const account = store.state.accounts.find((candidate) => candidate.id === args[2]);
     if (!account || account.platform !== "x") throw new Error("Usage: targets connect <xAccountId> [--max 5] [--live] [--query \"filter:blue_verified #connect\"]");
-    if (store.state.settings.emergencyStop) { print({ ok: true, persona: account.handle, reason: "emergency_stop" }); return; }
-    const device = store.state.devices.find((candidate) => candidate.id === account.deviceId);
-    if (!device) throw new Error("Account device is missing");
     const live = hasFlag(args, "--live");
     // One command stays within the forwarded-command time limit; bigger
     // batches belong to the scheduler, not a single call.
     const max = Math.min(Math.max(Number(getArg(args, "--max") ?? 5), 1), live ? 8 : 12);
-    const lockHolder = `connect-${randomUUID()}`;
-    try { store.locks.acquireDevice(device.id, lockHolder); } catch {
-      print({ ok: true, persona: account.handle, reason: "device_busy" }); return;
-    }
-    store.save();
-    const driver = new RealIosDriver(new RealUsbTransport({ commandTimeoutMs: 240_000 }));
-    const tracePath = getArg(args, "--trace");
-    const context = {
-      platform: "x" as const, handle: account.handle, displayName: account.displayName,
-      loginEmail: account.loginEmail, switcherHint: account.switcherHint,
-      searchTerms: account.searchTerms, uiProfile: store.state.uiProfiles.x,
-    };
-    try {
-      await driver.connect(device.id, device.udid);
-      const session = await runConnectSession(
-        async (action, input) => {
-          const data = (await driver.runAction(device.id, account.id, action, { ...context, ...input } as never)).data ?? {};
-          // --trace <file>: what the phone showed at every step, for diagnosis.
-          if (tracePath) appendFileSync(tracePath, `${JSON.stringify({ at: new Date().toISOString(), action, input, data })}\n`);
-          return data;
-        },
-        {
-          max, live, query: getArg(args, "--query"),
-          ownedHandles: store.state.accounts.map((candidate) => candidate.handle),
-          alreadyConnected: store.state.engagementTargets.map((record) => record.targetKey),
-          // Human pacing between people when live; a rehearsal has nothing to pace.
-          pause: live ? () => new Promise((resolve) => setTimeout(resolve, 45_000 + Math.random() * 60_000)) : undefined,
-          onFollowed: (handle) => {
-            const now = new Date().toISOString();
-            recordEngagementTarget(store.state.engagementTargets, {
-              accountId: account.id, platform: "x", action: "follow", targetKey: connectTargetKey(handle),
-            }, now);
-            store.pushActivity({ kind: "connect", accountId: account.id, deviceId: device.id, message: `${account.handle} connected with a #connect author` });
-            store.save();
-          },
-        },
-      );
-      const count = (result: string) => session.outcomes.filter((outcome) => outcome.result === result).length;
-      print({
-        ok: true, live, persona: account.handle, stoppedBecause: session.stoppedBecause,
-        connected: count("connected"), rehearsed: count("rehearsed"),
-        followedReplyFailed: count("followed_reply_failed"), skipped: count("skipped"),
-        outcomes: session.outcomes,
+    print(await runConnectBatch(store, account, { max, live, query: getArg(args, "--query"), tracePath: getArg(args, "--trace") }));
+    return;
+  }
+
+  // ── #connect schedule: a few people an hour ────────────
+  if (cmd === "targets" && args[1] === "connect-schedule") {
+    const store = openStore(args);
+    const byHandle = (handle: string) => store.state.accounts.find((candidate) => candidate.platform === "x"
+      && candidate.handle.toLowerCase() === handle.toLowerCase());
+    const setArg = getArg(args, "--set");
+    if (setArg) {
+      // --set "@manxlab=3/72,@zygosdev=3/72,@sterlingdgtl=3/30" [--avoid "@manxlab=01:05|04:35"]
+      const avoid = new Map((getArg(args, "--avoid") ?? "").split(",").filter(Boolean).map((part) => {
+        const [handle, times] = part.split("=");
+        return [handle!.toLowerCase(), (times ?? "").split("|").filter(Boolean)] as const;
+      }));
+      const accounts = setArg.split(",").map((part) => {
+        const [handle, numbers] = part.split("=");
+        const account = byHandle(handle ?? "");
+        const [perHour, dailyCap] = (numbers ?? "").split("/").map(Number);
+        if (!account || !perHour || !dailyCap) throw new Error(`connect-schedule: cannot read "${part}" (want @handle=perHour/dailyCap)`);
+        return { accountId: account.id, perHour, dailyCap, avoidTimes: avoid.get(account.handle.toLowerCase()) };
       });
-    } finally {
-      await driver.disconnect(device.id).catch(() => undefined);
-      try { store.locks.releaseDevice(device.id, lockHolder); store.save(); } catch { /* reclaimed on load */ }
+      store.state.settings.connectSchedule = { ...store.state.settings.connectSchedule, enabled: store.state.settings.connectSchedule?.enabled ?? false, accounts };
     }
+    const schedule = store.state.settings.connectSchedule;
+    if (hasFlag(args, "--enable") || hasFlag(args, "--disable")) {
+      if (!schedule?.accounts.length) throw new Error("connect-schedule: set the accounts first with --set");
+      schedule.enabled = hasFlag(args, "--enable");
+    }
+    if (hasFlag(args, "--clear-stops") && schedule) { schedule.stoppedDay = {}; schedule.stoppedReason = {}; }
+    if (setArg || hasFlag(args, "--enable") || hasFlag(args, "--disable") || hasFlag(args, "--clear-stops")) store.save();
+    const today = calendarDay(new Date().toISOString(), store.state.settings.timeZone);
+    print({
+      ok: true, enabled: schedule?.enabled ?? false,
+      accounts: (schedule?.accounts ?? []).map((item) => ({
+        handle: store.state.accounts.find((candidate) => candidate.id === item.accountId)?.handle,
+        perHour: item.perHour, dailyCap: item.dailyCap, avoidTimes: item.avoidTimes,
+        connectedToday: connectedOnDay(store, item.accountId, today),
+        stopped: schedule?.stoppedDay?.[item.accountId] === today ? schedule.stoppedReason?.[item.accountId] : undefined,
+      })),
+    });
     return;
   }
 

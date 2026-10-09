@@ -23,6 +23,10 @@ export interface DailySummary {
   engagementsAttempted: number;
   /** Personas scheduled for curated engagement today (a time and an active target). */
   engagementsExpected: number;
+  /** People connected with through the #connect routine today. */
+  connected: number;
+  /** Accounts the #connect routine stopped today after X pushed back. */
+  connectStopped: string[];
   /** Expected personas that never attempted an engagement today. */
   engagementsMissed: string[];
   engagementsLanded: number;
@@ -100,6 +104,12 @@ export function buildDailySummary(state: FarmState, nowIso: string): DailySummar
     `engagements ${engagementsLanded}/${Math.max(expectedPersonas.length, touched.length)}`,
   ];
   if (engagementsMissed.length > 0) parts.push(`never attempted: ${engagementsMissed.join(", ")}`);
+  // #connect: people followed and replied to today, and any account X stopped.
+  const connected = state.activity.filter((event) => event.kind === "connect" && ranToday(event.at)).length;
+  const connectStopped = Object.entries(state.settings.connectSchedule?.stoppedDay ?? {})
+    .filter(([, stoppedDay]) => stoppedDay === day).map(([accountId]) => handleOf(accountId));
+  if (connected > 0 || state.settings.connectSchedule?.enabled) parts.push(`connect ${connected}`);
+  if (connectStopped.length > 0) parts.push(`connect stopped: ${connectStopped.join(", ")}`);
   if (blockedPersonas.length > 0) parts.push(`stopped: ${blockedPersonas.join(", ")}`);
   if (pausedTargets.length > 0) parts.push(`targets paused: ${pausedTargets.join(", ")}`);
   if (needsAttention.length > 0) parts.push(`needs you: ${needsAttention.join(", ")}`);
@@ -113,6 +123,8 @@ export function buildDailySummary(state: FarmState, nowIso: string): DailySummar
     engagementsAttempted: touched.length,
     engagementsLanded,
     engagementsExpected: expectedPersonas.length,
+    connected,
+    connectStopped,
     engagementsMissed,
     blockedPersonas,
     pausedTargets,
@@ -128,6 +140,7 @@ export function summaryIsBad(summary: DailySummary): boolean {
     || summary.warmupsCompleted < summary.warmupsScheduled
     || summary.engagementsLanded < summary.engagementsAttempted
     || summary.engagementsMissed.length > 0
+    || summary.connectStopped.length > 0
     || summary.blockedPersonas.length > 0
     || summary.needsAttention.length > 0
     || summary.deviceIssues.length > 0;

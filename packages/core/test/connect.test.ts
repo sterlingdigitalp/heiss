@@ -2,7 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   connectEligibility, connectFirstName, connectFollowConfirmed, connectReply, connectTargetKey,
-  connectSupplyByHour, connectSupplySample, parseConnectPostPage, parseConnectResults,
+  connectStartMinute, connectSupplyByHour, connectSupplySample, parseConnectPostPage, parseConnectResults,
+  planConnectBatch, type ConnectSchedule,
   CONNECT_REPLY_VARIANTS, type ScreenLine,
 } from "../src/index.js";
 
@@ -143,5 +144,54 @@ describe("#connect: supply by time of day", () => {
     const shallow = connectSupplySample(people([3]), "2026-10-09T21:40:00.000Z"); // reached 3 min: too little to say
     const byHour = connectSupplyByHour([busy, quiet, shallow], "America/Chicago");
     assert.deepEqual(byHour, [{ hour: 9, samples: 1, postsPerHour: 8 }, { hour: 16, samples: 1, postsPerHour: 4 }]);
+  });
+});
+
+describe("#connect: the hourly schedule", () => {
+  const tz = "America/Chicago";
+  const schedule = (): ConnectSchedule => ({
+    enabled: true,
+    accounts: [
+      { accountId: "manx", perHour: 3, dailyCap: 72, avoidTimes: ["14:05"] },
+      { accountId: "sterling", perHour: 3, dailyCap: 10 },
+    ],
+  });
+  const at = (hhmm: string) => `2026-10-09T${hhmm}:00.000-05:00`;
+  const none = () => 0;
+
+  it("starts each account at its own minute, different from hour to hour", () => {
+    const minutes = ["2026-10-09T13", "2026-10-09T14", "2026-10-09T15", "2026-10-09T16"].map((hour) => connectStartMinute("manx", hour));
+    assert.ok(new Set(minutes).size >= 3, `varies: ${minutes}`);
+    assert.ok(minutes.every((minute) => minute >= 0 && minute <= 40));
+    const start = connectStartMinute("manx", "2026-10-09T13");
+    const before = `2026-10-09T13:${String(Math.max(start - 1, 0)).padStart(2, "0")}:00.000-05:00`;
+    if (start > 0) assert.equal(planConnectBatch({ ...schedule(), accounts: [schedule().accounts[0]!] }, { nowIso: before, timeZone: tz, doneToday: none }), undefined);
+  });
+
+  it("runs the larger account first, one batch per account per hour", () => {
+    const s = schedule();
+    const first = planConnectBatch(s, { nowIso: at("13:45"), timeZone: tz, doneToday: () => 39 });
+    assert.equal(first?.accountId, "manx");
+    s.lastBatchHour = { manx: first!.hourKey };
+    assert.equal(planConnectBatch(s, { nowIso: at("13:45"), timeZone: tz, doneToday: () => 9 })?.accountId, "sterling");
+    s.lastBatchHour.sterling = first!.hourKey;
+    assert.equal(planConnectBatch(s, { nowIso: at("13:45"), timeZone: tz, doneToday: none }), undefined, "both done this hour");
+  });
+
+  it("takes 3 on pace, 4 when behind, and never passes the daily cap", () => {
+    const only = { ...schedule(), accounts: [{ accountId: "manx", perHour: 3, dailyCap: 72 }] };
+    assert.equal(planConnectBatch(only, { nowIso: at("13:59"), timeZone: tz, doneToday: () => 39 })?.max, 3, "13 hours x 3 done");
+    assert.equal(planConnectBatch(only, { nowIso: at("13:59"), timeZone: tz, doneToday: () => 30 })?.max, 4, "a lean hour earlier");
+    const capped = { ...schedule(), accounts: [{ accountId: "sterling", perHour: 3, dailyCap: 10 }] };
+    assert.equal(planConnectBatch(capped, { nowIso: at("13:59"), timeZone: tz, doneToday: () => 9 })?.max, 1);
+    assert.equal(planConnectBatch(capped, { nowIso: at("13:59"), timeZone: tz, doneToday: () => 10 }), undefined);
+  });
+
+  it("keeps clear of the account's own posts, skips a stopped account, and is off unless enabled", () => {
+    const s = schedule();
+    assert.equal(planConnectBatch(s, { nowIso: at("13:55"), timeZone: tz, doneToday: none })?.accountId, "sterling", "manx posts at 14:05");
+    s.stoppedDay = { sterling: "2026-10-09" };
+    assert.equal(planConnectBatch(s, { nowIso: at("13:55"), timeZone: tz, doneToday: none }), undefined);
+    assert.equal(planConnectBatch({ ...schedule(), enabled: false }, { nowIso: at("13:59"), timeZone: tz, doneToday: none }), undefined);
   });
 });

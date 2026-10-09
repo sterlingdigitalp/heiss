@@ -348,6 +348,8 @@ export interface FarmSettings {
   scheduleBackfillVersion: number;
   /** Periodic read-only "#connect" scans that log how many fresh posts there are, by time of day. */
   connectSupply?: { accountId: string; everyMinutes: number; lastSampleAt?: string };
+  /** The hourly "#connect" batches; off unless enabled. */
+  connectSchedule?: import("./connect.js").ConnectSchedule;
   /** Likes/follows and other engagement are omitted unless a human enables them. */
   /** Last observed state is persisted so disconnect alerts fire once per transition. */
   deviceStates: Record<string, "online" | "offline">;
