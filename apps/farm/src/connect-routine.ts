@@ -25,6 +25,8 @@ export interface ConnectSessionOptions {
   ownedHandles: string[];
   /** connectTargetKey fingerprints of everyone already connected with. */
   alreadyConnected: string[];
+  /** Oldest post to accept, in minutes (3 hours normally, 4 in a lean hour). */
+  maxAgeMinutes?: number;
   /** connectFollowingKey fingerprints of people THIS account is known to follow already. */
   knownFollowing?: string[];
   /** Called when a post page shows this account already follows its author. */
@@ -90,7 +92,7 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
         && ![...handled].some((seen) => nearlySameHandle(seen, candidate.handle)))
       .map((candidate) => ({ candidate, point: connectPostTapPoint(page, candidate.handle) }))
       .find((item) => {
-        const verdict = connectEligibility(item.candidate, { ownedHandles: opts.ownedHandles, alreadyConnected: connected });
+        const verdict = connectEligibility(item.candidate, { ownedHandles: opts.ownedHandles, alreadyConnected: connected, maxAgeMinutes: opts.maxAgeMinutes });
         // Someone this account is already known to follow is passed over on
         // the results page, without opening their post again.
         const reason = !verdict.ok ? verdict.reason
@@ -144,7 +146,7 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
       page = linesOf((await step("x:connect_commit", { connectRehearse: true })).lines);
     };
     if (!sameConnectHandle(handle, candidate.handle)) { await skip("opened_a_different_page", candidate.handle); continue; }
-    const verdict = connectEligibility({ ...candidate, handle }, { ownedHandles: opts.ownedHandles, alreadyConnected: connected });
+    const verdict = connectEligibility({ ...candidate, handle }, { ownedHandles: opts.ownedHandles, alreadyConnected: connected, maxAgeMinutes: opts.maxAgeMinutes });
     if (!verdict.ok) { await skip(verdict.reason); continue; }
     if (opened.alreadyFollowing || !opened.followButton) {
       if (opened.alreadyFollowing) { knownFollowing.add(connectFollowingKey(handle)); opts.onAlreadyFollowing?.(handle); }

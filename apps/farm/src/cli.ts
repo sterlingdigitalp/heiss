@@ -50,6 +50,7 @@ import {
   connectSupplyByHour,
   connectSupplySample,
   planConnectBatch,
+  connectConditions,
   isConnectResultsPage,
   type ConnectSupplySample,
   connectTargetKey,
@@ -423,7 +424,7 @@ async function runConnectBatch(
   store: ReturnType<typeof openStore>,
   account: { id: string; handle: string; deviceId: string; displayName?: string; loginEmail?: string;
     switcherHint?: string; searchTerms?: string[] },
-  opts: { max: number; live: boolean; query?: string; tracePath?: string },
+  opts: { max: number; live: boolean; query?: string; tracePath?: string; maxAgeMinutes?: number },
 ): Promise<Record<string, unknown> & { stoppedBecause?: string; connected?: number }> {
   if (store.state.settings.emergencyStop) return { ok: true, persona: account.handle, reason: "emergency_stop" };
   const device = store.state.devices.find((candidate) => candidate.id === account.deviceId);
@@ -449,7 +450,7 @@ async function runConnectBatch(
         return data;
       },
       {
-        max: opts.max, live: opts.live, query: opts.query,
+        max: opts.max, live: opts.live, query: opts.query, maxAgeMinutes: opts.maxAgeMinutes,
         ownedHandles: store.state.accounts.map((candidate) => candidate.handle),
         // Only real connections block every account; "xfollowing:" records are
         // one account's own and are passed separately.
@@ -1725,9 +1726,13 @@ async function main(): Promise<void> {
           // else used the phone this tick. A session that X pushes back on
           // stops that account for the rest of the day.
           let connectRanThisTick = false;
+          // The latest supply reading decides how hard to fish this hour: a busy
+          // hour takes more people, a lean one accepts posts up to 4 hours old.
+          const supplyLog = readConnectSupply(getArg(args, "--data") ?? defaultDataDir());
+          const conditions = connectConditions(supplyLog[supplyLog.length - 1], nowIso);
           const connectPlan = result.sessions.length === 0 && !deviceUsedForEngagement
             ? planConnectBatch(store.state.settings.connectSchedule, {
-              nowIso, timeZone: store.state.settings.timeZone,
+              nowIso, timeZone: store.state.settings.timeZone, busy: conditions.busy,
               doneToday: (accountId) => connectedOnDay(store, accountId, localDayNow),
             })
             : undefined;
@@ -1749,10 +1754,10 @@ async function main(): Promise<void> {
                 const traceDir = join(getArg(args, "--data") ?? defaultDataDir(), "connect-trace");
                 mkdirSync(traceDir, { recursive: true });
                 const batch = await runConnectBatch(store, connectAccount, {
-                  max: connectPlan.max, live: true,
+                  max: connectPlan.max, live: true, maxAgeMinutes: conditions.maxAgeMinutes,
                   tracePath: join(traceDir, `${connectPlan.hourKey}-${connectAccount.handle.replace(/[^A-Za-z0-9_]/g, "")}.jsonl`),
                 });
-                console.log(JSON.stringify({ at: nowIso, connect: { persona: connectAccount.handle, asked: connectPlan.max, connected: batch.connected, stoppedBecause: batch.stoppedBecause ?? batch.reason } }));
+                console.log(JSON.stringify({ at: nowIso, connect: { persona: connectAccount.handle, asked: connectPlan.max, connected: batch.connected, stoppedBecause: batch.stoppedBecause ?? batch.reason, busy: conditions.busy, lean: conditions.lean } }));
                 // X refusing, or a reply that would not post. A reply the routine
                 // could not read back is its own failure, not X's: it skips that
                 // person but does not stop the account for the day.
@@ -2373,9 +2378,9 @@ async function main(): Promise<void> {
       const accounts = setArg.split(",").map((part) => {
         const [handle, numbers] = part.split("=");
         const account = byHandle(handle ?? "");
-        const [perHour, dailyCap] = (numbers ?? "").split("/").map(Number);
-        if (!account || !perHour || !dailyCap) throw new Error(`connect-schedule: cannot read "${part}" (want @handle=perHour/dailyCap)`);
-        return { accountId: account.id, perHour, dailyCap, avoidTimes: avoid.get(account.handle.toLowerCase()) };
+        const [perHour, dailyCap, busyPerHour] = (numbers ?? "").split("/").map(Number);
+        if (!account || !perHour || !dailyCap) throw new Error(`connect-schedule: cannot read "${part}" (want @handle=perHour/dailyCap[/busyPerHour])`);
+        return { accountId: account.id, perHour, dailyCap, ...(busyPerHour ? { busyPerHour } : {}), avoidTimes: avoid.get(account.handle.toLowerCase()) };
       });
       store.state.settings.connectSchedule = { ...store.state.settings.connectSchedule, enabled: store.state.settings.connectSchedule?.enabled ?? false, accounts };
     }
@@ -2391,7 +2396,7 @@ async function main(): Promise<void> {
       ok: true, enabled: schedule?.enabled ?? false,
       accounts: (schedule?.accounts ?? []).map((item) => ({
         handle: store.state.accounts.find((candidate) => candidate.id === item.accountId)?.handle,
-        perHour: item.perHour, dailyCap: item.dailyCap, avoidTimes: item.avoidTimes,
+        perHour: item.perHour, busyPerHour: item.busyPerHour ?? item.perHour * 2, dailyCap: item.dailyCap, avoidTimes: item.avoidTimes,
         connectedToday: connectedOnDay(store, item.accountId, today),
         stopped: schedule?.stoppedDay?.[item.accountId] === today ? schedule.stoppedReason?.[item.accountId] : undefined,
       })),

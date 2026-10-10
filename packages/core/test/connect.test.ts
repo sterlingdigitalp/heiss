@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   connectEligibility, connectFirstName, connectFollowConfirmed, connectReply, connectTargetKey,
   connectStartMinute, connectSupplyByHour, connectSupplySample, parseConnectPostPage, parseConnectResults,
-  planConnectBatch, type ConnectSchedule,
+  planConnectBatch, connectConditions, type ConnectSchedule,
   CONNECT_REPLY_VARIANTS, type ScreenLine,
 } from "../src/index.js";
 
@@ -202,5 +202,28 @@ describe("#connect: the hourly schedule", () => {
     s.stoppedDay = { sterling: "2026-10-09" };
     assert.equal(planConnectBatch(s, { nowIso: at("13:55"), timeZone: tz, doneToday: none }), undefined);
     assert.equal(planConnectBatch({ ...schedule(), enabled: false }, { nowIso: at("13:59"), timeZone: tz, doneToday: none }), undefined);
+  });
+});
+
+describe("#connect: fishing to the conditions", () => {
+  const sample = (fresh60: number, at = "2026-10-10T16:00:00.000Z") => ({ at, fresh15: 0, fresh30: 0, fresh60, read: 12, reachedMinutes: 90 });
+  const now = "2026-10-10T16:20:00.000Z";
+  it("a busy hour fishes longer; a lean hour looks back 4 hours", () => {
+    assert.deepEqual(connectConditions(sample(12), now), { busy: true, lean: false, maxAgeMinutes: 180 });
+    assert.deepEqual(connectConditions(sample(5), now), { busy: false, lean: true, maxAgeMinutes: 240 });
+    assert.deepEqual(connectConditions(sample(8), now), { busy: false, lean: false, maxAgeMinutes: 180 });
+    assert.equal(connectConditions(sample(12, "2026-10-10T15:00:00.000Z"), now).busy, false, "an hour-old reading says nothing");
+  });
+  it("takes twice as many in a busy hour, still within the cap", () => {
+    const one = { enabled: true, accounts: [{ accountId: "s", perHour: 3, dailyCap: 120 }] };
+    const opts = { nowIso: "2026-10-10T13:45:00.000-05:00", timeZone: "America/Chicago", doneToday: () => 0 };
+    assert.equal(planConnectBatch(one, opts)?.max, 3);
+    assert.equal(planConnectBatch(one, { ...opts, busy: true })?.max, 6);
+    assert.equal(planConnectBatch({ ...one, accounts: [{ accountId: "s", perHour: 3, dailyCap: 4 }] }, { ...opts, busy: true })?.max, 4);
+  });
+  it("a post 3.5 hours old qualifies only in a lean hour", () => {
+    const old = { handle: "@x_person", displayName: "X", firstName: "X", ageMinutes: 210 };
+    assert.equal(connectEligibility(old, { ownedHandles: [], alreadyConnected: [] }).reason, "too_old");
+    assert.equal(connectEligibility(old, { ownedHandles: [], alreadyConnected: [], maxAgeMinutes: 240 }).reason, "eligible");
   });
 });

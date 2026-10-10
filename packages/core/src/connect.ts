@@ -37,6 +37,22 @@ export interface ConnectCandidate {
 
 /** Posts this old or older are skipped; newer is better. */
 export const CONNECT_MAX_AGE_MINUTES = 180;
+/** In a lean hour the window stretches to 4 hours (operator's rule). */
+export const CONNECT_LEAN_MAX_AGE_MINUTES = 240;
+/** New posts in the last hour at or above which an hour counts as busy, and below which lean. */
+export const CONNECT_BUSY_FRESH60 = 10;
+export const CONNECT_LEAN_FRESH60 = 7;
+
+/** Read the latest supply sample: busy hours fish longer, lean hours look further back. */
+export function connectConditions(latest: ConnectSupplySample | undefined, nowIso: string): {
+  busy: boolean; lean: boolean; maxAgeMinutes: number;
+} {
+  // Only a recent reading says anything about now.
+  const fresh = latest && Date.parse(nowIso) - Date.parse(latest.at) <= 45 * 60_000 && latest.reachedMinutes >= 60;
+  const busy = Boolean(fresh && latest!.fresh60 >= CONNECT_BUSY_FRESH60);
+  const lean = Boolean(fresh && latest!.fresh60 < CONNECT_LEAN_FRESH60);
+  return { busy, lean, maxAgeMinutes: lean ? CONNECT_LEAN_MAX_AGE_MINUTES : CONNECT_MAX_AGE_MINUTES };
+}
 
 /** The operator's own wordings, verbatim. `<name>` is replaced; two have none. */
 export const CONNECT_REPLY_VARIANTS = [
@@ -134,10 +150,10 @@ export function connectFirstName(displayName: string, handle: string): string {
  */
 export function connectEligibility(
   candidate: ConnectCandidate,
-  opts: { ownedHandles: string[]; alreadyConnected: Iterable<string> },
+  opts: { ownedHandles: string[]; alreadyConnected: Iterable<string>; maxAgeMinutes?: number },
 ): { ok: boolean; reason: "eligible" | "too_old" | "own_account" | "already_connected" } {
   const key = candidate.handle.toLowerCase();
-  if (candidate.ageMinutes >= CONNECT_MAX_AGE_MINUTES) return { ok: false, reason: "too_old" };
+  if (candidate.ageMinutes >= (opts.maxAgeMinutes ?? CONNECT_MAX_AGE_MINUTES)) return { ok: false, reason: "too_old" };
   if (opts.ownedHandles.some((owned) => owned.toLowerCase() === key)) return { ok: false, reason: "own_account" };
   // `alreadyConnected` holds connectTargetKey fingerprints.
   if (new Set(opts.alreadyConnected).has(connectTargetKey(candidate.handle))) {
@@ -348,6 +364,8 @@ export interface ConnectScheduleAccount {
   accountId: string;
   /** People per hour on pace; one more is taken while behind. */
   perHour: number;
+  /** People per hour when the hour is busy (fish longer while the pool is rich). */
+  busyPerHour?: number;
   dailyCap: number;
   /** Local "HH:mm" times to stay clear of (the account's own scheduled posts). */
   avoidTimes?: string[];
@@ -396,7 +414,7 @@ export function connectStartMinute(accountId: string, hourKey: string): number {
  */
 export function planConnectBatch(
   schedule: ConnectSchedule | undefined,
-  opts: { nowIso: string; timeZone: string; doneToday: (accountId: string) => number },
+  opts: { nowIso: string; timeZone: string; doneToday: (accountId: string) => number; busy?: boolean },
 ): { accountId: string; max: number; hourKey: string } | undefined {
   if (!schedule?.enabled) return undefined;
   const now = localParts(opts.nowIso, opts.timeZone);
@@ -419,7 +437,8 @@ export function planConnectBatch(
     const from = schedule.paceFrom?.[account.accountId];
     const startHour = from?.startsWith(now.day) ? Number(from.slice(11, 13)) : now.hour;
     const behind = done < (now.hour - startHour) * account.perHour;
-    const max = Math.min(account.perHour + (behind ? 1 : 0), account.dailyCap - done);
+    const base = opts.busy ? Math.max(account.busyPerHour ?? account.perHour * 2, account.perHour) : account.perHour;
+    const max = Math.min(base + (behind ? 1 : 0), account.dailyCap - done);
     if (max <= 0) continue;
     return { accountId: account.accountId, max, hourKey };
   }
