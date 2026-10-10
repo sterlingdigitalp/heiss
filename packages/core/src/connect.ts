@@ -12,6 +12,21 @@ export function connectTargetKey(handle: string): string {
   return `xconnect:${createHash("sha256").update(normalized).digest("hex").slice(0, 32)}`;
 }
 
+const LOOKALIKES: Record<string, string> = {
+  а: "a", в: "b", е: "e", к: "k", м: "m", н: "h", о: "o", п: "n", р: "p", с: "c", т: "t", у: "y", х: "x",
+  і: "i", ј: "j", ѕ: "s", А: "A", В: "B", Е: "E", К: "K", М: "M", Н: "H", О: "O", Р: "P", С: "C", Т: "T",
+  Х: "X", І: "I", α: "a", β: "b", ε: "e", ι: "i", κ: "k", ν: "v", ο: "o", ρ: "p", τ: "t", υ: "u", χ: "x",
+};
+
+/**
+ * OCR sometimes returns Cyrillic or Greek letters that look like Latin ones
+ * ("@Апmоl1578" for @Anmol1578). Handles are Latin, so fold them back before
+ * reading a line.
+ */
+export function foldLookalikes(text: string): string {
+  return text.replace(/[\u0370-\u03ff\u0400-\u04ff]/g, (ch) => LOOKALIKES[ch] ?? ch);
+}
+
 /** One OCR line from the runner: text plus its position on screen (0…1, top-left origin). */
 /**
  * Fingerprint for "this account already follows them", learned by opening a
@@ -81,7 +96,7 @@ function ageMinutes(text: string): number | undefined {
 export function parseConnectResults(pages: ScreenLine[][]): ConnectCandidate[] {
   const seen = new Map<string, ConnectCandidate>();
   for (const page of pages) {
-    const lines = [...page].sort((a, b) => a.y - b.y || a.x - b.x);
+    const lines = page.map((line) => ({ ...line, t: foldLookalikes(line.t) })).sort((a, b) => a.y - b.y || a.x - b.x);
     lines.forEach((line, index) => {
       const handleMatch = HANDLE.exec(line.t);
       if (!handleMatch) return;
@@ -239,7 +254,8 @@ function authorRowPlaceholder(lines: ScreenLine[]): ScreenLine | undefined {
 }
 
 /** Read an opened post page: who wrote it, the Follow button, the icon row. */
-export function parseConnectPostPage(lines: ScreenLine[]): ConnectPostPage {
+export function parseConnectPostPage(raw: ScreenLine[]): ConnectPostPage {
+  const lines = raw.map((line) => ({ ...line, t: foldLookalikes(line.t) }));
   const top = lines.filter((line) => line.y < 0.36);
   const handleLine = top.find((line) => /^@[A-Za-z0-9_]{2,15}$/.test(line.t.trim()));
   const placeholder = authorRowPlaceholder(lines);

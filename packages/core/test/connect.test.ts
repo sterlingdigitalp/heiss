@@ -227,3 +227,13 @@ describe("#connect: fishing to the conditions", () => {
     assert.equal(connectEligibility(old, { ownedHandles: [], alreadyConnected: [], maxAgeMinutes: 240 }).reason, "eligible");
   });
 });
+
+describe("#connect: lookalike letters", () => {
+  it("reads a handle OCR returned with Cyrillic letters (real capture, 2026-10-09)", () => {
+    const page = parseConnectPostPage([
+      { t: "Post", x: 0.45, y: 0.05, w: 0.1, h: 0.02 }, { t: "Anmol Yadav", x: 0.15, y: 0.12, w: 0.3, h: 0.02 },
+      { t: "@Апmоl1578", x: 0.16, y: 0.15, w: 0.3, h: 0.02 },
+    ]);
+    assert.equal(page.handle, "@Anmol1578");
+  });
+});

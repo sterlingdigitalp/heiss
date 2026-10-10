@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.10.2"
+private let heissRunnerBuild = "heiss-runner-2026.10.10.3"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1635,10 +1635,19 @@ final class HeissRunnerUITests: XCTestCase {
                                 && observation.topCandidates(1).first?.string.trimmingCharacters(in: .whitespaces).lowercased() == "post"
                         }
                     }
-                    if try screenContainsTextUsingOCR("Unfollow") {
+                    // X's own sheet reads "Unfollow @handle" low on the screen. The
+                    // bare word anywhere matched an analytics screenshot inside a
+                    // post ("Follows over time … Unfollows", 2026-10-10).
+                    func unfollowSheetVisible() throws -> Bool {
+                        try recognizedTextObservationsUsingOCR().contains { observation in
+                            let line = (observation.topCandidates(1).first?.string ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+                            return observation.boundingBox.midY < 0.55 && (line.hasPrefix("unfollow @") || line == "unfollow")
+                        }
+                    }
+                    if try unfollowSheetVisible() {
                         _ = try tapTextUsingOCR(surface: window, expected: "Cancel", minimumScreenY: 0.5, maximumScreenY: 1.0)
                         Thread.sleep(forTimeInterval: 1.0)
-                        report["follow"] = try screenContainsTextUsingOCR("Unfollow") ? "unfollow_sheet_stuck" : "already_following"
+                        report["follow"] = try unfollowSheetVisible() ? "unfollow_sheet_stuck" : "already_following"
                     } else if try !onPostPage() {
                         // One back: a DM or profile screen returns to the post.
                         tap(number("connectBackX") ?? 0.06, number("connectBackY") ?? 0.075)
@@ -1672,7 +1681,15 @@ final class HeissRunnerUITests: XCTestCase {
                 // read as "@KritishloT" cancelled a correct reply, 2026-10-08),
                 // so compare with those folded together.
                 func folded(_ value: String) -> String {
-                    String(value.lowercased().compactMap { ch -> Character? in
+                    // OCR sometimes returns Cyrillic or Greek letters that look like
+                    // Latin ones ("@Апmоl1578" for @Anmol1578): fold them first.
+                    let lookalike: [Character: Character] = [
+                        "а": "a", "в": "b", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "п": "n",
+                        "р": "p", "с": "c", "т": "t", "у": "y", "х": "x", "і": "i", "ј": "j", "ѕ": "s",
+                        "α": "a", "β": "b", "ε": "e", "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p",
+                        "τ": "t", "υ": "u", "χ": "x",
+                    ]
+                    return String(value.lowercased().map { lookalike[$0] ?? $0 }.compactMap { ch -> Character? in
                         switch ch {
                         case "i", "l", "1", "|": return "l"
                         case "o", "0": return "o"
