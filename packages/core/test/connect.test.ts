@@ -98,6 +98,9 @@ describe("#connect: the hidden Follow button", () => {
   it("confirms a follow only once the button has become Message-sized", () => {
     assert.equal(connectFollowConfirmed(page(0.170, 0.128)), true);
     assert.equal(connectFollowConfirmed(page(0.1677, 0.125)), true, "the narrowest real Message so far");
+    // A post's own words are not X refusing (real capture, 2026-10-09).
+    assert.equal(connectFollowConfirmed([...page(0.1678, 0.128),
+      { t: "notch into 20 tools: today's revenue, Claude & Codex limits, agent alerts", x: 0.02, y: 0.31, w: 0.9, h: 0.02 }]), true);
     assert.equal(connectFollowConfirmed(page(0.161, 0.121)), false, "still Follow: X did not take it");
     assert.equal(connectFollowConfirmed([...page(0.170, 0.128), { t: "You are unable to follow more people at this time.", x: 0.1, y: 0.5, w: 0.8, h: 0.02 }]), false);
   });

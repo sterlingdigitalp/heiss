@@ -260,7 +260,11 @@ export function parseConnectPostPage(lines: ScreenLine[]): ConnectPostPage {
  * it — the first sign of a limit.
  */
 export function connectFollowConfirmed(lines: ScreenLine[]): boolean {
-  const refused = /unable to follow|cannot follow|can't follow|limit|try again later|something went wrong/i;
+  // X's own refusals, as whole phrases. A bare "limit" matched a post that
+  // talked about "Claude & Codex limits" and stopped a follow that had landed
+  // (2026-10-09). The button's size is the real proof; this only catches X
+  // saying no in words.
+  const refused = /unable to follow|cannot follow|can['’]t follow|follow limit|reached the limit|try again later|something went wrong|temporarily (limited|restricted)/i;
   if (lines.some((line) => refused.test(line.t))) return false;
   const placeholder = authorRowPlaceholder(lines);
   return placeholder !== undefined && placeholder.w >= CONNECT_MESSAGE_FROM_WIDTH;
