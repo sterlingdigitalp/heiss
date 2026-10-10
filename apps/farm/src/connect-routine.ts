@@ -177,6 +177,9 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
     const probe = await step("x:connect_commit", {
       connectRehearse: true, connectBack: false, connectProbe: true,
       connectReplyX: first.found.x, connectReplyY: first.found.y, connectExpectHandle: handle,
+      // Also type the reply and read it back, then discard it: proven before
+      // anyone is followed.
+      connectProbeText: reply.text,
     });
     if (probe.probe !== "ok") { await skip(String(probe.probe ?? "reply_screen_not_checked")); continue; }
 

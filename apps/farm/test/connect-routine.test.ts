@@ -94,6 +94,15 @@ describe("#connect session", () => {
     assert.equal(run.stoppedBecause, "reached_max");
   });
 
+  it("if the reply cannot be typed and read back during the check, nobody is followed", async () => {
+    const phone = fakePhone({ probe: "reply_text_mismatch" });
+    const run = await runConnectSession(phone.step, { ...base, max: 5, live: true, maxScrolls: 0 });
+    assert.equal(phone.followed.size, 0);
+    assert.ok(run.outcomes.some((o) => o.reason === "reply_text_mismatch"));
+    const check = commits(phone.calls).find((call) => call.input.connectProbe)!;
+    assert.ok(check.input.connectProbeText, "the check carries the reply text to rehearse");
+  });
+
   it("if the reply screen will not open for the right person, nobody is followed", async () => {
     const phone = fakePhone({ probe: "composer_not_open" });
     const run = await runConnectSession(phone.step, { ...base, max: 5, live: true, maxScrolls: 0 });

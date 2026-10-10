@@ -1753,7 +1753,10 @@ async function main(): Promise<void> {
                   tracePath: join(traceDir, `${connectPlan.hourKey}-${connectAccount.handle.replace(/[^A-Za-z0-9_]/g, "")}.jsonl`),
                 });
                 console.log(JSON.stringify({ at: nowIso, connect: { persona: connectAccount.handle, asked: connectPlan.max, connected: batch.connected, stoppedBecause: batch.stoppedBecause ?? batch.reason } }));
-                const pushback = ["follow_not_confirmed", "reply_failed", "reply_text_mismatch", "unfollow_sheet_stuck"];
+                // X refusing, or a reply that would not post. A reply the routine
+                // could not read back is its own failure, not X's: it skips that
+                // person but does not stop the account for the day.
+                const pushback = ["follow_not_confirmed", "reply_failed", "unfollow_sheet_stuck"];
                 if (batch.stoppedBecause && pushback.includes(batch.stoppedBecause)) {
                   schedule.stoppedDay = { ...schedule.stoppedDay, [connectAccount.id]: localDayNow };
                   schedule.stoppedReason = { ...schedule.stoppedReason, [connectAccount.id]: batch.stoppedBecause };

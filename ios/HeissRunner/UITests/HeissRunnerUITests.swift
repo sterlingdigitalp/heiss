@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.09.3"
+private let heissRunnerBuild = "heiss-runner-2026.10.10.1"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1693,29 +1693,16 @@ final class HeissRunnerUITests: XCTestCase {
                 let field = composer.first(where: {
                     $0.topCandidates(1).first?.string.range(of: "Post your reply", options: .caseInsensitive) != nil
                 })
-                if command["connectProbe"] as? Bool == true {
-                    // A check before following: is this the reply screen for the
-                    // right person? Then leave it, having typed nothing.
-                    let ok = !replyingTo.isEmpty && field != nil && (expected.isEmpty || replyingTo.contains(String(expected.prefix(10))))
-                    report["probe"] = ok ? "ok" : (replyingTo.isEmpty || field == nil ? "composer_not_open" : "composer_for_someone_else")
-                    if !replyingTo.isEmpty {
-                        _ = try tapTextUsingOCR(surface: window, expected: "Cancel", minimumScreenY: 0.03, maximumScreenY: 0.16)
-                        Thread.sleep(forTimeInterval: 1.0)
-                    }
-                } else if replyingTo.isEmpty || field == nil || (!expected.isEmpty && !replyingTo.contains(String(expected.prefix(10)))) {
-                    report["reply"] = replyingTo.isEmpty || field == nil ? "composer_not_open" : "composer_for_someone_else"
-                    if !replyingTo.isEmpty {
-                        _ = try tapTextUsingOCR(surface: window, expected: "Cancel", minimumScreenY: 0.03, maximumScreenY: 0.16)
-                        Thread.sleep(forTimeInterval: 1.0)
-                    }
-                } else {
+                // Type into the box and read it back. Returns whether the box holds
+                // exactly `text` (allowing a letter or two of misreading).
+                func typeAndVerify(_ text: String) throws -> (ok: Bool, boxText: String, lines: [[String: Any]]) {
                     // Type into the focused reply box. Never the clipboard: it is
                     // shared with the operator's other devices, and a paste once put
                     // their private dictation into the box (2026-10-08 rehearsal).
-                    app.typeText(reply)
+                    app.typeText(text)
                     Thread.sleep(forTimeInterval: 1.2)
                     let typedLines = try screenLinesUsingOCR()
-                    report["afterPaste"] = typedLines
+
                     // Post only if the box holds exactly the intended reply.
                     func letters(_ value: String) -> String {
                         String(value.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) && $0.isASCII })
@@ -1724,7 +1711,10 @@ final class HeissRunnerUITests: XCTestCase {
                         let line = (($0["t"] as? String) ?? "").trimmingCharacters(in: .whitespaces).lowercased()
                         return line.hasPrefix("replying to") && line.contains("@")
                     })
-                        .flatMap { $0["y"] as? Double } ?? 0
+                        .flatMap { $0["y"] as? Double }
+                    // No "Replying to" line on screen (the composer scrolled): there is
+                    // nothing to anchor the box to, so the text cannot be verified.
+                    guard let anchorY else { return (false, "", typedLines) }
                     // Read in reading order: by row, then left to right. An emoji
                     // mid-line splits a row into pieces that sit a hair apart in
                     // height; sorting by height alone read "followed you 👋🏻, let's
@@ -1734,13 +1724,16 @@ final class HeissRunnerUITests: XCTestCase {
                         // quoted post pushes that line (it was at 0.54 once, below
                         // the old fixed 0.50 cut-off, and the text went unread).
                         .filter { (($0["y"] as? Double) ?? 0) > anchorY + 0.01 && (($0["y"] as? Double) ?? 1) < anchorY + 0.22 }
+                        // Only the text column: the toolbar under the box ("GIF" and
+                        // the icons) once read as part of a correct reply.
+                        .filter { (($0["x"] as? Double) ?? 1) < 0.25 }
                         .sorted { a, b in
                             let ay = (a["y"] as? Double) ?? 0, by = (b["y"] as? Double) ?? 0
                             if abs(ay - by) > 0.015 { return ay < by }
                             return ((a["x"] as? Double) ?? 0) < ((b["x"] as? Double) ?? 0)
                         }
                         .map { letters(($0["t"] as? String) ?? "") }.joined()
-                    let wanted = letters(reply)
+                    let wanted = letters(text)
                     // OCR misreads a letter or two ("Efrain" as "Etrain"); wrong
                     // content is nowhere near that close.
                     func distance(_ a: String, _ b: String) -> Int {
@@ -1759,9 +1752,47 @@ final class HeissRunnerUITests: XCTestCase {
                         }
                         return row[y.count]
                     }
-                    let pasted = wanted.count >= 8 && distance(boxText, wanted) <= 2
+                    return (wanted.count >= 8 && distance(boxText, wanted) <= 2, boxText, typedLines)
+                }
+                func discardDraft() throws {
+                    _ = try tapTextUsingOCR(surface: window, expected: "Cancel", minimumScreenY: 0.03, maximumScreenY: 0.16)
+                    Thread.sleep(forTimeInterval: 1.0)
+                    for label in ["Delete", "Discard"] {
+                        if try tapTextUsingOCR(surface: window, expected: label, minimumScreenY: 0.45, maximumScreenY: 1.0) { break }
+                    }
+                    Thread.sleep(forTimeInterval: 1.0)
+                }
+                if command["connectProbe"] as? Bool == true {
+                    // A check before following: is this the reply screen for the
+                    // right person? Then leave it, having typed nothing.
+                    let ok = !replyingTo.isEmpty && field != nil && (expected.isEmpty || replyingTo.contains(String(expected.prefix(10))))
+                    report["probe"] = ok ? "ok" : (replyingTo.isEmpty || field == nil ? "composer_not_open" : "composer_for_someone_else")
+                    // Before following, also prove the reply can be typed AND read
+                    // back on this person's reply screen; then throw it away. A check
+                    // that failed only after the follow left people followed with no
+                    // reply (2026-10-09/10).
+                    if ok, let text = command["connectProbeText"] as? String, !text.isEmpty {
+                        let typed = try typeAndVerify(text)
+                        report["probeText"] = typed.ok ? "ok" : "reply_text_mismatch"
+                        report["probeBox"] = typed.boxText
+                        if !typed.ok { report["probe"] = "reply_text_mismatch" }
+                        try discardDraft()
+                    } else if !replyingTo.isEmpty {
+                        _ = try tapTextUsingOCR(surface: window, expected: "Cancel", minimumScreenY: 0.03, maximumScreenY: 0.16)
+                        Thread.sleep(forTimeInterval: 1.0)
+                    }
+                } else if replyingTo.isEmpty || field == nil || (!expected.isEmpty && !replyingTo.contains(String(expected.prefix(10)))) {
+                    report["reply"] = replyingTo.isEmpty || field == nil ? "composer_not_open" : "composer_for_someone_else"
+                    if !replyingTo.isEmpty {
+                        _ = try tapTextUsingOCR(surface: window, expected: "Cancel", minimumScreenY: 0.03, maximumScreenY: 0.16)
+                        Thread.sleep(forTimeInterval: 1.0)
+                    }
+                } else {
+                    let typed = try typeAndVerify(reply)
+                    let pasted = typed.ok
+                    report["afterPaste"] = typed.lines
                     report["pasted"] = pasted
-                    report["boxText"] = boxText
+                    report["boxText"] = typed.boxText
                     if rehearse || !pasted {
                         // Leave without posting: Cancel, then confirm discarding the draft.
                         _ = try tapTextUsingOCR(surface: window, expected: "Cancel", minimumScreenY: 0.03, maximumScreenY: 0.16)
