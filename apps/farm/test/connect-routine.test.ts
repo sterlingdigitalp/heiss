@@ -64,7 +64,7 @@ function fakePhone(opts: {
   return { step, calls, followed };
 }
 
-const base = { ownedHandles: ["@manxlab"], alreadyConnected: [] as string[], random: () => 0.1 };
+const base = { ownedHandles: ["@manxlab"], alreadyConnected: [] as string[], random: () => 0.1, wait: async () => {} };
 const commits = (calls: Call[]) => calls.filter((call) => call.action === "x:connect_commit");
 
 describe("#connect session", () => {
@@ -188,6 +188,21 @@ describe("#connect session", () => {
     };
     const run = await runConnectSession(step, { ...base, max: 5, live: false, maxScrolls: 0 });
     assert.equal(run.outcomes.filter((o) => o.result === "rehearsed" && /maya/i.test(o.handle)).length, 1);
+  });
+
+  it("waits out a banner over the tab strip instead of giving up on the results", async () => {
+    const phone = fakePhone();
+    const banner = [L("Max followed you back!", 0.2, 0.08), ...results.filter((line) => line.t !== "Latest")];
+    let commits = 0;
+    const step = async (action: string, input: Record<string, unknown>) => {
+      const out = await phone.step(action, input);
+      // The first reply ends on the results with a banner hiding "Latest".
+      if (action === "x:connect_commit" && input.connectReply && commits++ === 0) return { ...out, lines: banner };
+      return out;
+    };
+    const run = await runConnectSession(step, { ...base, max: 2, live: true });
+    assert.equal(run.outcomes.filter((o) => o.result === "connected").length, 2);
+    assert.equal(run.stoppedBecause, "reached_max");
   });
 
   it("stops rather than act when it is no longer on the search results", async () => {

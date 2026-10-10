@@ -32,6 +32,8 @@ export interface ConnectSessionOptions {
   query?: string;
   /** Wait between people, in ms; injected so tests do not sleep. */
   pause?: (index: number) => Promise<void>;
+  /** Short waits (a banner clearing); injected so tests do not sleep. */
+  wait?: (ms: number) => Promise<void>;
   random?: () => number;
   /** Called the moment a follow is confirmed, so it is recorded even if a later step fails. */
   onFollowed?: (handle: string) => void;
@@ -73,6 +75,13 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
   while (acted < opts.max) {
     // Never act on anything but the search results. A stray tap once left
     // them for the home feed, which then read as "results" (2026-10-08).
+    // X's banners ("… followed you back!") drop over the tab strip for a few
+    // seconds after a reply and hide it. Look again before deciding the
+    // results are gone (2026-10-09: that ended two batches early).
+    for (let look = 0; look < 2 && !isConnectResultsPage(page); look++) {
+      await (opts.wait ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms))))(4_000);
+      page = linesOf((await step("x:connect_page", {})).lines);
+    }
     if (!isConnectResultsPage(page)) return { outcomes, stoppedBecause: "left_results_page" };
     const next = parseConnectResults([page])
       .filter((candidate) => !handled.has(candidate.handle.toLowerCase())
