@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.10.1"
+private let heissRunnerBuild = "heiss-runner-2026.10.10.2"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1724,9 +1724,16 @@ final class HeissRunnerUITests: XCTestCase {
                         // quoted post pushes that line (it was at 0.54 once, below
                         // the old fixed 0.50 cut-off, and the text went unread).
                         .filter { (($0["y"] as? Double) ?? 0) > anchorY + 0.01 && (($0["y"] as? Double) ?? 1) < anchorY + 0.22 }
-                        // Only the text column: the toolbar under the box ("GIF" and
-                        // the icons) once read as part of a correct reply.
-                        .filter { (($0["x"] as? Double) ?? 1) < 0.25 }
+                        // Only rows that start in the text column: the toolbar under
+                        // the box ("GIF" and the icons) once read as part of a correct
+                        // reply. Keep whole rows, though — an emoji splits a line, and
+                        // its second piece starts further right.
+                        .filter { line in
+                            let y = (line["y"] as? Double) ?? 0
+                            return typedLines.contains { other in
+                                abs(((other["y"] as? Double) ?? 9) - y) < 0.015 && ((other["x"] as? Double) ?? 1) < 0.25
+                            }
+                        }
                         .sorted { a, b in
                             let ay = (a["y"] as? Double) ?? 0, by = (b["y"] as? Double) ?? 0
                             if abs(ay - by) > 0.015 { return ay < by }

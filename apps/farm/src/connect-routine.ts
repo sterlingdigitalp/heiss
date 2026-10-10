@@ -192,16 +192,10 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
 
     acted += 1;
     if (!opts.live) {
-      const typed = await step("x:connect_commit", {
-        connectRehearse: true, connectReplyX: first.found.x, connectReplyY: first.found.y,
-        connectReply: reply.text, connectExpectHandle: handle,
-      });
-      page = linesOf(typed.lines);
-      if (typed.reply === "reply_text_mismatch") {
-        outcomes.push({ handle, result: "skipped", reason: "reply_text_mismatch", reply: reply.text });
-        return { outcomes, stoppedBecause: "reply_text_mismatch" };
-      }
-      outcomes.push({ handle, result: "rehearsed", reply: reply.text, reason: typed.pasted === true ? "typed_and_verified" : String(typed.reply ?? "not_typed") });
+      // The check above already typed the reply, read it back and discarded it:
+      // that is the whole rehearsal. Leave without following.
+      await leave();
+      outcomes.push({ handle, result: "rehearsed", reply: reply.text, reason: "typed_and_verified" });
       continue;
     }
 
