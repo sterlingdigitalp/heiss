@@ -202,6 +202,16 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
     }
 
     const followed = await step("x:connect_commit", { connectRehearse: false, connectBack: false, connectFollowX: follow.x, connectFollowY: follow.y });
+    // The button was Follow-sized before the tap and is Message-sized after:
+    // the follow landed, whatever else is on screen. The runner's look for an
+    // "Unfollow" sheet once found the word inside a post's analytics
+    // screenshot ("Follows over time … Unfollows") and stopped the day
+    // (2026-10-10). A real Unfollow sheet only appears for someone already
+    // followed, and the size check ruled that out before the tap.
+    if (followed.follow === "unfollow_sheet_stuck" && connectFollowConfirmed(linesOf(followed.afterFollow))
+      && isConnectPostPage(linesOf(followed.lines))) {
+      followed.follow = "tapped";
+    }
     if (followed.follow !== "tapped" || !connectFollowConfirmed(linesOf(followed.afterFollow))) {
       // The button was not Follow after all, or X did not take it: the first
       // sign of a limit. Nothing was liked or said. Stop.

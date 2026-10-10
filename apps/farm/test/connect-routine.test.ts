@@ -151,6 +151,19 @@ describe("#connect session", () => {
     assert.equal(second.calls.filter((call) => call.action === "x:connect_open").length, 1, "only @samroe's post was opened");
   });
 
+  it("a follow that landed is not undone by the word 'Unfollow' inside a post's picture", async () => {
+    const phone = fakePhone();
+    const step = async (action: string, input: Record<string, unknown>) => {
+      const out = await phone.step(action, input);
+      // The follow took (button now Message-sized), but the runner saw "Unfollows"
+      // in an analytics screenshot and reported the sheet stuck.
+      return input.connectFollowX !== undefined ? { ...out, follow: "unfollow_sheet_stuck" } : out;
+    };
+    const run = await runConnectSession(step, { ...base, max: 1, live: true });
+    assert.equal(run.outcomes.find((o) => o.handle === "@maya_builds")?.result, "connected");
+    assert.ok(commits(phone.calls).some((call) => call.input.connectReply), "it went on to like and reply");
+  });
+
   it("stops when a follow does not take, before liking or replying", async () => {
     const phone = fakePhone({ followTakes: false });
     const remembered: string[] = [];
