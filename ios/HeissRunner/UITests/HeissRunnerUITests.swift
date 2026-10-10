@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.09.2"
+private let heissRunnerBuild = "heiss-runner-2026.10.09.3"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -1730,7 +1730,10 @@ final class HeissRunnerUITests: XCTestCase {
                     // height; sorting by height alone read "followed you 👋🏻, let's
                     // connect" backwards and stopped a correct reply (2026-10-08).
                     let boxText = typedLines
-                        .filter { (($0["y"] as? Double) ?? 0) > anchorY + 0.01 && (($0["y"] as? Double) ?? 1) < 0.50 }
+                        // The box sits just under "Replying to …", wherever a long
+                        // quoted post pushes that line (it was at 0.54 once, below
+                        // the old fixed 0.50 cut-off, and the text went unread).
+                        .filter { (($0["y"] as? Double) ?? 0) > anchorY + 0.01 && (($0["y"] as? Double) ?? 1) < anchorY + 0.22 }
                         .sorted { a, b in
                             let ay = (a["y"] as? Double) ?? 0, by = (b["y"] as? Double) ?? 0
                             if abs(ay - by) > 0.015 { return ay < by }
