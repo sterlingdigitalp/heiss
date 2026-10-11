@@ -33,7 +33,7 @@ private enum PlatformScreenState: String {
 }
 
 private let heissRunnerProtocolVersion = 2
-private let heissRunnerBuild = "heiss-runner-2026.10.10.3"
+private let heissRunnerBuild = "heiss-runner-2026.10.11.1"
 
 /// Long-running XCTest host that performs real gestures in third-party apps.
 /// The Mac writes JSON commands into this test runner's Documents/inbox.
@@ -133,7 +133,14 @@ final class HeissRunnerUITests: XCTestCase {
                     self.handle(file, outbox: outbox)
                 }
             }
-            if Date() >= deadline && pending.isEmpty { break }
+            // Recycle only in the daytime. A fresh session has to re-enable
+            // automation, and overnight that stalled for 1h45m (06:02 on
+            // 2026-10-11, 20 failed starts) until someone touched the phone. In
+            // the day the operator is about if it asks for a thumbprint.
+            if Date() >= deadline && pending.isEmpty {
+                let hour = Calendar.current.component(.hour, from: Date())
+                if hour >= 10 && hour < 20 { break }
+            }
             RunLoop.current.run(until: Date().addingTimeInterval(0.25))
         }
     }
