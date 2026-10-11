@@ -62,10 +62,19 @@ export const CONNECT_LEAN_FRESH60 = 7;
 export function connectConditions(latest: ConnectSupplySample | undefined, nowIso: string): {
   busy: boolean; lean: boolean; maxAgeMinutes: number;
 } {
-  // Only a recent reading says anything about now.
-  const fresh = latest && Date.parse(nowIso) - Date.parse(latest.at) <= 45 * 60_000 && latest.reachedMinutes >= 60;
-  const busy = Boolean(fresh && latest!.fresh60 >= CONNECT_BUSY_FRESH60);
-  const lean = Boolean(fresh && latest!.fresh60 < CONNECT_LEAN_FRESH60);
+  // Only a recent reading says anything about now. A busy hour fills the
+  // scan's pages faster, so the scan reaches back LESS far — requiring a full
+  // hour of reach meant a busy hour could never be recognised (2026-10-10
+  // night: 30–50 minute reaches, every batch "normal"). Scale whatever window
+  // it covered to an hour, as the hourly summary does.
+  const recent = latest && Date.parse(nowIso) - Date.parse(latest.at) <= 45 * 60_000;
+  const rate = !recent ? undefined
+    : latest!.reachedMinutes >= 60 ? latest!.fresh60
+    : latest!.reachedMinutes >= 30 ? latest!.fresh30 * 2
+    : latest!.reachedMinutes >= 15 ? latest!.fresh15 * 4
+    : undefined;
+  const busy = rate !== undefined && rate >= CONNECT_BUSY_FRESH60;
+  const lean = rate !== undefined && rate < CONNECT_LEAN_FRESH60;
   return { busy, lean, maxAgeMinutes: lean ? CONNECT_LEAN_MAX_AGE_MINUTES : CONNECT_MAX_AGE_MINUTES };
 }
 

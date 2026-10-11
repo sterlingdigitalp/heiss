@@ -213,6 +213,9 @@ describe("#connect: fishing to the conditions", () => {
     assert.deepEqual(connectConditions(sample(5), now), { busy: false, lean: true, maxAgeMinutes: 240 });
     assert.deepEqual(connectConditions(sample(8), now), { busy: false, lean: false, maxAgeMinutes: 180 });
     assert.equal(connectConditions(sample(12, "2026-10-10T15:00:00.000Z"), now).busy, false, "an hour-old reading says nothing");
+    // A busy hour fills the pages fast: 6 posts in the 39 minutes the scan reached (real night sample).
+    const dense = { at: "2026-10-10T16:00:00.000Z", fresh15: 3, fresh30: 6, fresh60: 11, read: 11, reachedMinutes: 39 };
+    assert.equal(connectConditions(dense, now).busy, true);
   });
   it("takes twice as many in a busy hour, still within the cap", () => {
     const one = { enabled: true, accounts: [{ accountId: "s", perHour: 3, dailyCap: 120 }] };
