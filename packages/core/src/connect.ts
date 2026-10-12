@@ -441,10 +441,29 @@ export function connectStartMinute(accountId: string, hourKey: string): number {
 }
 
 /**
+ * Local hours with the most fresh #connect posts (supply log, 2026-10-08..12):
+ * midnight–6 AM and 11 AM–3 PM. These get a second batch in the half hour,
+ * since a batch only catches what is on the results page when it runs.
+ */
+export const CONNECT_DOUBLE_HOURS = [0, 1, 2, 3, 4, 5, 11, 12, 13, 14];
+/** In a double hour, the first batch starts by :20 and the second between :30 and :50. */
+export const CONNECT_DOUBLE_LATEST_START_MINUTE = 20;
+
+/** The batch slots of an hour: one, or two in the busiest hours. */
+export function connectSlots(accountId: string, hourKey: string, hour: number): { key: string; startMinute: number }[] {
+  if (!CONNECT_DOUBLE_HOURS.includes(hour)) return [{ key: hourKey, startMinute: connectStartMinute(accountId, hourKey) }];
+  const spread = (key: string) => stableNumber(`${accountId}:${key}`) % (CONNECT_DOUBLE_LATEST_START_MINUTE + 1);
+  return [
+    { key: hourKey, startMinute: spread(hourKey) },
+    { key: `${hourKey}b`, startMinute: 30 + spread(`${hourKey}b`) },
+  ];
+}
+
+/**
  * Which account, if any, should run a batch now, and how many people.
  *
- * Each account gets one batch per local hour, starting at that hour's own
- * minute. `doneToday` is how many it has connected with so far today. Behind
+ * Each account gets one batch per local hour (two in `CONNECT_DOUBLE_HOURS`),
+ * starting at that slot's own minute. `doneToday` is how many it has connected with so far today. Behind
  * pace (a lean hour earlier) it takes one more than `perHour`.
  */
 export function planConnectBatch(
@@ -457,8 +476,9 @@ export function planConnectBatch(
   const nowMinutes = now.hour * 60 + now.minute;
   for (const account of schedule.accounts) {
     if (schedule.stoppedDay?.[account.accountId] === now.day) continue;
-    if (schedule.lastBatchHour?.[account.accountId] === hourKey) continue;
-    if (now.minute < connectStartMinute(account.accountId, hourKey)) continue;
+    // The latest slot whose start has passed; each slot runs once.
+    const slot = connectSlots(account.accountId, hourKey, now.hour).filter((s) => now.minute >= s.startMinute).pop();
+    if (!slot || schedule.lastBatchHour?.[account.accountId] === slot.key) continue;
     const nearOwnPost = (account.avoidTimes ?? []).some((time) => {
       const [hour, minute] = time.split(":").map(Number);
       const gap = Math.abs(nowMinutes - (hour! * 60 + minute!));
@@ -475,7 +495,7 @@ export function planConnectBatch(
     const base = opts.busy ? Math.max(account.busyPerHour ?? account.perHour * 2, account.perHour) : account.perHour;
     const max = Math.min(base + (behind ? 1 : 0), account.dailyCap - done);
     if (max <= 0) continue;
-    return { accountId: account.accountId, max, hourKey };
+    return { accountId: account.accountId, max, hourKey: slot.key };
   }
   return undefined;
 }

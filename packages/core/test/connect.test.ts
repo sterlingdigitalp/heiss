@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   connectEligibility, connectFirstName, connectFollowConfirmed, connectReply, connectTargetKey,
-  connectStartMinute, connectSupplyByHour, connectSupplySample, parseConnectPostPage, parseConnectResults,
+  connectSlots, connectStartMinute, connectSupplyByHour, connectSupplySample, parseConnectPostPage, parseConnectResults,
   planConnectBatch, connectConditions, type ConnectSchedule,
   CONNECT_REPLY_VARIANTS, type ScreenLine,
 } from "../src/index.js";
@@ -163,12 +163,26 @@ describe("#connect: the hourly schedule", () => {
   const none = () => 0;
 
   it("starts each account at its own minute, different from hour to hour", () => {
-    const minutes = ["2026-10-09T13", "2026-10-09T14", "2026-10-09T15", "2026-10-09T16"].map((hour) => connectStartMinute("manx", hour));
+    const minutes = ["2026-10-09T16", "2026-10-09T17", "2026-10-09T18", "2026-10-09T19"].map((hour) => connectStartMinute("manx", hour));
     assert.ok(new Set(minutes).size >= 3, `varies: ${minutes}`);
     assert.ok(minutes.every((minute) => minute >= 0 && minute <= 40));
-    const start = connectStartMinute("manx", "2026-10-09T13");
-    const before = `2026-10-09T13:${String(Math.max(start - 1, 0)).padStart(2, "0")}:00.000-05:00`;
+    const start = connectStartMinute("manx", "2026-10-09T16");
+    const before = `2026-10-09T16:${String(Math.max(start - 1, 0)).padStart(2, "0")}:00.000-05:00`;
     if (start > 0) assert.equal(planConnectBatch({ ...schedule(), accounts: [schedule().accounts[0]!] }, { nowIso: before, timeZone: tz, doneToday: none }), undefined);
+  });
+
+  it("runs a second batch in the half hour of the busiest hours", () => {
+    const one = { ...schedule(), accounts: [schedule().accounts[1]!] };
+    const [first, second] = connectSlots("sterling", "2026-10-09T03", 3);
+    assert.ok(first!.startMinute <= 20 && second!.startMinute >= 30 && second!.startMinute <= 50);
+    const plan = planConnectBatch(one, { nowIso: `2026-10-09T03:${first!.startMinute + 1 < 10 ? "0" : ""}${first!.startMinute + 1}:00.000-05:00`, timeZone: tz, doneToday: none });
+    assert.equal(plan?.hourKey, "2026-10-09T03");
+    one.lastBatchHour = { sterling: "2026-10-09T03" };
+    assert.equal(planConnectBatch(one, { nowIso: at("03:29").replace("10-09T", "10-09T"), timeZone: tz, doneToday: none }), undefined, "first slot done");
+    assert.equal(planConnectBatch(one, { nowIso: `2026-10-09T03:${second!.startMinute}:00.000-05:00`, timeZone: tz, doneToday: none })?.hourKey, "2026-10-09T03b");
+    one.lastBatchHour = { sterling: "2026-10-09T03b" };
+    assert.equal(planConnectBatch(one, { nowIso: at("03:59"), timeZone: tz, doneToday: none }), undefined, "both slots done");
+    assert.equal(connectSlots("sterling", "2026-10-09T19", 19).length, 1, "evenings stay at one");
   });
 
   it("runs the larger account first, one batch per account per hour", () => {
