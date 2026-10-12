@@ -4,7 +4,7 @@
  */
 import {
   connectEligibility, connectFollowConfirmed, connectFollowingKey, connectPostTapPoint, connectReply,
-  connectTargetKey, isConnectPostPage, isConnectResultsPage, parseConnectPostPage,
+  connectTargetKey, isConnectPostPage, isConnectResultsPage, isStrandedOnConnectPost, parseConnectPostPage,
   parseConnectResults, sameConnectHandle, type ScreenLine,
 } from "@heiss/core";
 
@@ -81,6 +81,15 @@ export async function runConnectSession(step: ConnectStep, opts: ConnectSessionO
     // seconds after a reply and hide it. Look again before deciding the
     // results are gone (2026-10-09: that ended two batches early).
     for (let look = 0; look < 2 && !isConnectResultsPage(page); look++) {
+      if (isStrandedOnConnectPost(page)) {
+        // The back missed and the post is scrolled past its title, so the
+        // runner would not swipe. Scroll up until the title shows, then back.
+        for (let up = 0; up < 3 && !isConnectPostPage(page); up++) {
+          page = linesOf((await step("x:connect_page", { connectScrollBack: true })).lines);
+        }
+        page = linesOf((await step("x:connect_commit", { connectRehearse: true })).lines);
+        if (isConnectResultsPage(page)) break;
+      }
       await (opts.wait ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms))))(4_000);
       page = linesOf((await step("x:connect_page", {})).lines);
     }

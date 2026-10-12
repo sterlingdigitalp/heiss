@@ -81,6 +81,23 @@ describe("#connect session", () => {
     : call.input.connectProbe ? "check" : call.input.connectReply ? "reply"
     : call.input.connectFollowX !== undefined ? "follow" : call.action.replace("x:connect_", "");
 
+  it("a back that left the post scrolled past its title is retried, not read as leaving the results", async () => {
+    const phone = fakePhone();
+    const stranded = [L("Reply sent", 0.3, 0.9), L("Post your reply", 0.2, 0.95)];
+    let stuck = false;
+    const step = async (action: string, input: Record<string, unknown>) => {
+      if (stuck && action === "x:connect_page") { phone.calls.push({ action, input }); return { lines: postPage("@maya_builds", true) }; }
+      if (stuck && action === "x:connect_commit") { phone.calls.push({ action, input }); stuck = false; return { lines: results }; }
+      const out = await phone.step(action, input);
+      if (input.connectReply && input.connectRehearse === false) { stuck = true; return { ...out, lines: stranded }; }
+      return out;
+    };
+    const run = await runConnectSession(step, { ...base, max: 2, live: true });
+    assert.equal(run.outcomes.filter((o) => o.result === "connected").length, 2);
+    assert.equal(run.stoppedBecause, "reached_max");
+    assert.ok(phone.calls.some((call) => call.input.connectScrollBack === true));
+  });
+
   it("live: checks the reply screen, then follows, then likes and replies", async () => {
     const phone = fakePhone();
     const remembered: string[] = [];

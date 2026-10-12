@@ -323,6 +323,16 @@ export function isConnectPostPage(lines: ScreenLine[]): boolean {
     && parseConnectPostPage(lines).handle !== undefined;
 }
 
+/**
+ * Still somewhere on a post's page, even scrolled down past its "Post" title:
+ * X hides the header on scroll, but the "Post your reply" bar stays. A back
+ * that missed left batches stranded here and read as "left the results"
+ * (2026-10-11/12: nine batches ended early this way).
+ */
+export function isStrandedOnConnectPost(lines: ScreenLine[]): boolean {
+  return isConnectPostPage(lines) || lines.some((line) => /^post your reply$/i.test(line.t.trim()));
+}
+
 /** Same author? OCR drops underscores and X cuts handles short, so compare loosely. */
 export function sameConnectHandle(a: string, b: string): boolean {
   const clean = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
