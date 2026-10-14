@@ -1762,7 +1762,18 @@ async function main(): Promise<void> {
                 // could not read back is its own failure, not X's: it skips that
                 // person but does not stop the account for the day.
                 const pushback = ["follow_not_confirmed", "reply_failed", "unfollow_sheet_stuck"];
-                if (batch.stoppedBecause && pushback.includes(batch.stoppedBecause)) {
+                // The first of the day pauses the account for 3 hours: most were
+                // the phone's own mis-taps (a Bookmark tap, a replier's Follow),
+                // and stopping the whole day cost all of 2026-10-13. A second
+                // one the same day stops it until tomorrow.
+                const firstToday = schedule.pushbackDay?.[connectAccount.id] !== localDayNow;
+                if (batch.stoppedBecause && pushback.includes(batch.stoppedBecause) && firstToday) {
+                  schedule.pushbackDay = { ...schedule.pushbackDay, [connectAccount.id]: localDayNow };
+                  schedule.pausedUntil = { ...schedule.pausedUntil, [connectAccount.id]: new Date(Date.parse(nowIso) + 3 * 3_600_000).toISOString() };
+                  store.pushActivity({ kind: "connect_stopped", accountId: connectAccount.id, deviceId: connectDevice.id,
+                    message: `${connectAccount.handle}: #connect paused 3 hours — ${batch.stoppedBecause}` });
+                  store.save();
+                } else if (batch.stoppedBecause && pushback.includes(batch.stoppedBecause)) {
                   schedule.stoppedDay = { ...schedule.stoppedDay, [connectAccount.id]: localDayNow };
                   schedule.stoppedReason = { ...schedule.stoppedReason, [connectAccount.id]: batch.stoppedBecause };
                   store.pushActivity({ kind: "connect_stopped", accountId: connectAccount.id, deviceId: connectDevice.id,

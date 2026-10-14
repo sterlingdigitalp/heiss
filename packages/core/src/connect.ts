@@ -417,6 +417,10 @@ export interface ConnectSchedule {
   /** accountId → local day it was stopped on, after X pushed back. */
   stoppedDay?: Record<string, string>;
   stoppedReason?: Record<string, string>;
+  /** accountId → local day of its first pushback; a second that day stops it. */
+  pushbackDay?: Record<string, string>;
+  /** accountId → ISO time before which it does not connect (after a first pushback). */
+  pausedUntil?: Record<string, string>;
 }
 
 /** Minutes either side of an account's own post during which it does not connect. */
@@ -476,6 +480,8 @@ export function planConnectBatch(
   const nowMinutes = now.hour * 60 + now.minute;
   for (const account of schedule.accounts) {
     if (schedule.stoppedDay?.[account.accountId] === now.day) continue;
+    const paused = schedule.pausedUntil?.[account.accountId];
+    if (paused && Date.parse(paused) > Date.parse(opts.nowIso)) continue;
     // The latest slot whose start has passed; each slot runs once.
     const slot = connectSlots(account.accountId, hourKey, now.hour).filter((s) => now.minute >= s.startMinute).pop();
     if (!slot || schedule.lastBatchHour?.[account.accountId] === slot.key) continue;

@@ -171,6 +171,12 @@ describe("#connect: the hourly schedule", () => {
     if (start > 0) assert.equal(planConnectBatch({ ...schedule(), accounts: [schedule().accounts[0]!] }, { nowIso: before, timeZone: tz, doneToday: none }), undefined);
   });
 
+  it("waits out a pause after a pushback", () => {
+    const one = { ...schedule(), accounts: [schedule().accounts[1]!], pausedUntil: { sterling: "2026-10-09T19:00:00.000-05:00" } };
+    assert.equal(planConnectBatch(one, { nowIso: at("18:59"), timeZone: tz, doneToday: none }), undefined);
+    assert.equal(planConnectBatch(one, { nowIso: at("19:59"), timeZone: tz, doneToday: none })?.accountId, "sterling");
+  });
+
   it("runs a second batch in the half hour of the busiest hours", () => {
     const one = { ...schedule(), accounts: [schedule().accounts[1]!] };
     const [first, second] = connectSlots("sterling", "2026-10-09T03", 3);
